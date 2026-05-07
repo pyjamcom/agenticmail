@@ -53,13 +53,34 @@ export function resolveInboxInjectionConfig(config: Record<string, unknown> | un
 export function sanitizeInboxPreview(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
 
-  const preview = value.replace(/\s+/g, ' ').slice(0, 200).trim();
+  // Hardening: strip angle brackets so a hostile email body can't
+  // close the surrounding <unread-emails> section + inject prompt
+  // instructions below it. Also collapses whitespace + caps length.
+  const preview = value
+    .replace(/[<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 200)
+    .trim();
   return preview || undefined;
+}
+
+/** Hardening: a hostile sender / subject can also break out of the
+ *  prompt's `<unread-emails>` envelope. Sanitise both before they
+ *  land in the formatted summary line. Limits length conservatively
+ *  so a long subject can't drown the rest of the prompt. */
+function sanitizeMetaField(value: string, maxLength: number): string {
+  return value
+    .replace(/[<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, maxLength)
+    .trim();
 }
 
 function formatSummary(summary: UnreadMailSummary): string {
   const preview = summary.preview ? `\n    ${summary.preview}` : '';
-  return `  - [${summary.tag}] UID ${summary.uid}: from ${summary.from}: "${summary.subject}"${preview}`;
+  const from = sanitizeMetaField(summary.from, 120);
+  const subject = sanitizeMetaField(summary.subject, 160);
+  return `  - [${summary.tag}] UID ${summary.uid}: from ${from}: "${subject}"${preview}`;
 }
 
 export function formatUnreadInboxContext(
