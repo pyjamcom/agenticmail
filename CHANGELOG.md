@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.56] - 2026-05-07
+
+### Added
+
+- **`classifyEmailRoute` core helper + SSE route metadata** (#14).
+  Inbound `/events` SSE messages now carry a `route` field tagging
+  the email as one of `ignore_spam`, `ignore_newsletter`,
+  `archive_automated`, `project_update`, `deal_escalation`,
+  `agent_instruction`, or `human_private`. Each classification
+  includes the suggested action (`ignore` / `archive` / `notify` /
+  `escalate` / `create_task` / `draft_reply`), confidence
+  (`low|medium|high`), human reason, and a `gateRequired` flag so
+  downstream agents know when a route needs explicit human approval
+  before acting. Pure function — attaches metadata, never auto-acts.
+- **Configurable OpenClaw inbox injection** (#13). The plugin's
+  unread-mail prompt context now has four modes:
+  `inboxInjectionMode: off | count | summary | required` (default
+  `summary`). The pre-0.5.56 hardcoded "ACTION REQUIRED, read every
+  unread email first" prompt is preserved behind explicit
+  `required` configuration; the new default surfaces sender +
+  subject + UID metadata without forcing read-first behaviour.
+  `inboxInjectionMaxItems` (1-25, default 5) and
+  `inboxInjectionIncludePreview` (boolean, default false) round
+  out the controls.
+
+### Fixed
+
+- **`mail.references` crashes when the value arrives as a string
+  instead of an array** (#11, thanks @marcelomar21). Three call
+  sites in `RelayGateway.sendViaRelay` and the gateway manager's
+  inbound + outbound paths previously called `mail.references?.join`
+  unconditionally, throwing `TypeError: mail.references?.join is
+  not a function` for every reply where the upstream caller resolved
+  a single `Message-Id` reference. Each site now guards with
+  `Array.isArray(...)` and falls through to the raw string when
+  it's already a flat header value.
+- **CLI app-password prompts echoed Google Voice credentials in
+  plaintext** (#12). The three setup paths that ask for a Gmail
+  app password now use the existing `askSecret` masked-input
+  helper, matching the rest of the CLI's secret-prompt vocabulary.
+- **`@agenticmail/mcp` `apiRequest` returned `Promise<any>`**
+  (#12). The helper is now generic (`apiRequest<T>`) and no
+  longer leaks `any` into every tool implementation that calls it.
+
+### Security
+
+- **Hardened the OpenClaw inbox-injection summary against
+  prompt-tag breakout.** The summary embeds untrusted email
+  metadata (sender, subject, optional preview) inside an
+  `<unread-emails>…</unread-emails>` block in the agent's system
+  prompt. A hostile sender could previously close the block early
+  and inject instructions below it. Sanitisation now strips `<`
+  and `>` from every untrusted field plus caps the sender address
+  (120 chars) and subject (160 chars) so a long header can't
+  drown the rest of the prompt. Hardened on top of #13.
+- **Scoped route-classifier metadata to the policy keys it
+  actually reads.** The `/events` SSE route previously passed the
+  full `agent.metadata` blob into the classifier. The classifier
+  only consults `emailRoutePolicy / routePolicy / mailboxPolicy`,
+  so we now project just those three keys. Prevents a future
+  classifier-side change from accidentally echoing founder-set
+  arbitrary metadata into the SSE event payload. Hardened on top
+  of #14.
+
+### Credits
+
+Thanks to **@marcelomar21** for the relay-references array-guard
+fix in #11, and to **@benediktkraus** for the public-quality
+tightening in #12, the configurable inbox injection in #13, and
+the inbound route classifier in #14. The detailed PR descriptions
+and verification checklists made the security review + hardening
+passes straightforward.
+
 ## [0.5.55] - 2026-05-02
 
 ### Fixed

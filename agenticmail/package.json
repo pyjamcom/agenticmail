@@ -1,6 +1,6 @@
 {
   "name": "agenticmail",
-  "version": "0.5.55",
+  "version": "0.5.56",
   "description": "Email and SMS infrastructure for AI agents — the first platform to give agents real email addresses and phone numbers",
   "type": "module",
   "main": "dist/index.js",
@@ -28,7 +28,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@agenticmail/api": "^0.5.53",
+    "@agenticmail/api": "^0.5.56",
     "@agenticmail/core": "^0.5.0",
     "json5": "^2.2.3"
   },
