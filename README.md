@@ -445,7 +445,7 @@ This is a TypeScript monorepo with 5 packages:
 
 | Package | Description | Install |
 |---------|-------------|---------|
-| [`agenticmail`](./agenticmail) | CLI, setup wizard, interactive shell. Install this to get started. | `npm i -g agenticmail` |
+| [`@agenticmail/cli`](./agenticmail) | CLI, setup wizard, interactive shell. Install this to get started. | `npm i -g @agenticmail/cli` |
 | [`@agenticmail/core`](./packages/core) | Core SDK — accounts, SMTP/IMAP, gateway, spam filter, outbound guard, storage | `npm i @agenticmail/core` |
 | [`@agenticmail/api`](./packages/api) | Express REST API server with 75+ endpoints | `npm i @agenticmail/api` |
 | [`@agenticmail/mcp`](./packages/mcp) | MCP server with 62 tools for any MCP-compatible AI client | `npm i -g @agenticmail/mcp` |
@@ -453,7 +453,7 @@ This is a TypeScript monorepo with 5 packages:
 
 **Dependency graph:**
 ```
-agenticmail (CLI) ──> @agenticmail/api ──> @agenticmail/core
+@agenticmail/cli ──────> @agenticmail/api ──> @agenticmail/core
 @agenticmail/mcp       (standalone — HTTP calls to API)
 @agenticmail/openclaw  (standalone — HTTP calls to API)
 ```
