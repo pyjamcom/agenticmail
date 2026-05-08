@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.59] - 2026-05-08
+
+### Fixed
+
+- **`agenticmail --version` launches the server instead of
+  printing the version** (#25, thanks @kn8-codes). The top-level
+  `process.argv[2]` switch in the CLI dispatcher had no case for
+  `--version` / `-v` / `version`, so the request fell through to
+  `default` (which is "no command = start the server"). Added
+  explicit cases that read the version straight out of
+  `package.json` (same source `cmdUpdate` uses for the
+  "current version" line) and exit cleanly, matching the
+  standard POSIX / npm convention.
+- **`POST /storage/tables` returns 500 with `near "now": syntax
+  error`** (#27, thanks @kn8-codes). When `timestamps` was not
+  explicitly `false`, the auto-added `created_at` / `updated_at`
+  columns passed a SQL function call (`datetime('now')` on
+  SQLite, `NOW()` on Postgres) through `col.default` as a
+  string. `buildColumnDDL` then dutifully wrapped that string
+  in single quotes, producing `DEFAULT 'datetime('now')'` — the
+  embedded apostrophe closed the literal early and the SQL
+  parser exploded. The renderer now detects SQL function
+  expressions (anything containing parentheses) and the
+  `CURRENT_TIMESTAMP` / `CURRENT_DATE` / `CURRENT_TIME` keywords
+  and emits them unquoted; literal string defaults still get
+  their apostrophes properly escaped (`replace(/'/g, "''")`) so
+  user-supplied defaults can't break out of the literal.
+- **`POST /accounts` hangs ~8s on an immediate duplicate create**
+  (#23, thanks @kn8-codes). Distinct from the orphan-recovery
+  case fixed in #17 — when both the Stalwart principal *and*
+  the SQLite agent row already exist (a true duplicate),
+  `AccountManager.create` was still calling `ensureDomain` and
+  `createPrincipal` over HTTP. Stalwart's `POST /principal`
+  doesn't reliably fail fast on a duplicate name, so the
+  request stalls long enough for client-side socket timeouts
+  (~8s) to fire before the route's `fieldAlreadyExists` 409
+  matcher ever runs. `AccountManager.create` now does a
+  synchronous SQLite check at the very top — before any
+  network I/O — and throws `Account already exists: <name>`
+  immediately, which the route's existing `'already exists'`
+  matcher converts into a sub-millisecond 409. The orphan
+  recovery path (#17) is preserved: by the time control reaches
+  the principal-cleanup block, the new fast-path has already
+  proven no SQLite row exists, so the cleanup runs
+  unconditionally with the same semantics as before.
+- **SSE `/events` does not emit inbound events for internal
+  agent-to-agent mail** (#24, thanks @kn8-codes). The lock
+  release in #16 fixed external IMAP IDLE — but Stalwart
+  0.15.5 does not reliably push an unsolicited `EXISTS`
+  notification to a logged-in IDLE'd session for messages it
+  *locally delivered* from an authenticated SMTP submission.
+  The message lands in the recipient's INBOX (so
+  `GET /mail/inbox` shows it), but the IDLE listener never
+  fires and the SSE stream emits only the initial `connected`
+  frame. We now sidestep the SMTP→IMAP-IDLE→SSE chain for
+  local recipients the same way the task RPC endpoint already
+  does — `POST /mail/send` resolves any `@localhost` recipients
+  to their agent rows and pushes a `'new'` event directly via
+  `pushEventToAgent`. External inbound continues to flow
+  through the watcher (the #16 lock-release fix is intact and
+  required for that path).
+- **Auto-start service artifacts point at the legacy unscoped
+  package after upgrading from `agenticmail` to
+  `@agenticmail/cli`** (#26, thanks @kn8-codes). The launchd
+  plist (`~/Library/LaunchAgents/com.agenticmail.server.plist`)
+  and start-server.sh still hard-coded
+  `/opt/homebrew/lib/node_modules/agenticmail/...` after the
+  rename, leaving stderr filled with `MODULE_NOT_FOUND`. Two
+  fixes: `ServiceManager.getApiEntryPath` now resolves
+  `@agenticmail/api` via `createRequire(import.meta.url)` (so
+  the path follows the actual install location regardless of
+  npm prefix or scoped/unscoped name), and `cmdStart` now
+  calls a new `ServiceManager.needsRepair()` on every launch —
+  if the installed plist references a missing path or stale
+  version, it silently regenerates both files and prints a
+  one-line notice. Fresh installs are unchanged.
+
 ## [0.5.58] - 2026-05-08
 
 ### Fixed

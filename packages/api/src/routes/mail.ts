@@ -15,6 +15,7 @@ import {
   type GatewayManager,
 } from '@agenticmail/core';
 import { requireAgent, requireMaster, requireAuth } from '../middleware/auth.js';
+import { pushEventToAgent } from './events.js';
 
 // Cache of sender/receiver per agent with TTL-based eviction
 const senderCache = new Map<string, { sender: MailSender; createdAt: number }>();
@@ -149,6 +150,89 @@ export async function closeCaches(): Promise<void> {
     try { await entry.receiver.disconnect(); } catch { /* ignore */ }
   }
   receiverCache.clear();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #24 — SSE 'new' event missing for INTERNAL agent-to-agent mail.
+//
+// Root cause: When agent A authenticates over SMTP submission and the
+// recipient is local (test-beta@localhost), Stalwart 0.15.5 routes the
+// message through its internal store path. Empirically this delivery
+// completes (the message appears in test-beta's INBOX on subsequent
+// IMAP fetches) but does NOT push an unsolicited EXISTS notification
+// to test-beta's outstanding IDLE session. As a result the InboxWatcher
+// (whose lock-release fix from #16 is correct and remains intact) never
+// sees `'exists'` and never emits `'new'` to the SSE bus.
+//
+// Why we don't paper over this with a polling fallback: the codebase
+// already has the right architectural primitive — `pushEventToAgent`
+// in routes/events.ts (used by the task RPC endpoint, see its docstring:
+// "without relying on SMTP email delivery → IMAP IDLE → SSE chain").
+// For internal mail we know the recipient agent at send time, so we can
+// short-circuit the IDLE chain and push the SSE event directly when the
+// SMTP send returns 200. External mail is unchanged and continues to
+// flow through IMAP IDLE (which #16 fixed and which works correctly
+// for inbound from outside the local Stalwart instance).
+// ─────────────────────────────────────────────────────────────────────────
+async function notifyLocalRecipientsOfNewMail(
+  accountManager: AccountManager,
+  toField: string | string[] | undefined,
+  ccField: string | string[] | undefined,
+  bccField: string | string[] | undefined,
+  fromAgent: Agent,
+  subject: string,
+  messageId: string | undefined,
+): Promise<void> {
+  const collected: string[] = [];
+  const push = (v: string | string[] | undefined): void => {
+    if (!v) return;
+    if (Array.isArray(v)) collected.push(...v);
+    else collected.push(v);
+  };
+  push(toField); push(ccField); push(bccField);
+
+  // Extract bare addresses from "Name <addr@host>" or plain "addr@host"
+  const addrRe = /<([^>]+)>|([^\s,;<>]+@[^\s,;<>]+)/g;
+  const addresses = new Set<string>();
+  for (const entry of collected) {
+    let match: RegExpExecArray | null;
+    addrRe.lastIndex = 0;
+    while ((match = addrRe.exec(entry)) !== null) {
+      const a = (match[1] || match[2] || '').trim().toLowerCase();
+      if (a) addresses.add(a);
+    }
+  }
+
+  const notified = new Set<string>();
+  for (const addr of addresses) {
+    const at = addr.indexOf('@');
+    if (at < 0) continue;
+    const localPart = addr.slice(0, at);
+    const domain = addr.slice(at + 1);
+    // Only fire for local recipients (Stalwart's default domain is localhost).
+    if (domain !== 'localhost') continue;
+    // Don't notify the sender of their own send.
+    if (addr === fromAgent.email.toLowerCase()) continue;
+
+    let recipient: Agent | null = null;
+    try {
+      recipient = await accountManager.getByName(localPart);
+    } catch { /* lookup is best-effort */ }
+    if (!recipient || notified.has(recipient.id)) continue;
+    notified.add(recipient.id);
+
+    pushEventToAgent(recipient.id, {
+      type: 'new',
+      // uid is unknown without an IMAP fetch; use 0 as a sentinel —
+      // this matches the watcher's autoFetch=false path. SSE consumers
+      // that want full message detail can call /mail/inbox.
+      uid: 0,
+      internal: true,
+      from: { name: fromAgent.name, address: fromAgent.email },
+      subject,
+      messageId,
+    });
+  }
 }
 
 /** Append a sent message to the agent's Sent folder (fire-and-forget) */
@@ -319,6 +403,18 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
 
       // Save copy to Sent folder (best-effort)
       saveSentCopy(agent.stalwartPrincipal, password, config, result.raw);
+
+      // Issue #24 — push SSE 'new' event directly to local recipients.
+      // Stalwart 0.15.5 doesn't reliably push EXISTS to IDLE'd sessions
+      // for messages it locally-delivered from authenticated submission,
+      // so the watcher chain never fires for internal agent-to-agent mail.
+      // We know the recipient at send time, so notify SSE directly.
+      // Fire-and-forget — must never block or fail the send.
+      notifyLocalRecipientsOfNewMail(
+        accountManager, to, cc, bcc, agent, subject, result.messageId,
+      ).catch((err) => {
+        console.warn(`[mail] Internal SSE notify failed: ${(err as Error).message}`);
+      });
 
       const { raw: _raw, ...response } = result;
       res.json({ ...response, ...(outboundWarnings ? { outboundWarnings, outboundSummary } : {}) });
@@ -1009,6 +1105,12 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
         const sender = getSender(agent.stalwartPrincipal, agent.email, password, config);
         const result = await sender.send(mailOpts);
         saveSentCopy(agent.stalwartPrincipal, password, config, result.raw);
+        // Issue #24 — same direct-SSE bypass as POST /mail/send (see comment there).
+        notifyLocalRecipientsOfNewMail(
+          accountManager, mailOpts.to, mailOpts.cc, mailOpts.bcc, agent, mailOpts.subject, result.messageId,
+        ).catch((err) => {
+          console.warn(`[mail] Internal SSE notify (approve) failed: ${(err as Error).message}`);
+        });
         const { raw: _raw, ...rest } = result;
         response = rest;
       }

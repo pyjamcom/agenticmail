@@ -60,6 +60,34 @@ export class AccountManager {
     const principalName = options.name.toLowerCase();
     const email = `${principalName}@${domain}`;
 
+    // Issue #23 — fast-path duplicate detection before any network I/O.
+    //
+    // Root cause: when both the SQLite agent row AND the Stalwart
+    // principal already exist (a "true" duplicate, distinct from the
+    // orphan case fixed in #17), the previous code path still ran
+    // `ensureDomain` + `createPrincipal` against Stalwart. Stalwart's
+    // POST /principal on a duplicate name does not always fail fast —
+    // depending on the build/driver it can stall the HTTP response
+    // long enough that ImapFlow/clients hit their socket timeout
+    // (~8s) before our 15s `AbortSignal.timeout` trips. The route's
+    // outer `fieldAlreadyExists` catch (also added for #17) is then
+    // never reached because the request hangs upstream.
+    //
+    // Fix: check SQLite first (synchronous, microsecond-cheap) and
+    // throw a recognizable "already exists" error before touching
+    // Stalwart at all. The route's existing 409 catch matches on
+    // "already exists" so this surfaces as a fast 409 with no
+    // network round-trips.
+    //
+    // This MUST stay above `ensureDomain` and the orphan-recovery
+    // block below to avoid regressing #17: if the SQLite row exists,
+    // by definition it is NOT an orphan, so skipping the
+    // delete-then-recreate dance is correct.
+    const existingAgent = await this.getByName(options.name);
+    if (existingAgent != null) {
+      throw new Error(`Account already exists: ${options.name}`);
+    }
+
     // Ensure domain exists in Stalwart, then create principal
     await this.stalwart.ensureDomain(domain);
 
@@ -72,16 +100,18 @@ export class AccountManager {
     // fire, and the orphan would survive every subsequent
     // create attempt. Detect + delete the orphan first so the
     // happy path always wins.
-    const existsInSqlite = (await this.getByName(options.name)) != null;
-    if (!existsInSqlite) {
-      try {
-        await this.stalwart.deletePrincipal(principalName);
-      } catch {
-        // Either it didn't exist (good — the create below will
-        // succeed cleanly) or the delete failed for a non-existence
-        // reason (let the create surface that error verbatim). Both
-        // outcomes are fine to swallow here.
-      }
+    //
+    // Note: by the time we reach this block the #23 fast-path above
+    // has already proven the SQLite row does not exist, so any
+    // resident principal here is necessarily an orphan and safe
+    // to delete.
+    try {
+      await this.stalwart.deletePrincipal(principalName);
+    } catch {
+      // Either it didn't exist (good — the create below will
+      // succeed cleanly) or the delete failed for a non-existence
+      // reason (let the create surface that error verbatim). Both
+      // outcomes are fine to swallow here.
     }
 
     await this.stalwart.createPrincipal({

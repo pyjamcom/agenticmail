@@ -55,7 +55,23 @@ function buildColumnDDL(col: ColumnDef, dialect: string): string {
   if (col.required && !col.primaryKey) ddl += ' NOT NULL';
   if (col.unique && !col.primaryKey) ddl += ' UNIQUE';
   if (col.default !== undefined) {
-    const val = typeof col.default === 'string' ? `'${col.default}'` : col.default;
+    // Issue #27 — when timestamps were auto-added we passed the SQL
+    // expression `datetime('now')` (or `NOW()` on Postgres) through
+    // col.default as a string, then this branch quoted it as a
+    // literal: `DEFAULT 'datetime('now')'`. The embedded apostrophe
+    // closed the string early and the SQL parser exploded with
+    // "near 'now': syntax error". Detect SQL function calls and
+    // CURRENT_* keywords and emit them unquoted; everything else
+    // is treated as a literal and gets its apostrophes escaped.
+    let val: string | number | boolean;
+    if (typeof col.default === 'string') {
+      const trimmed = col.default.trim();
+      const isSqlExpr = /\(.*\)/.test(trimmed)
+        || /^CURRENT_(?:TIMESTAMP|DATE|TIME)$/i.test(trimmed);
+      val = isSqlExpr ? trimmed : `'${col.default.replace(/'/g, "''")}'`;
+    } else {
+      val = col.default;
+    }
     ddl += ` DEFAULT ${val}`;
   }
   if (col.check) ddl += ` CHECK (${col.check})`;

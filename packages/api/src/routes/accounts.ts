@@ -76,11 +76,18 @@ export function createAccountRoutes(accountManager: AccountManager, db: Database
       // for that exact case, but keep the broader match so any
       // other Stalwart-flavoured "exists" error doesn't 500 the
       // route.
+      //
+      // Issue #23 — `accountManager.create` now throws
+      // "Account already exists: <name>" the moment it sees a
+      // matching SQLite row, before any Stalwart I/O. Match that
+      // string here so a true duplicate returns a sub-millisecond
+      // 409 instead of hanging for ~8s on a Stalwart POST that
+      // sometimes stalls on duplicate-principal responses.
       if (msg.includes('UNIQUE') || msg.includes('unique')
           || msg.includes('already exists') || msg.includes('duplicate')
           || msg.includes('fieldAlreadyExists')
           || msg.toLowerCase().includes('alreadyexists')) {
-        res.status(409).json({ error: `Agent "${name}" already exists` });
+        res.status(409).json({ error: 'Account already exists', name });
         return;
       }
       next(err);

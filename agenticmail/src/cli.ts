@@ -2680,7 +2680,21 @@ async function cmdStart() {
     process.exit(1);
   }
 
-  // Ensure auto-start service is installed
+  // Ensure auto-start service is installed AND healthy.
+  //
+  // Issue #26 — self-heal stale service artefacts on startup.
+  // When users upgrade from the legacy unscoped `agenticmail` npm package
+  // to the new `@agenticmail/cli`, the launchd plist and start-server.sh
+  // wrapper that were written by the old install still reference paths
+  // under `/opt/homebrew/lib/node_modules/agenticmail/...` — a directory
+  // that no longer exists post-rename. The result is a boot-time crash
+  // loop. We now ask ServiceManager whether the installed artefacts are
+  // still valid (path resolves, version matches) and silently regenerate
+  // them via reinstall() if not, printing a friendly notice so the user
+  // knows it happened. Path resolution inside ServiceManager goes through
+  // require.resolve('@agenticmail/api'), so the regenerated files follow
+  // the *current* install location regardless of npm prefix or package
+  // manager.
   try {
     const svc = new ServiceManager();
     const svcStatus = svc.status();
@@ -2688,6 +2702,17 @@ async function cmdStart() {
       const svcResult = svc.install();
       if (svcResult.installed) {
         ok(`${c.bold('Auto-start')} enabled — survives reboots`);
+      }
+    } else {
+      const repair = svc.needsRepair();
+      if (repair) {
+        info(`Auto-start service is stale (${repair.reason}); refreshing...`);
+        const svcResult = svc.reinstall();
+        if (svcResult.installed) {
+          ok(`${c.bold('Auto-start')} refreshed for the new install path`);
+        } else {
+          info(`Could not refresh auto-start: ${svcResult.message}`);
+        }
       }
     }
   } catch { /* don't fail start over this */ }
@@ -2942,6 +2967,25 @@ switch (command) {
   case 'update':
     cmdUpdate().catch(err => { console.error(err); process.exit(1); });
     break;
+  case '--version':
+  case '-v':
+  case 'version': {
+    // Issue #25 — `agenticmail --version` previously fell through
+    // to the default case and launched the server start flow.
+    // Read the version straight out of package.json so it stays
+    // in sync with the published artifact, then exit.
+    try {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const thisDir = dirname(fileURLToPath(import.meta.url));
+      const pkg = JSON.parse(readFileSync(join(thisDir, '..', 'package.json'), 'utf-8'));
+      console.log(pkg.version ?? 'unknown');
+    } catch {
+      console.log('unknown');
+    }
+    process.exit(0);
+  }
   case 'help':
   case '--help':
   case '-h':

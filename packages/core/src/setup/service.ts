@@ -2,6 +2,7 @@ import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, chmodSync, lstatSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, platform } from 'node:os';
+import { createRequire } from 'node:module';
 
 const PLIST_LABEL = 'com.agenticmail.server';
 const SYSTEMD_UNIT = 'agenticmail.service';
@@ -45,46 +46,69 @@ export class ServiceManager {
 
   /**
    * Find the API server entry point.
-   * Searches common locations where agenticmail is installed.
+   *
+   * Issue #26 — Robust path resolution.
+   *
+   * The original implementation hard-coded `node_modules/agenticmail` (the
+   * old unscoped package name). After the rename to `@agenticmail/cli`, that
+   * directory no longer exists, so the resolver fell back to the stale
+   * `~/.agenticmail/api-entry.path` cache and the launchd plist kept pointing
+   * at a deleted path — causing the boot crash loop reported in #26.
+   *
+   * We now prefer `require.resolve('@agenticmail/api')` so the resolution
+   * follows the actual installed location regardless of npm prefix, the
+   * scoped vs unscoped package name, or the package manager (npm global,
+   * pnpm, yarn global, local node_modules). Cached paths are always
+   * validated against the filesystem before being returned.
    */
   private getApiEntryPath(): string {
-    // Strategy 1: Resolve from the agenticmail package
-    const searchDirs = [
-      // Global npm install
-      join(homedir(), 'node_modules', 'agenticmail'),
-      // npx cache / global prefix
-      ...((): string[] => {
-        try {
-          const prefix = execSync('npm prefix -g', { timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-          return [
-            join(prefix, 'lib', 'node_modules', 'agenticmail'),
-            join(prefix, 'node_modules', 'agenticmail'),
-          ];
-        } catch { return []; }
-      })(),
-      // Homebrew on macOS
-      '/opt/homebrew/lib/node_modules/agenticmail',
-      '/usr/local/lib/node_modules/agenticmail',
-    ];
+    // Strategy 1 (preferred): require.resolve from this module's location.
+    // This walks the standard Node module-resolution chain and naturally
+    // finds @agenticmail/api whether we're installed inside @agenticmail/cli,
+    // a hoisted root node_modules, a pnpm store, or a yarn workspace.
+    try {
+      const req = createRequire(import.meta.url);
+      const resolved = req.resolve('@agenticmail/api');
+      if (existsSync(resolved)) return resolved;
+    } catch { /* not resolvable from here */ }
 
-    // Look for the @agenticmail/api dist entry
-    for (const base of searchDirs) {
-      // Check for the API package in node_modules
-      const apiPaths = [
-        join(base, 'node_modules', '@agenticmail', 'api', 'dist', 'index.js'),
-        join(base, '..', '@agenticmail', 'api', 'dist', 'index.js'),
-      ];
-      for (const p of apiPaths) {
-        if (existsSync(p)) return p;
+    // Strategy 2: search common install layouts for BOTH the scoped (new)
+    // and unscoped (old) parent package names. Scoped first — that's the
+    // canonical layout post-rename.
+    const parentPackages = [
+      join('@agenticmail', 'cli'), // current scoped package
+      'agenticmail',               // legacy unscoped package
+    ];
+    const baseDirs: string[] = [
+      // user-local install
+      join(homedir(), 'node_modules'),
+    ];
+    try {
+      const prefix = execSync('npm prefix -g', { timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      baseDirs.push(join(prefix, 'lib', 'node_modules'));
+      baseDirs.push(join(prefix, 'node_modules'));
+    } catch { /* npm not on PATH */ }
+    // Common global locations
+    baseDirs.push('/opt/homebrew/lib/node_modules');
+    baseDirs.push('/usr/local/lib/node_modules');
+
+    for (const base of baseDirs) {
+      // Sibling layout: <base>/@agenticmail/api/dist/index.js (hoisted)
+      const sibling = join(base, '@agenticmail', 'api', 'dist', 'index.js');
+      if (existsSync(sibling)) return sibling;
+      for (const parent of parentPackages) {
+        const nested = join(base, parent, 'node_modules', '@agenticmail', 'api', 'dist', 'index.js');
+        if (existsSync(nested)) return nested;
       }
     }
 
-    // Strategy 2: Use the data dir's known entry
+    // Strategy 3: validated cache fallback. Only return it if the path on
+    // disk still exists — stale caches were the entire crash mode in #26.
     const dataDir = join(homedir(), '.agenticmail');
     const entryCache = join(dataDir, 'api-entry.path');
     if (existsSync(entryCache)) {
       const cached = readFileSync(entryCache, 'utf-8').trim();
-      if (existsSync(cached)) return cached;
+      if (cached && existsSync(cached)) return cached;
     }
 
     throw new Error('Could not find @agenticmail/api entry point. Run `agenticmail start` first to populate the cache.');
@@ -101,26 +125,54 @@ export class ServiceManager {
 
   /**
    * Get the current package version.
+   *
+   * Issue #26 — resolve the CLI package.json via require.resolve so the
+   * version reflects the *currently installed* @agenticmail/cli, not a
+   * leftover unscoped `agenticmail` package directory.
    */
   private getVersion(): string {
+    // Strategy 1: resolve @agenticmail/cli/package.json directly.
     try {
-      const pkgPaths = [
-        join(homedir(), 'node_modules', 'agenticmail', 'package.json'),
-        join(homedir(), '.agenticmail', 'package-version.json'),
-      ];
-      // Also try relative to this file
-      try {
-        const prefix = execSync('npm prefix -g', { timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-        pkgPaths.push(join(prefix, 'lib', 'node_modules', 'agenticmail', 'package.json'));
-      } catch { /* ignore */ }
+      const req = createRequire(import.meta.url);
+      const pkgJson = req.resolve('@agenticmail/cli/package.json');
+      if (existsSync(pkgJson)) {
+        const pkg = JSON.parse(readFileSync(pkgJson, 'utf-8'));
+        if (pkg.version) return pkg.version;
+      }
+    } catch { /* not resolvable */ }
 
-      for (const p of pkgPaths) {
+    // Strategy 2: derive from the resolved API entry's nearest package.json.
+    try {
+      const apiEntry = this.getApiEntryPath();
+      // dist/index.js -> ../../package.json (api package)
+      const apiPkg = join(apiEntry, '..', '..', 'package.json');
+      if (existsSync(apiPkg)) {
+        const pkg = JSON.parse(readFileSync(apiPkg, 'utf-8'));
+        if (pkg.version) return pkg.version;
+      }
+    } catch { /* ignore */ }
+
+    // Strategy 3: scan known install locations for a CLI package.json
+    // covering both the new scoped name and the legacy unscoped name.
+    const candidates: string[] = [
+      join(homedir(), 'node_modules', '@agenticmail', 'cli', 'package.json'),
+      join(homedir(), 'node_modules', 'agenticmail', 'package.json'),
+      join(homedir(), '.agenticmail', 'package-version.json'),
+    ];
+    try {
+      const prefix = execSync('npm prefix -g', { timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      candidates.push(join(prefix, 'lib', 'node_modules', '@agenticmail', 'cli', 'package.json'));
+      candidates.push(join(prefix, 'lib', 'node_modules', 'agenticmail', 'package.json'));
+    } catch { /* ignore */ }
+
+    for (const p of candidates) {
+      try {
         if (existsSync(p)) {
           const pkg = JSON.parse(readFileSync(p, 'utf-8'));
           if (pkg.version) return pkg.version;
         }
-      }
-    } catch { /* ignore */ }
+      } catch { /* skip malformed */ }
+    }
     return 'unknown';
   }
 
@@ -438,5 +490,101 @@ WantedBy=default.target
   reinstall(): { installed: boolean; message: string } {
     this.uninstall();
     return this.install();
+  }
+
+  /**
+   * Issue #26 — Detect a stale service installation.
+   *
+   * Background: when a user upgrades from the old unscoped `agenticmail`
+   * package to the new `@agenticmail/cli` scoped package, the old
+   * ~/Library/LaunchAgents/com.agenticmail.server.plist and
+   * ~/.agenticmail/bin/start-server.sh files keep pointing at
+   * /opt/homebrew/lib/node_modules/agenticmail/... — a path that no longer
+   * exists post-rename. The result is a launchd crash loop.
+   *
+   * `needsRepair()` returns a non-null reason whenever:
+   *  - the service file exists but the start-server.sh it launches is
+   *    missing or references a node_modules path that no longer resolves;
+   *  - the embedded service version drifts from the running CLI version
+   *    (so service files get refreshed on every upgrade — including
+   *    in-place version bumps that don't change the install path);
+   *  - the cached API entry path no longer exists on disk.
+   *
+   * Returns null when everything checks out — callers should treat that as
+   * "no action needed".
+   *
+   * Platform-aware: only inspects launchd artefacts on darwin and systemd
+   * artefacts on linux. Returns null on unsupported platforms so this can
+   * be called unconditionally from the CLI's start path.
+   */
+  needsRepair(): { reason: string } | null {
+    if (this.os !== 'darwin' && this.os !== 'linux') return null;
+
+    const servicePath = this.getServicePath();
+    if (!existsSync(servicePath)) return null; // nothing installed → nothing to repair
+
+    let serviceContent = '';
+    try { serviceContent = readFileSync(servicePath, 'utf-8'); }
+    catch { return { reason: 'Service file unreadable' }; }
+
+    // 1) Validate the start-server.sh referenced by the service file.
+    const startScript = join(homedir(), '.agenticmail', 'bin', 'start-server.sh');
+    if (serviceContent.includes(startScript)) {
+      if (!existsSync(startScript)) {
+        return { reason: 'start-server.sh is missing' };
+      }
+      let scriptContent = '';
+      try { scriptContent = readFileSync(startScript, 'utf-8'); }
+      catch { return { reason: 'start-server.sh unreadable' }; }
+
+      // Pull every absolute path the script tries to exec / log and verify
+      // the @agenticmail/api entry it points at still exists. We match on
+      // the dist/index.js suffix common to both layouts.
+      const apiPathMatch = scriptContent.match(/(\/[^"\s]+@agenticmail\/api\/dist\/index\.js)/);
+      if (apiPathMatch) {
+        const referenced = apiPathMatch[1];
+        if (!existsSync(referenced)) {
+          return { reason: `start-server.sh references missing path: ${referenced}` };
+        }
+      }
+      // Catch the old unscoped layout explicitly — these always need repair.
+      if (/node_modules\/agenticmail\/(?!.*@agenticmail\/cli)/.test(scriptContent)) {
+        const stale = /(\S*node_modules\/agenticmail\/\S*)/.exec(scriptContent)?.[1];
+        if (stale && !existsSync(stale)) {
+          return { reason: `start-server.sh references legacy unscoped path: ${stale}` };
+        }
+      }
+    } else {
+      // Service file exists but doesn't reference our wrapper script — the
+      // installer always writes one, so absence means a hand-edited or
+      // pre-#26 file. Repair to bring it in line.
+      return { reason: 'Service file does not reference the wrapper script' };
+    }
+
+    // 2) Version drift — keep the embedded version in sync with the CLI.
+    const currentVersion = this.getVersion();
+    if (currentVersion !== 'unknown') {
+      // Both plist and systemd unit embed `v${version}` in the description
+      // and AGENTICMAIL_SERVICE_VERSION env var. A simple substring check
+      // works for both formats.
+      if (!serviceContent.includes(`v${currentVersion}`) ||
+          !serviceContent.includes(`AGENTICMAIL_SERVICE_VERSION`) ||
+          !serviceContent.includes(currentVersion)) {
+        return { reason: `Service version drift (current CLI is v${currentVersion})` };
+      }
+    }
+
+    // 3) Cached API entry pointer is stale.
+    const entryCache = join(homedir(), '.agenticmail', 'api-entry.path');
+    if (existsSync(entryCache)) {
+      try {
+        const cached = readFileSync(entryCache, 'utf-8').trim();
+        if (cached && !existsSync(cached)) {
+          return { reason: `Cached API entry path no longer exists: ${cached}` };
+        }
+      } catch { /* ignore */ }
+    }
+
+    return null;
   }
 }
