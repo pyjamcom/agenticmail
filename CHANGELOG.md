@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.58] - 2026-05-08
+
+### Fixed
+
+- **`POST /storage/tables` hangs indefinitely** (#15, thanks
+  @kn8-codes). The storage routes were calling `db.run`, `db.get`,
+  and `db.all` against a raw better-sqlite3 instance that only
+  exposes `prepare/exec`. Every storage call threw a synchronous
+  TypeError, and the one in `ensureMetaTable()` (which sat outside
+  the per-route try/catch) escaped Express's default async handler
+  — leaving the request hanging until the client timed out. Added
+  an adapter that maps the async `run/get/all` shape to
+  `prepare(sql).run/get/all(...args)` (and falls through to
+  `exec(sql)` for parameter-less DDL like `CREATE TABLE`), so
+  every storage endpoint now responds with success or a structured
+  error.
+- **SSE `/events` connects but never emits inbound mail events**
+  (#16, thanks @kn8-codes). The `InboxWatcher` acquired a
+  `getMailboxLock` and intentionally held it, expecting that to
+  keep IDLE notifications flowing. ImapFlow's contract is the
+  opposite — holding the lock keeps the connection in a command
+  state and **prevents** IDLE from firing. Since the watcher's
+  connection is dedicated to a single caller, the lock is now
+  released immediately after the listeners are registered;
+  `'exists'` / `'expunge'` / `'flags'` events now flow on every
+  new mail and the SSE stream emits per the API docs.
+- **Agent creation can fail with `fieldAlreadyExists` on the
+  first attempt** (#17, thanks @kn8-codes). When a previous
+  creation attempt left a Stalwart principal but no matching
+  SQLite row (crash mid-create, manual cleanup, fresh re-install
+  pointed at the same Stalwart), every subsequent
+  `POST /accounts` would 500 with Stalwart's
+  `fieldAlreadyExists` error. `AccountManager.create` now detects
+  the orphan (no SQLite row but principal name in use) and
+  deletes it before issuing the fresh `createPrincipal` call.
+  The route handler also widens its 409 detection to recognise
+  `fieldAlreadyExists` / `alreadyExists` so any unrelated
+  Stalwart-flavoured "exists" error returns a clean 409 instead
+  of falling through to the generic 500 path.
+- **`agenticmail openclaw --help` launched the interactive setup
+  wizard instead of showing usage** (#18, thanks @kn8-codes). The
+  top-level CLI dispatcher only inspects `process.argv[2]`, so
+  `openclaw --help` matched the openclaw case and dropped into
+  the wizard. The handler now checks `process.argv.slice(3)` for
+  `--help` / `-h` / `help` first and prints a sub-command help
+  block with usage, the six setup steps, and a pointer back to
+  the global help.
+- **`agenticmail status` reported "Secure Tunnel ✅" on
+  localhost-only setups** (#21, thanks @kn8-codes). The status
+  command labelled the `cloudflared` dependency as "Secure
+  Tunnel" and rendered it green whenever the binary was present
+  — but the binary is downloaded as part of every setup,
+  including localhost-only evals where no tunnel exists. The
+  cloudflared row now only appears when the saved config has
+  `gateway.mode === 'domain'` AND a tunnel id / domain is
+  attached; otherwise it's hidden, and the actual tunnel state
+  is left to the "Email" section to report from the live
+  gateway-status endpoint. Renamed the friendly label to
+  "Cloudflared CLI" for the cases where it does render so users
+  understand we're surfacing CLI presence, not active tunnel
+  health.
+
+### Documentation
+
+- Clarified the OpenClaw integration wording (#19, thanks
+  @kn8-codes). The CLI README previously said
+  "if OpenClaw is detected, automatically registers the plugin"
+  inside the `agenticmail setup` step list; in practice plugin
+  registration only happens through the explicit
+  `agenticmail openclaw` flow. Reworded so that's unambiguous.
+- Clarified async `call_agent` result delivery (#22, thanks
+  @kn8-codes). The README's bullet on async mode implied an
+  email always lands in the caller's inbox; clarified that the
+  result email is dispatched through the normal mail pipeline,
+  so on a localhost-only setup it shows up in the caller's
+  local mailbox (`/mail/inbox`) rather than via SMTP relay.
+- Surfaced #20's documentation gap list in the relevant places:
+  the cloudflared download is now described as expected even on
+  localhost-only setups; the storage API's failure-mode response
+  shape is documented inline; the OpenClaw plugin verification
+  troubleshooting steps got a paragraph in the OpenClaw README.
+
 ## [0.5.57] - 2026-05-07
 
 ### Changed

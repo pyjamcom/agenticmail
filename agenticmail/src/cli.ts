@@ -1679,6 +1679,34 @@ function mergePluginConfig(
 }
 
 async function cmdOpenClaw() {
+  // Issue #18 — `agenticmail openclaw --help` previously dropped
+  // straight into the interactive setup flow because the
+  // top-level dispatcher only looks at process.argv[2]. Check
+  // for --help / -h on the subcommand before firing the wizard.
+  const sub = process.argv.slice(3);
+  if (sub.includes('--help') || sub.includes('-h') || sub.includes('help')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 AgenticMail for OpenClaw ')}`);
+    log('');
+    log(`  ${c.bold('Usage:')} agenticmail openclaw`);
+    log('');
+    log('  Interactive setup wizard for the OpenClaw plugin. Walks you');
+    log('  through six steps:');
+    log(`    ${c.dim('1.')} Set up the mail server infrastructure (Stalwart)`);
+    log(`    ${c.dim('2.')} Create an agent email account`);
+    log(`    ${c.dim('3.')} Set up phone number access (Google Voice)`);
+    log(`    ${c.dim('4.')} Register + configure the OpenClaw plugin`);
+    log(`    ${c.dim('5.')} Restart the OpenClaw gateway so the plugin loads`);
+    log(`    ${c.dim('6.')} Verify the agent's mailbox`);
+    log('');
+    log(`  ${c.bold('Flags:')}`);
+    log(`    ${c.green('-h, --help')}    Show this help and exit`);
+    log('');
+    log(`  Run ${c.green('agenticmail --help')} for the full command list.`);
+    log('');
+    return;
+  }
+
   log('');
   log(`  ${c.pinkBg(' 🎀 AgenticMail for OpenClaw ')}`);
   log('');
@@ -2441,6 +2469,26 @@ function printPluginSnippet(apiUrl: string, masterKey: string, agentApiKey?: str
   log(`  ${c.dim('}')}`);
 }
 
+/** Issue #21 helper — is the user actually running a Cloudflare
+ *  tunnel? Reads the saved config + checks the live gateway-status
+ *  endpoint. Returns true only when domain mode is configured AND
+ *  reports a tunnel id; the binary-installed-but-no-tunnel case
+ *  returns false so the status command stops mis-announcing
+ *  "Secure Tunnel ✅" on localhost-only setups. */
+async function isTunnelConfigured(): Promise<boolean> {
+  const configPath = join(homedir(), '.agenticmail', 'config.json');
+  if (!existsSync(configPath)) return false;
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    if (config.gateway?.mode !== 'domain') return false;
+    if (!config.gateway?.domain?.tunnelId
+        && !config.gateway?.domain?.domain) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function cmdStatus() {
   log('');
   log(`  ${c.pinkBg(' 🎀 AgenticMail Status ')}`);
@@ -2451,12 +2499,29 @@ async function cmdStatus() {
   const FRIENDLY_NAMES: Record<string, string> = {
     docker: 'Container Engine',
     stalwart: 'Mail Server',
-    cloudflared: 'Secure Tunnel',
+    // Issue #21 — `cloudflared` was previously labelled "Secure
+    // Tunnel" and shown as ✅ whenever the binary was present.
+    // The binary is downloaded as part of every setup (even
+    // localhost-only evals), so the green tick implied an active
+    // tunnel that didn't exist. Renamed to make clear we're only
+    // reporting the CLI binary's presence; the actual tunnel
+    // status is surfaced under "Email" below where the gateway
+    // mode is read.
+    cloudflared: 'Cloudflared CLI',
   };
 
   const deps = await setup.checkDependencies();
   log(`  ${c.bold('Services:')}`);
   for (const dep of deps) {
+    // Issue #21 — only show cloudflared when the user has
+    // actually configured a tunnel (domain mode). For
+    // localhost-only / relay-only evals the binary is
+    // background plumbing — listing it under "Services" with
+    // a green ✅ misleads users into thinking a tunnel is up.
+    if (dep.name === 'cloudflared') {
+      const tunnelConfigured = await isTunnelConfigured();
+      if (!tunnelConfigured) continue;
+    }
     const friendly = FRIENDLY_NAMES[dep.name] ?? dep.name;
     if (dep.installed) {
       // Don't prefix "v" for non-semver versions like "running"

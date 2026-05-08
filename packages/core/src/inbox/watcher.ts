@@ -129,8 +129,17 @@ export class InboxWatcher extends EventEmitter {
         this._scheduleReconnect();
       });
 
-      // Lock is intentionally held to receive IDLE notifications
-      this._lock = lock;
+      // Issue #16 — release the mailbox lock immediately so the
+      // connection can enter IDLE. ImapFlow's contract is the
+      // opposite of what the prior comment assumed: holding the
+      // lock keeps the connection IN A COMMAND state and IDLE
+      // never fires. The lock is for serialising commands across
+      // callers; this watcher is the sole caller on its
+      // dedicated connection, so dropping the lock right after
+      // installing the listeners is safe and lets the 'exists' /
+      // 'expunge' / 'flags' events flow on every new mail.
+      lock.release();
+      this._lock = null;
     } catch (err) {
       lock.release();
       throw err;

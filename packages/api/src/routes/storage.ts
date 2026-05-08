@@ -135,12 +135,76 @@ function nowExpr(dialect: string): string {
 
 // ─── Routes ─────────────────────────────────────────────
 
+/** Issue #15 — adapter from a raw better-sqlite3 Database to the
+ *  async-flavored {@link StorageDB} surface every route in this file
+ *  uses. Without this, calls like {@code db.run('CREATE TABLE …')}
+ *  hit {@code undefined(...)} (better-sqlite3 only exposes
+ *  {@code db.prepare/exec}, not direct {@code run/get/all}), throw
+ *  synchronously, and the rejected promise from
+ *  {@code ensureMetaTable()} (which sits OUTSIDE the per-route
+ *  try/catch) escapes Express's default async handler — leaving
+ *  the request hanging until the client times out.
+ *
+ *  <p>The adapter lazily prepares each statement, falls back to
+ *  {@code exec} for parameter-less DDL (CREATE TABLE / CREATE
+ *  INDEX / PRAGMA), and returns plain (non-Promise) values; the
+ *  awaits in the route handlers are no-ops on plain values, so
+ *  no further changes were needed at the call sites. */
+function adaptBetterSqlite(raw: any): StorageDB {
+  // If the caller already passed something that quacks like
+  // StorageDB (a future async driver, e.g. node-sqlite3 / pg),
+  // pass it through unchanged.
+  if (raw && typeof raw.run === 'function'
+        && typeof raw.get === 'function'
+        && typeof raw.all === 'function') {
+    return raw as StorageDB;
+  }
+  // Otherwise wrap the better-sqlite3 instance.
+  const exec = (sql: string, params?: any[]): void => {
+    if (!params || params.length === 0) {
+      // exec handles multi-statement DDL + statements that have
+      // tokens better-sqlite3's prepare can't bind (PRAGMA, etc.).
+      raw.exec(sql);
+      return;
+    }
+    raw.prepare(sql).run(...params);
+  };
+  return {
+    run(sql: string, params?: any[]): void {
+      // CREATE / ALTER / DROP / INSERT-without-params land in exec;
+      // INSERT / UPDATE / DELETE with params land in prepare+run.
+      const trimmed = sql.trim().toUpperCase();
+      const isDDL = trimmed.startsWith('CREATE')
+        || trimmed.startsWith('ALTER')
+        || trimmed.startsWith('DROP')
+        || trimmed.startsWith('PRAGMA');
+      if (isDDL && (!params || params.length === 0)) {
+        raw.exec(sql);
+        return;
+      }
+      exec(sql, params);
+    },
+    get(sql: string, params?: any[]): any {
+      const stmt = raw.prepare(sql);
+      return params && params.length > 0 ? stmt.get(...params) : stmt.get();
+    },
+    all(sql: string, params?: any[]): any[] {
+      const stmt = raw.prepare(sql);
+      const rows = params && params.length > 0
+        ? stmt.all(...params)
+        : stmt.all();
+      return rows as any[];
+    },
+  };
+}
+
 export function createStorageRoutes(
-  db: StorageDB,
+  rawDb: any,
   accountManager: AccountManager,
   config: AgenticMailConfig,
   dialect: string = 'sqlite',
 ): Router {
+  const db = adaptBetterSqlite(rawDb);
   const router = Router();
 
   function getAgent(req: Request, res: Response): { id: string; email: string } | null {

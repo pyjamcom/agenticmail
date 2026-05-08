@@ -62,6 +62,28 @@ export class AccountManager {
 
     // Ensure domain exists in Stalwart, then create principal
     await this.stalwart.ensureDomain(domain);
+
+    // Issue #17 — guard against a stuck Stalwart principal from a
+    // prior aborted creation. If the user's SQLite row was never
+    // committed (e.g. crash mid-create, manual cleanup, or this
+    // is a fresh re-install pointed at the same Stalwart), the
+    // bare `createPrincipal` call below would throw
+    // `fieldAlreadyExists`, the caller's 500 error path would
+    // fire, and the orphan would survive every subsequent
+    // create attempt. Detect + delete the orphan first so the
+    // happy path always wins.
+    const existsInSqlite = (await this.getByName(options.name)) != null;
+    if (!existsInSqlite) {
+      try {
+        await this.stalwart.deletePrincipal(principalName);
+      } catch {
+        // Either it didn't exist (good — the create below will
+        // succeed cleanly) or the delete failed for a non-existence
+        // reason (let the create surface that error verbatim). Both
+        // outcomes are fine to swallow here.
+      }
+    }
+
     await this.stalwart.createPrincipal({
       type: 'individual',
       name: principalName,

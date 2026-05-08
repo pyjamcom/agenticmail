@@ -46,7 +46,7 @@ Running `agenticmail setup` walks you through everything needed to get email wor
 
 5. **Phone number access (optional)** — set up Google Voice for SMS. Agents can receive verification codes and send texts. The wizard validates Gmail/Google Voice email matching, warns about mismatches, and collects separate credentials when needed. SMS reading prioritizes direct Google Voice web access (instant) with email forwarding as fallback.
 
-6. **OpenClaw integration** — if OpenClaw is detected, automatically registers the plugin.
+6. **OpenClaw integration** — if you opt in by running `agenticmail openclaw`, the wizard registers and configures the plugin and restarts the OpenClaw gateway. Plugin registration only happens through that explicit flow — running `agenticmail setup` alone (without the `openclaw` subcommand) won't touch your OpenClaw config.
 
 ### Relay Mode (Recommended for Getting Started)
 
@@ -443,6 +443,24 @@ npm prefix -g
 ```
 
 Update the path in `~/.openclaw/openclaw.json` accordingly.
+
+### Verifying OpenClaw plugin registration
+
+`openclaw plugins inspect agenticmail` returning `Plugin not found: agenticmail` means the plugin entry hasn't been added to your `~/.openclaw/openclaw.json`. Run `agenticmail openclaw` to register it; running plain `agenticmail setup` does NOT touch your OpenClaw config — that step only fires through the explicit `openclaw` subcommand. To verify by hand: open `~/.openclaw/openclaw.json` and check that `plugins.entries` includes an entry with `"id": "agenticmail"` plus a `"path"` pointing at `<npm prefix>/lib/node_modules/@agenticmail/openclaw`.
+
+### `cloudflared` shows up after a localhost-only install
+
+The setup wizard always downloads `cloudflared` into `~/.agenticmail/bin/` so the binary is ready when you eventually flip to domain mode. Localhost-only installs leave the binary present but unused — `agenticmail status` no longer reports it as "Secure Tunnel ✅" (V0.5.58 fix); it only surfaces a "Cloudflared CLI" line when domain mode is actually configured.
+
+### Storage API hangs / 500s
+
+`POST /storage/tables` returning success or a structured error shape:
+
+```json
+{ "ok": true, "table": "agt_<agent>_<name>", "columns": [...], "indexes": [...] }
+```
+
+Errors return JSON: `400` (missing `name`/`columns`), `409` (table already exists), `500` (DB-level error with `message` field). If you see a hang on this or any other `/storage/*` endpoint with 0.5.57 or earlier, upgrade to 0.5.58 — that version fixes a wiring bug where the storage routes called an API the underlying SQLite client doesn't expose.
 
 ### `agenticmail: command not found`
 

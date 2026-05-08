@@ -68,7 +68,18 @@ export function createAccountRoutes(accountManager: AccountManager, db: Database
       res.status(201).json(sanitizeAgent(agent));
     } catch (err) {
       const msg = (err as Error).message ?? '';
-      if (msg.includes('UNIQUE') || msg.includes('unique') || msg.includes('already exists') || msg.includes('duplicate')) {
+      // Issue #17 — also catch Stalwart's `fieldAlreadyExists`
+      // error code (raised when a principal with the same name
+      // is still resident in Stalwart from a prior aborted
+      // creation). The accountManager.create rollback in 0.5.58
+      // already self-heals the orphan before this catch fires
+      // for that exact case, but keep the broader match so any
+      // other Stalwart-flavoured "exists" error doesn't 500 the
+      // route.
+      if (msg.includes('UNIQUE') || msg.includes('unique')
+          || msg.includes('already exists') || msg.includes('duplicate')
+          || msg.includes('fieldAlreadyExists')
+          || msg.toLowerCase().includes('alreadyexists')) {
         res.status(409).json({ error: `Agent "${name}" already exists` });
         return;
       }

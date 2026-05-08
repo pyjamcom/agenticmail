@@ -619,7 +619,7 @@ The `call_agent` tool intelligently spawns sub-agents:
 - **Auto mode detection** — light (simple tasks), standard (web research), full (multi-agent coordination)
 - **Dynamic timeouts** — 60s / 180s / 300s based on complexity
 - **Dynamic tool discovery** — probes OpenClaw config at runtime instead of static deny lists
-- **Async mode** — `call_agent(async=true)` for long-running tasks; agent emails results when done
+- **Async mode** — `call_agent(async=true)` for long-running tasks. The caller polls `/tasks/assigned` for completion; the assigned agent **emails the result back to the caller** when it has email capability enabled. In a localhost-only / no-relay setup the result still lands in the caller's local mailbox, so check `/mail/inbox` if you don't see an SMTP delivery.
 - **Web search fallback** — uses DuckDuckGo when Brave API isn't configured
 
 See the [OpenClaw package README](./packages/openclaw) for the full tool list.
