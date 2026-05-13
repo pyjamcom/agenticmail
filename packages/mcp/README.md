@@ -1,4 +1,8 @@
-# @agenticmail/mcp
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
+
+<h1 align="center">@agenticmail/mcp</h1>
 
 The MCP (Model Context Protocol) server for [AgenticMail](https://github.com/agenticmail/agenticmail) — gives any MCP-compatible AI client full email and SMS capabilities.
 

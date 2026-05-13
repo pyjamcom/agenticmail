@@ -1,4 +1,8 @@
-# @agenticmail/core
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
+
+<h1 align="center">@agenticmail/core</h1>
 
 Core SDK for [AgenticMail](https://github.com/agenticmail/agenticmail) — the first platform to give AI agents real email addresses and phone numbers.
 

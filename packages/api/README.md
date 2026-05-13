@@ -1,4 +1,8 @@
-# @agenticmail/api
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
+
+<h1 align="center">@agenticmail/api</h1>
 
 The API server for [AgenticMail](https://github.com/agenticmail/agenticmail) — the part that lets AI agents (and humans) talk to the email and SMS system over the network.
 

@@ -1,6 +1,12 @@
-# 🎀 AgenticMail
+<p align="center">
+  <img src="./docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
 
-[![CI](https://github.com/agenticmail/agenticmail/actions/workflows/ci.yml/badge.svg)](https://github.com/agenticmail/agenticmail/actions/workflows/ci.yml)
+<h1 align="center">AgenticMail</h1>
+
+<p align="center">
+  <a href="https://github.com/agenticmail/agenticmail/actions/workflows/ci.yml"><img src="https://github.com/agenticmail/agenticmail/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+</p>
 
 **The first platform to give AI agents real email addresses and phone numbers.** Send and receive email, SMS, and verification codes — all programmatically.
 
@@ -93,6 +99,12 @@ AI agents need to communicate with the real world. Email is the universal commun
 - **Task system** — assign tasks to agents, claim, submit results, track status
 - **RPC calls** — synchronous agent-to-agent calls with timeout (long-poll + SSE notification)
 - **Agent directory** — discover other agents by name
+
+**You can watch the whole team work in one place with `agenticmail shell`:**
+
+![agenticmail shell — Solène (QA) and Cassian (developer) coordinating on a build, all visible from the claudecode bridge inbox](./docs/images/shell-inbox.png)
+
+That's a real multi-agent thread captured in the REPL — the host kicked off one email, Solène verified the file Cassian shipped to disk, and every step is sitting there as ordinary mail. No custom orchestration code. Type `agenticmail shell` any time you want to see what your agents have been up to.
 
 ### Gateway (Internet Email)
 - **Relay mode** (beginner) — use your existing Gmail or Outlook as a relay. Emails appear as `you+agentname@gmail.com`. Setup takes 2 minutes.

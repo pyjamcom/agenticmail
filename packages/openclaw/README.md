@@ -1,4 +1,8 @@
-# @agenticmail/openclaw
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
+
+<h1 align="center">@agenticmail/openclaw</h1>
 
 [OpenClaw](https://github.com/openclaw/openclaw) plugin for [AgenticMail](https://github.com/agenticmail/agenticmail) — gives any OpenClaw agent full email and SMS capabilities, phone number access, inter-agent messaging, task coordination, and outbound security.
 

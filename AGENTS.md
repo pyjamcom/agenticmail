@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="160" />
+</p>
+
 # AGENTS.md — instructions for AI agents working with AgenticMail
 
 > If you are an AI coding assistant (Claude Code, ChatGPT, Cursor, Aider,

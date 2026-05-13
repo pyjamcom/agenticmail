@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.12] - 2026-05-13
+
+### Added — official pink-bow logo across every surface
+
+The project has an official logo now: a pink satin bow. It lands in
+`docs/images/logo.png` (original ~1.3 MB), with downscaled
+`logo-200.png` (51 KB, README headers) and `logo-400.png` (180 KB,
+plugin marketplace icon slot) cut to size with `sips`.
+
+Every README at the top of the tree gets the bow in a centered banner:
+
+- `README.md` (repo root) — centered banner with logo + project name
+- `agenticmail/README.md` (npm CLI README) — same, absolute GitHub URL for npm rendering
+- `packages/claudecode/README.md`
+- `packages/core/README.md`
+- `packages/api/README.md`
+- `packages/mcp/README.md`
+- `packages/openclaw/README.md`
+- `plugin/README.md`
+- `AGENTS.md`
+
+The interactive shell welcome banner now uses the pink-background bow
+mark (`🎀 AgenticMail`) to match the rest of the CLI surfaces — the
+terminal equivalent of the logo where rendering a PNG is not portable.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/cli` | 0.8.11 | 0.8.12 |
+
+Plugin manifest mirrored to 0.8.12 for parity. Other packages unchanged
+(the logo lands on their npm pages on the next functional release).
+
 ## [0.8.11] - 2026-05-13
 
 ### Changed — documentation surfaces now route human oversight to `agenticmail shell`

@@ -1,4 +1,8 @@
-# agenticmail
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
+
+<h1 align="center">agenticmail</h1>
 
 The main package for [AgenticMail](https://github.com/agenticmail/agenticmail) — the first platform to give AI agents real email addresses and phone numbers. This is the package you install to get started.
 
@@ -187,6 +191,8 @@ If the server crashes, you get clear error output showing what went wrong.
 > ```bash
 > agenticmail shell
 > ```
+>
+> ![agenticmail shell — interactive inbox view across all agents](https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/shell-inbox.png)
 >
 > Drops you into the AgenticMail REPL with 44 commands for viewing every agent's inbox, sending and replying on their behalf, inspecting pending outbound mail, watching the live dispatcher event feed, and pruning stale accounts. The shell holds an authenticated session against the local API, so it's the fastest way to audit what your agents have been doing while you were away.
 >

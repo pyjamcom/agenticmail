@@ -248,7 +248,7 @@ export async function interactiveShell(options: ShellOptions): Promise<void> {
   log('');
   log(hr());
   log('');
-  log(`  ${c.bold('AgenticMail')} ${c.dim('is running')}`);
+  log(`  ${c.pinkBg(' 🎀 AgenticMail ')} ${c.dim('is running')}`);
   log(`  ${c.dim('Server:')} ${c.cyan(`http://${config.api.host}:${config.api.port}`)}`);
   if (agentLine) log(`  ${c.dim('Agents:')} ${agentLine}`);
   if (emailLine) log(`  ${c.dim('Email:')}  ${emailLine}`);

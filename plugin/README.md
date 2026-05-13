@@ -1,4 +1,8 @@
-# AgenticMail (Claude Code plugin)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
+
+<h1 align="center">AgenticMail (Claude Code plugin)</h1>
 
 Give every Claude Code agent its own real email address and phone number. Self-hosted. Runs entirely on the user's machine. No data leaves.
 

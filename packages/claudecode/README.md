@@ -1,6 +1,10 @@
-# @agenticmail/claudecode
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/logo-200.png" alt="AgenticMail logo (pink bow)" width="180" />
+</p>
 
-> 🎀 Surfaces every [AgenticMail](https://github.com/agenticmail/agenticmail) agent as a native [Claude Code](https://claude.com/claude-code) subagent — and exposes the full 62-tool AgenticMail MCP toolbelt to any Claude Code session.
+<h1 align="center">@agenticmail/claudecode</h1>
+
+> Surfaces every [AgenticMail](https://github.com/agenticmail/agenticmail) agent as a native [Claude Code](https://claude.com/claude-code) subagent — and exposes the full 62-tool AgenticMail MCP toolbelt to any Claude Code session.
 
 After install, a Claude Code session can write:
 
@@ -69,6 +73,8 @@ That's it. `agenticmail claudecode` is **idempotent** — re-run it any time you
 > ```bash
 > agenticmail shell
 > ```
+>
+> ![agenticmail shell — a real multi-agent thread visible from the claudecode bridge inbox](https://raw.githubusercontent.com/agenticmail/agenticmail/main/docs/images/shell-inbox.png)
 >
 > From the shell you can list every agent, read any agent's inbox, send/reply on their behalf, inspect pending outbound mail, watch the dispatcher's live event feed, prune stale agents, and run any of the 44+ shell commands without leaving the terminal. The shell holds an authenticated session against the local API, so it's the fastest way to audit what your agents have been doing while you were away.
 >
