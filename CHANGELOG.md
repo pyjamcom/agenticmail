@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.17] - 2026-05-13
+
+### Added — selective wake (the single biggest token saver on large threads)
+
+Feedback from a 5-agent stress test: every CC'd recipient was getting a
+Claude turn on every reply, even when 4 of them would just decide "not
+my turn" and stay silent. With 15 agents on a thread that's 15 turns per
+round burned to make 1 actor contribute. User's question — "can the
+sender tell the dispatcher whom to wake?" — has a clean answer.
+
+Two new building blocks land in this release:
+
+**1. `wake` parameter on `send_email` and `reply_email`**
+
+```js
+send_email({
+  to: "vesper@localhost",
+  cc: "orion@localhost, researcher@localhost, writer@localhost, reviewer@localhost",
+  wake: ["vesper"],   // only Vesper gets a Claude turn
+  subject: "Build a small terminal game",
+  text: "Vesper, please design the spec. Reply-all when ready.",
+})
+```
+
+- `wake: ["alice", "bob"]` → only those agents get a Claude turn
+- `wake: []` → deliver silently, wake nobody (zero Claude burns)
+- `wake` absent → preserves the v0.8.x "wake every CC'd agent" default
+
+Mail is still delivered to every CC'd inbox regardless. Only the
+"should the agent get a Claude turn from the dispatcher" decision is
+gated. CC'd-but-not-listed agents see the email next time they check
+their inbox or get explicitly named in a later wake list.
+
+**2. Thread-close markers**
+
+A wrap-up reply with `[FINAL]`, `[DONE]`, `[CLOSED]`, or `[WRAP]` in
+the subject tells the dispatcher "this thread is done, no more wakes
+on any reply to it". Closes the "no native done signal" gap the user
+flagged. Case-insensitive, matched anywhere in the subject, so
+`Re: [FINAL] Project complete` and `[final] Re: Project` both work.
+
+### Architecture
+
+The wake signal travels three hops:
+
+1. **MCP `send_email` / `reply_email`** — new `wake` parameter
+   (`string[]` or comma-separated string). Forwarded to the API.
+2. **API `/mail/send`** — normalises into a lowercased bare-name list,
+   sets `X-AgenticMail-Wake: alice, bob` as a real RFC 822 header on
+   the outgoing SMTP envelope, AND surfaces the list as
+   `wakeAllowlist: string[]` on the SSE event pushed to each local
+   recipient (so the dispatcher doesn't need to fetch the email to
+   read the header).
+3. **Dispatcher** — `handleEvent` checks `wakeAllowlist` BEFORE the
+   wake-budget circuit breaker. Excluded agents skip the worker spawn
+   without consuming a wake-budget slot (otherwise selective waking
+   on a noisy thread would prematurely trip the breaker for the agent
+   that IS supposed to act).
+
+### Dedup guidance for woken agents
+
+The wake prompt now explicitly instructs woken agents to check their
+own prior contributions to the thread before re-doing work. Re-deliveries
+on subsequent wakes (the failure mode the user saw researcher and
+planner hit) get pushed back to a stay-silent decision unless the
+latest reply contains a NEW specific ask for the agent.
+
+### Tests
+
+7 new dispatcher tests covering the wake allowlist (absent → default,
+present → match, exclude → skip, empty → silent, case-insensitive,
+allowlist runs before budget, prompt mentions wake). 86 → 93
+claudecode tests passing.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api`        | 0.7.4  | 0.7.5  |
+| `@agenticmail/mcp`        | 0.7.5  | 0.7.6  |
+| `@agenticmail/claudecode` | 0.1.10 | 0.1.11 |
+| `@agenticmail/cli`        | 0.8.16 | 0.8.17 |
+
+Plugin manifest mirrored to 0.8.17. `core` and `openclaw` unchanged.
+
 ## [0.8.16] - 2026-05-13
 
 ### Added — comprehensive markdown rendering in email bodies

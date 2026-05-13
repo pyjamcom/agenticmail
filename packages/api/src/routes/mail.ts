@@ -289,6 +289,18 @@ async function notifyLocalRecipientsOfNewMail(
   subject: string,
   messageId: string | undefined,
   config: AgenticMailConfig,
+  /**
+   * Optional wake allowlist. When set, the SSE event carries
+   * `wakeAllowlist` so the @agenticmail/claudecode dispatcher can
+   * decide whether to actually spawn a worker for each recipient.
+   * Mail is delivered to every CC'd inbox regardless — only the
+   * "should the agent get a Claude turn" decision is gated.
+   *
+   * Names are pre-normalised by the route (lowercased, @localhost
+   * stripped). Empty array means "wake nobody"; undefined means
+   * "use the default wake-all-CC'd behaviour".
+   */
+  wakeList?: string[],
 ): Promise<void> {
   const collected: string[] = [];
   const push = (v: string | string[] | undefined): void => {
@@ -361,6 +373,11 @@ async function notifyLocalRecipientsOfNewMail(
       from: { name: fromAgent.name, address: fromAgent.email },
       subject,
       messageId,
+      // Wake gating signal. Present iff the sender opted in. The
+      // dispatcher reads this and spawns a Claude worker only for
+      // recipients whose name is on the list (or for everyone if the
+      // field is absent, preserving the v0.8.x default).
+      ...(wakeList !== undefined ? { wakeAllowlist: wakeList } : {}),
     });
   }
 }
@@ -389,7 +406,7 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
         return;
       }
       const agent = req.agent!;
-      const { to, subject, text, html, cc, bcc, replyTo, inReplyTo, references, attachments, allowSensitive } = req.body;
+      const { to, subject, text, html, cc, bcc, replyTo, inReplyTo, references, attachments, allowSensitive, wake } = req.body;
 
       if (!to || !subject) {
         res.status(400).json({ error: 'to and subject are required' });
@@ -510,7 +527,34 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
       const ownerName = (agent.metadata as Record<string, any>)?.ownerName;
       const fromName = ownerName ? `${agent.name} from ${ownerName}` : agent.name;
 
-      const mailOpts = { to, subject, text, html, cc, bcc, replyTo, inReplyTo, references, attachments, fromName };
+      // Normalise the wake list. Accepts either an array of names or a
+      // comma-separated string ("alice, bob"). Names with `@localhost`
+      // have the domain stripped so the dispatcher's case-insensitive
+      // name comparison just works. An empty value means "wake nobody";
+      // an absent value (undefined) keeps the default "wake all CC'd"
+      // behaviour for backwards compatibility.
+      let wakeList: string[] | undefined;
+      if (Array.isArray(wake)) {
+        wakeList = wake.map(w => String(w).trim().replace(/@localhost$/i, '').toLowerCase()).filter(Boolean);
+      } else if (typeof wake === 'string') {
+        wakeList = wake.split(',').map(w => w.trim().replace(/@localhost$/i, '').toLowerCase()).filter(Boolean);
+      }
+
+      // Set the X-AgenticMail-Wake header on the outgoing mail. This is
+      // the wire signal — the SSE notifier also reads `wakeList` directly
+      // (faster path, no IMAP fetch needed), but the header is the
+      // authoritative source if a future consumer needs to read it from
+      // the message itself (e.g. dispatcher reconnects and processes
+      // backlog mail via IMAP IDLE).
+      const customHeaders: Record<string, string> = {};
+      if (wakeList !== undefined) {
+        customHeaders['X-AgenticMail-Wake'] = wakeList.join(', ');
+      }
+
+      const mailOpts = {
+        to, subject, text, html, cc, bcc, replyTo, inReplyTo, references, attachments, fromName,
+        ...(Object.keys(customHeaders).length > 0 ? { headers: customHeaders } : {}),
+      };
       const password = getAgentPassword(agent);
 
       // Try gateway routing first (relay/domain mode for external addresses)
@@ -541,7 +585,7 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
       // We know the recipient at send time, so notify SSE directly.
       // Fire-and-forget — must never block or fail the send.
       notifyLocalRecipientsOfNewMail(
-        accountManager, to, cc, bcc, agent, subject, result.messageId, config,
+        accountManager, to, cc, bcc, agent, subject, result.messageId, config, wakeList,
       ).catch((err) => {
         console.warn(`[mail] Internal SSE notify failed: ${(err as Error).message}`);
       });

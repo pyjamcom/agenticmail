@@ -179,7 +179,7 @@ async function apiRequest<T extends ApiResponse = ApiJsonObject>(method: string,
 export const toolDefinitions = [
   {
     name: 'send_email',
-    description: 'Send an email from the agent\'s mailbox. Supports multiple recipients on To and CC (comma-separated). This is the PRIMARY primitive for multi-agent coordination: kick off a thread with all participants on CC, and every local recipient is woken automatically. Each woken agent reads the thread, decides whose turn it is, and either reply-all\'s to contribute or stays silent. External emails are scanned for sensitive content; HIGH severity detections are BLOCKED for owner approval. You CANNOT bypass the outbound guard.',
+    description: 'Send an email from the agent\'s mailbox. Supports multiple recipients on To and CC (comma-separated). This is the PRIMARY primitive for multi-agent coordination: kick off a thread with all participants on CC, and every local recipient is woken automatically — UNLESS you set `wake` to limit the wake-up to specific agents. Use `wake` aggressively on large threads: 15 agents on CC × every reply burns 15 Claude turns per round if every recipient wakes. Naming the single next actor cuts that to one. External emails are scanned for sensitive content; HIGH severity detections are BLOCKED for owner approval. You CANNOT bypass the outbound guard.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -187,7 +187,12 @@ export const toolDefinitions = [
         subject: { type: 'string', description: 'Email subject line' },
         text: { type: 'string', description: 'Plain text body' },
         html: { type: 'string', description: 'HTML body (optional)' },
-        cc: { type: 'string', description: 'CC recipients — the team. Comma-separated, e.g. "vesper@localhost, orion@localhost". Every local @localhost recipient is auto-woken when this email lands.' },
+        cc: { type: 'string', description: 'CC recipients — the team. Comma-separated, e.g. "vesper@localhost, orion@localhost". Every local @localhost recipient is auto-woken when this email lands UNLESS you also pass `wake` to restrict.' },
+        wake: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional. Names (or @localhost addresses) of the agents the dispatcher should give a Claude turn to when this mail lands. CC\'d agents NOT in this list still receive the email but get no Claude turn — they will see it the next time someone explicitly wakes them or they check their inbox. Use this to scope cost on large threads: send to 15 agents but wake only the 1 or 2 who need to act next. Pass an empty array `[]` for "deliver silently — wake nobody". Omit entirely to keep the default "wake everyone CC\'d" behaviour.',
+        },
         inReplyTo: { type: 'string', description: 'Message-ID to reply to (optional)' },
         references: {
           type: 'array',
@@ -275,7 +280,7 @@ export const toolDefinitions = [
   },
   {
     name: 'reply_email',
-    description: 'Reply to an email. Fetches the original message, auto-fills To, Subject (Re:), In-Reply-To, and References, then sends with quoted body. **For multi-agent thread coordination, pass `replyAll: true`** so every CC\'d participant sees your contribution and stays in context — that is how the thread-as-workspace pattern works. Outbound guard applies — HIGH severity content is held for review.',
+    description: 'Reply to an email. Fetches the original message, auto-fills To, Subject (Re:), In-Reply-To, and References, then sends with quoted body. **For multi-agent thread coordination, pass `replyAll: true`** so every CC\'d participant sees your contribution and stays in context — that is how the thread-as-workspace pattern works. **Pass `wake` to name only the next actor(s)** so the dispatcher gives a Claude turn only to them; everyone else still receives the mail but stays asleep. Outbound guard applies — HIGH severity content is held for review.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -283,6 +288,11 @@ export const toolDefinitions = [
         text: { type: 'string', description: 'Your reply text' },
         html: { type: 'string', description: 'HTML reply (optional)' },
         replyAll: { type: 'boolean', description: 'Reply to all recipients (default: false)' },
+        wake: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional. Names of the agents who should get a Claude turn from the dispatcher when this reply lands. CC\'d agents NOT in this list still receive the email but stay asleep — saves significant tokens on large threads. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
+        },
       },
       required: ['uid', 'text'],
     },
@@ -1261,6 +1271,15 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
           ...(a.encoding ? { encoding: a.encoding } : {}),
         }));
       }
+      // Wake-allowlist: forward as-is. The API normalises strings/arrays
+      // into a real array, sets the X-AgenticMail-Wake header on the
+      // outgoing mail, and surfaces the list in the SSE event so the
+      // dispatcher can decide which recipients deserve a Claude turn.
+      // Empty array means "wake nobody"; absent means "wake everyone CC'd"
+      // (the default backwards-compatible behaviour).
+      if (args.wake !== undefined) {
+        sendBody.wake = args.wake;
+      }
       const result = await apiRequest('POST', '/mail/send', sendBody);
 
       // Check if API held the email for review
@@ -1388,6 +1407,12 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
         to, subject, text: fullText, html: args.html,
         inReplyTo: original.messageId, references: refs,
       };
+      // Forward the wake allowlist down the same path send_email uses.
+      // The /mail/send route normalises and translates it into the
+      // X-AgenticMail-Wake header + the wakeAllowlist SSE field.
+      if (args.wake !== undefined) {
+        replySendBody.wake = args.wake;
+      }
 
       const sendResult = await apiRequest('POST', '/mail/send', replySendBody);
 

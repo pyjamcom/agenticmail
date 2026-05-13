@@ -60,6 +60,12 @@ interface SSEEvent {
   taskType?: string;
   task?: string;
   assignee?: string;
+  /**
+   * Optional wake allowlist set by the sender via `send_email({ wake })`.
+   * When present, only listed agents (case-insensitive bare name) get a
+   * Claude turn. When absent, every CC'd recipient wakes (v0.8.x default).
+   */
+  wakeAllowlist?: string[];
   [key: string]: unknown;
 }
 
@@ -89,6 +95,41 @@ function extractFrom(event: SSEEvent): string | undefined {
     if (first?.name) return first.name;
   }
   return undefined;
+}
+
+/**
+ * Pull the wake allowlist from an SSE event, if the sender opted in.
+ *
+ * The API normalises wake list entries to lowercase bare names (no
+ * @localhost) before publishing, so the dispatcher can match against
+ * `account.name` directly without re-normalising.
+ *
+ * Returns:
+ *   undefined  → no allowlist; use the default "wake everyone" behaviour
+ *   []         → explicit "wake nobody" — deliver mail silently
+ *   [names]    → wake only these named agents
+ */
+function extractWakeAllowlist(event: SSEEvent): string[] | undefined {
+  const raw = event.wakeAllowlist;
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return undefined; // malformed → ignore
+  return raw.map(x => String(x).trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * Should the dispatcher actually spawn a Claude worker for this
+ * recipient given the wake allowlist on the event?
+ *
+ *   no allowlist  → yes (preserves the default "wake everyone CC'd" behaviour
+ *                   from v0.8.x and earlier)
+ *   empty list    → no  (sender deliberately marked the mail as
+ *                   "deliver silently — no Claude turns please")
+ *   has entries   → yes only if the recipient's name is on the list
+ */
+function isAgentOnWakeAllowlist(accountName: string, list: string[] | undefined): boolean {
+  if (list === undefined) return true;
+  if (list.length === 0) return false;
+  return list.includes(accountName.trim().toLowerCase());
 }
 
 export interface DispatcherOptions extends ResolveConfigOptions {
@@ -205,6 +246,29 @@ function isTaskNotificationSubject(subject: string | undefined): boolean {
     if (head.toLowerCase().startsWith(prefix.toLowerCase())) return true;
   }
   return false;
+}
+
+/**
+ * Thread-termination markers the host can put in a subject line to tell
+ * the dispatcher "this thread is done — stop waking workers on replies
+ * to it". Replies still flow (the mail server doesn't know about this);
+ * agents just don't get a Claude turn for them.
+ *
+ * The user named this gap directly: "No native 'done' signal — the
+ * thread just keeps cascading." Subject prefix is the lightest possible
+ * answer — the host adds `[FINAL]` / `[DONE]` / `[CLOSED]` to a wrap-up
+ * email, and the dispatcher honours it from that point forward on every
+ * reply in the same thread.
+ *
+ * Matched case-insensitively, anywhere in the subject (not just prefix)
+ * so `Re: [FINAL] my project` works the same as `[FINAL] Re: my project`.
+ */
+const THREAD_CLOSED_MARKERS = ['[FINAL]', '[DONE]', '[CLOSED]', '[WRAP]'];
+
+function isThreadClosedSubject(subject: string | undefined): boolean {
+  if (!subject) return false;
+  const s = subject.toLowerCase();
+  return THREAD_CLOSED_MARKERS.some(m => s.includes(m.toLowerCase()));
 }
 
 /**
@@ -394,11 +458,24 @@ function newMailPrompt(agent: AgenticMailAccount, event: SSEEvent): string {
     `   to surface earlier messages in the thread, then read_email each prior UID.`,
     `   You MUST read the full thread before deciding what to do.`,
     ``,
-    `3. **Identify the participants.** Look at To + CC across the thread. Those`,
+    `3. **CHECK YOUR PRIOR CONTRIBUTIONS to this thread.** When you searched`,
+    `   in step 2, look at how many of the messages were sent BY YOU`,
+    `   (from: ${agent.email}). If you have already contributed your work`,
+    `   to this thread, **do NOT redo it on a new wake**. Redelivering`,
+    `   identical content when a teammate posts an update is the most`,
+    `   common multi-agent failure mode — it triples noise and wastes`,
+    `   tokens. Only re-contribute if EITHER:`,
+    `     (a) the latest reply contains a NEW specific ask addressed to`,
+    `         you by name and you have not yet answered THAT ask, OR`,
+    `     (b) a teammate's reply genuinely changes the picture and your`,
+    `         prior work needs an explicit revision (not a re-post).`,
+    `   Otherwise stay silent.`,
+    ``,
+    `4. **Identify the participants.** Look at To + CC across the thread. Those`,
     `   are your collaborators. Their names map to AgenticMail agents at`,
     `   <name>@localhost. They will each be woken on every reply-all the same way you were.`,
     ``,
-    `4. **Decide: is it MY turn?** Yes if any of:`,
+    `5. **Decide: is it MY turn?** Yes if any of:`,
     `     - The latest message addresses you by name ("Vesper, please …", "@${agent.name} …").`,
     `     - The previous-stage handoff is to your role (e.g. designer → developer, and you are the developer).`,
     `     - You were directly asked a question and nobody has answered yet.`,
@@ -412,7 +489,7 @@ function newMailPrompt(agent: AgenticMailAccount, event: SSEEvent): string {
     `   When in doubt, stay silent — over-replying creates noise. Better to let`,
     `   the right teammate take the turn than to step on theirs.`,
     ``,
-    `5. **If it's your turn — do the actual work, THEN reply-all about it.**`,
+    `6. **If it's your turn — do the actual work, THEN reply-all about it.**`,
     `   You have full native tools: Read, Write, Edit, Bash, Glob, Grep, WebFetch,`,
     `   WebSearch, NotebookEdit, etc. If the task is "implement X", write the file`,
     `   with Write or Edit and verify with Bash — do NOT paste source code into an`,
@@ -422,14 +499,30 @@ function newMailPrompt(agent: AgenticMailAccount, event: SSEEvent): string {
     `     reply_email({ uid: ${uid ?? '<uid>'}, replyAll: true, text: "...", _account: "${agent.name}" })`,
     `   Sign with your name. Be substantive but concise. If you are handing off`,
     `   to the next teammate, name them explicitly in your reply ("Orion — over to you, please …").`,
+    `   **NAME the next actor in the \`wake\` parameter** so the dispatcher only`,
+    `   gives them a Claude turn — every other CC'd teammate still receives the`,
+    `   mail in their inbox but stays asleep, saving the project a lot of tokens.`,
+    `   Example: \`reply_email({ uid, replyAll: true, text: "Orion — your turn …",`,
+    `   wake: ["orion"], _account: "${agent.name}" })\`. If nobody specific is`,
+    `   next (the work is complete and you're just signing off), pass \`wake: []\``,
+    `   to deliver silently with zero Claude turns spawned.`,
     ``,
-    `6. **If you need additional help from a teammate not yet on the thread,**`,
+    `7. **If you need additional help from a teammate not yet on the thread,**`,
     `   include them by CC'ing in your reply-all — DO NOT spin up a separate`,
     `   call_agent / message_agent side-channel. The thread is the workspace;`,
     `   everyone stays in context.`,
     ``,
-    `7. **If it's NOT your turn,** mark the message read with mark_read and return.`,
+    `8. **If it's NOT your turn,** mark the message read with mark_read and return.`,
     `   Do not reply just to acknowledge. Silence IS a valid contribution.`,
+    ``,
+    `## How threads end`,
+    ``,
+    `A thread is done when the host (or any participant) sends a wrap-up`,
+    `message with one of these markers in the subject: \`[FINAL]\`, \`[DONE]\`,`,
+    `\`[CLOSED]\`, \`[WRAP]\`. The dispatcher will stop waking workers on any`,
+    `further replies to that thread. If you are sending a wrap-up yourself`,
+    `(because the work is complete and no more contributions are needed),`,
+    `include one of those markers in your reply subject.`,
     ``,
     `When you finish, return a one-line summary of what you did:`,
     `  "Contributed: <one-line description>"  OR  "Stayed silent — not my turn."`,
@@ -618,6 +711,30 @@ export class Dispatcher {
         return;
       }
       if (ch) rememberBounded(ch.seenUids, event.uid);
+
+      // Hard stop: thread closed by the host. Adding `[FINAL]` / `[DONE]`
+      // / `[CLOSED]` / `[WRAP]` to a subject tells the dispatcher "we're
+      // done here, no more wakes". This is the lightest possible answer
+      // to "no native done signal" — works on any mail client, costs
+      // zero round trips, and pairs cleanly with the wake-budget
+      // circuit breaker below.
+      if (isThreadClosedSubject(subject)) {
+        this.log('info', `[dispatcher] thread closed (subject="${subject ?? ''}") — skipping wake for "${account.name}" uid=${event.uid}`);
+        return;
+      }
+
+      // Selective-wake allowlist. When the sender included a `wake` list
+      // (translated by the API into the `wakeAllowlist` field on the SSE
+      // event), only listed agents get a Claude turn. This is the big
+      // token-saver on large threads — sender knows who needs to act
+      // next, dispatcher trusts it. CC'd-but-not-listed agents still
+      // receive the mail in their inbox; they just don't burn a Claude
+      // turn deciding "not my turn" and going silent.
+      const allowlist = extractWakeAllowlist(event);
+      if (!isAgentOnWakeAllowlist(account.name, allowlist)) {
+        this.log('info', `[dispatcher] wake allowlist excludes "${account.name}" (list=${JSON.stringify(allowlist)}) — mail delivered, no Claude turn`);
+        return;
+      }
 
       // Wake-budget circuit breaker. Caps per-(agent, thread) wakes so a
       // runaway thread (reply loop, simultaneous-turn storm, stuck

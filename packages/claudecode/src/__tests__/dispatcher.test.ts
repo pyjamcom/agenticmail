@@ -177,6 +177,152 @@ describe('Dispatcher.handleEvent — wake-budget circuit breaker', () => {
   });
 });
 
+describe('Dispatcher.handleEvent — selective wake allowlist', () => {
+  it('absent allowlist → wake everyone (backwards compatible)', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, { type: 'new', uid: 1, from: 'x', subject: 'hi' });
+    expect(sdk.calls).toHaveLength(1);
+  });
+
+  it('present allowlist with the agent → wake them', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 1, from: 'x', subject: 'hi',
+      wakeAllowlist: ['fola', 'orion'],
+    });
+    expect(sdk.calls).toHaveLength(1);
+  });
+
+  it('present allowlist WITHOUT the agent → skip the worker entirely', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 1, from: 'x', subject: 'hi',
+      wakeAllowlist: ['orion', 'researcher'], // Fola not listed
+    });
+    expect(sdk.calls).toHaveLength(0);
+  });
+
+  it('empty allowlist (`wake: []`) → wake nobody, deliver silently', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 1, from: 'x', subject: 'hi',
+      wakeAllowlist: [],
+    });
+    expect(sdk.calls).toHaveLength(0);
+  });
+
+  it('allowlist matching is case-insensitive', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 1, from: 'x', subject: 'hi',
+      wakeAllowlist: ['FOLA'], // upper-case
+    });
+    expect(sdk.calls).toHaveLength(1);
+  });
+
+  it('wake allowlist check runs BEFORE budget — does not consume a wake slot', async () => {
+    // The allowlist skip must NOT decrement the wake-budget counter.
+    // Otherwise a noisy thread with selective wakes could prematurely
+    // trip the circuit breaker for the agent that IS supposed to act.
+    const { d, sdk } = makeDispatcher({}, { maxWakesPerThread: 2 });
+    // 5 events on the same thread, all excluding Fola from the wake list.
+    for (let uid = 1; uid <= 5; uid++) {
+      await d.handleEvent(FOLA, {
+        type: 'new', uid,
+        from: 'x',
+        subject: uid === 1 ? 'Project' : 'Re: Project',
+        wakeAllowlist: ['orion'], // Fola never woken
+      });
+    }
+    expect(sdk.calls).toHaveLength(0);
+    // Now one event WITH Fola on the list — budget should be untouched.
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 6, from: 'x', subject: 'Re: Project',
+      wakeAllowlist: ['fola'],
+    });
+    expect(sdk.calls).toHaveLength(1);
+  });
+
+  it('wake-prompt tells agents to use `wake` on their own replies', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, { type: 'new', uid: 1, from: 'x', subject: 'hi' });
+    const prompt = sdk.calls[0].prompt as string;
+    expect(prompt).toMatch(/wake:/);
+    expect(prompt).toMatch(/dispatcher only/i);
+  });
+});
+
+describe('Dispatcher.handleEvent — thread-closed markers', () => {
+  it('skips waking workers when subject contains [FINAL]', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 1,
+      from: 'boss@external.com',
+      subject: '[FINAL] Project complete — thanks team',
+    });
+    expect(sdk.calls).toHaveLength(0);
+  });
+
+  it('also honours [DONE], [CLOSED], and [WRAP] markers', async () => {
+    const { d: d1, sdk: s1 } = makeDispatcher();
+    await d1.handleEvent(FOLA, { type: 'new', uid: 1, from: 'x', subject: '[DONE] wrap' });
+    expect(s1.calls).toHaveLength(0);
+
+    const { d: d2, sdk: s2 } = makeDispatcher();
+    await d2.handleEvent(FOLA, { type: 'new', uid: 1, from: 'x', subject: '[CLOSED] wrap' });
+    expect(s2.calls).toHaveLength(0);
+
+    const { d: d3, sdk: s3 } = makeDispatcher();
+    await d3.handleEvent(FOLA, { type: 'new', uid: 1, from: 'x', subject: '[WRAP] wrap' });
+    expect(s3.calls).toHaveLength(0);
+  });
+
+  it('matches the marker anywhere in the subject (case-insensitive)', async () => {
+    // Mail clients add Re: in front of the original subject, so the marker
+    // can end up mid-string rather than at the start. Honour it anyway.
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 1, from: 'x',
+      subject: 'Re: [final] My Project — wrap-up',
+    });
+    expect(sdk.calls).toHaveLength(0);
+  });
+
+  it('still wakes for normal subjects that just mention the markers in passing', async () => {
+    // Defensive check — `[FINAL]` etc. only triggers when the bracketed
+    // form is intentionally placed. A subject like "final report due"
+    // without brackets should NOT silence the thread.
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, {
+      type: 'new', uid: 1, from: 'x',
+      subject: 'Re: Final report due Friday',
+    });
+    expect(sdk.calls).toHaveLength(1);
+  });
+
+  it('the wake prompt instructs agents on how to close threads', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, { type: 'new', uid: 1, from: 'x', subject: 'Hi' });
+    expect(sdk.calls).toHaveLength(1);
+    const prompt = sdk.calls[0].prompt as string;
+    expect(prompt).toMatch(/\[FINAL\]/);
+    expect(prompt).toMatch(/\[DONE\]/);
+    expect(prompt).toMatch(/wrap/i);
+  });
+
+  it('the wake prompt explicitly tells agents to check their prior contributions', async () => {
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, { type: 'new', uid: 1, from: 'x', subject: 'Hi' });
+    const prompt = sdk.calls[0].prompt as string;
+    // The dedup guidance — most common multi-agent failure mode.
+    expect(prompt).toMatch(/prior contributions/i);
+    expect(prompt).toMatch(/do NOT redo/);
+    // The agent's own email should be named so they know what `from`
+    // value to filter their search results on.
+    expect(prompt).toContain(FOLA.email);
+  });
+});
+
 describe('Dispatcher.handleEvent — task routing', () => {
   it('spawns a worker on task assignment with a claim+submit prompt', async () => {
     const { d, sdk } = makeDispatcher();
