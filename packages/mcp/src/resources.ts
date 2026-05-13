@@ -1,4 +1,4 @@
-const API_URL = process.env.AGENTICMAIL_API_URL ?? 'http://127.0.0.1:3100';
+const API_URL = process.env.AGENTICMAIL_API_URL ?? 'http://127.0.0.1:3829';
 const API_KEY = process.env.AGENTICMAIL_API_KEY ?? '';
 
 async function apiRequest(path: string): Promise<any> {

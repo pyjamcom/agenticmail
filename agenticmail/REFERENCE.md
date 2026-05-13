@@ -156,7 +156,7 @@ function interactiveShell(options: ShellOptions): void
 **ShellOptions:**
 ```typescript
 {
-  apiUrl: string;       // e.g., 'http://127.0.0.1:3100'
+  apiUrl: string;       // e.g., 'http://127.0.0.1:3829'
   masterKey: string;
   onExit: () => void;   // Cleanup callback
 }

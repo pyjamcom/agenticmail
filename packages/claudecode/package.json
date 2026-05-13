@@ -1,0 +1,97 @@
+{
+  "name": "@agenticmail/claudecode",
+  "version": "0.1.5",
+  "description": "Claude Code integration for AgenticMail — surfaces every AgenticMail agent as a native Claude Code subagent so any Claude Code session can delegate to them with the Agent tool",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "agenticmail-claudecode": "dist/cli.js",
+    "agenticmail-claudecode-dispatcher": "dist/dispatcher-bin.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./install": {
+      "import": "./dist/install.js",
+      "types": "./dist/install.d.ts"
+    },
+    "./uninstall": {
+      "import": "./dist/uninstall.js",
+      "types": "./dist/uninstall.d.ts"
+    },
+    "./status": {
+      "import": "./dist/status.js",
+      "types": "./dist/status.d.ts"
+    },
+    "./http-routes": {
+      "import": "./dist/http-routes.js",
+      "types": "./dist/http-routes.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "claudecode.plugin.json",
+    "scripts",
+    "README.md",
+    "REFERENCE.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/cli.ts src/install.ts src/uninstall.ts src/status.ts src/http-routes.ts src/dispatcher.ts src/dispatcher-bin.ts --format esm --dts --clean",
+    "test": "vitest run --passWithNoTests",
+    "preuninstall": "node scripts/uninstall.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@agenticmail/mcp": "^0.7.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.140"
+  },
+  "peerDependencies": {
+    "express": "^4.17.0 || ^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/supertest": "^6.0.0",
+    "express": "^5.0.0",
+    "supertest": "^7.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agenticmail/agenticmail.git",
+    "directory": "packages/claudecode"
+  },
+  "homepage": "https://github.com/agenticmail/agenticmail",
+  "bugs": "https://github.com/agenticmail/agenticmail/issues",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "mcp",
+    "model-context-protocol",
+    "subagent",
+    "agent",
+    "ai-agent",
+    "email",
+    "sms",
+    "agenticmail"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Ope Olatunji",
+  "license": "MIT"
+}

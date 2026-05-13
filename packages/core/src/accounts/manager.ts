@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { randomBytes } from 'node:crypto';
-import type Database from 'better-sqlite3';
+import type { Database } from '../storage/db.js';
 import { StalwartAdmin } from '../stalwart/admin.js';
 import type { Agent, CreateAgentOptions, AgentRow, AgentRole } from './types.js';
 import { DEFAULT_AGENT_ROLE } from './types.js';
@@ -37,7 +37,7 @@ function rowToAgent(row: AgentRow): Agent {
 
 export class AccountManager {
   constructor(
-    private db: Database.Database,
+    private db: Database,
     private stalwart: StalwartAdmin,
   ) {}
 
@@ -152,31 +152,31 @@ export class AccountManager {
 
   async getById(id: string): Promise<Agent | null> {
     const stmt = this.db.prepare('SELECT * FROM agents WHERE id = ?');
-    const row = stmt.get(id) as AgentRow | undefined;
+    const row = stmt.get(id) as unknown as AgentRow | undefined;
     return row ? rowToAgent(row) : null;
   }
 
   async getByApiKey(apiKey: string): Promise<Agent | null> {
     const stmt = this.db.prepare('SELECT * FROM agents WHERE api_key = ?');
-    const row = stmt.get(apiKey) as AgentRow | undefined;
+    const row = stmt.get(apiKey) as unknown as AgentRow | undefined;
     return row ? rowToAgent(row) : null;
   }
 
   async getByName(name: string): Promise<Agent | null> {
     const stmt = this.db.prepare('SELECT * FROM agents WHERE LOWER(name) = LOWER(?)');
-    const row = stmt.get(name) as AgentRow | undefined;
+    const row = stmt.get(name) as unknown as AgentRow | undefined;
     return row ? rowToAgent(row) : null;
   }
 
   async list(): Promise<Agent[]> {
     const stmt = this.db.prepare('SELECT * FROM agents ORDER BY created_at DESC');
-    const rows = stmt.all() as AgentRow[];
+    const rows = stmt.all() as unknown as AgentRow[];
     return rows.map(rowToAgent);
   }
 
   async getByRole(role: AgentRole): Promise<Agent[]> {
     const stmt = this.db.prepare('SELECT * FROM agents WHERE role = ? ORDER BY created_at DESC');
-    const rows = stmt.all(role) as AgentRow[];
+    const rows = stmt.all(role) as unknown as AgentRow[];
     return rows.map(rowToAgent);
   }
 

@@ -129,7 +129,7 @@ export class SetupManager {
       },
       smtp: { host: 'localhost', port: 587 },
       imap: { host: 'localhost', port: 143 },
-      api: { port: 3100, host: '127.0.0.1' },
+      api: { port: 3829, host: '127.0.0.1' },
       dataDir,
     };
 
@@ -143,7 +143,7 @@ STALWART_ADMIN_PASSWORD=${stalwartPassword}
 STALWART_URL=http://localhost:8080
 
 AGENTICMAIL_MASTER_KEY=${masterKey}
-AGENTICMAIL_API_PORT=3100
+AGENTICMAIL_API_PORT=3829
 AGENTICMAIL_DATA_DIR=${dataDir}
 
 SMTP_HOST=localhost

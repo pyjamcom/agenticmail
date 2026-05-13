@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import type { Database } from '../storage/db.js';
 import { join } from 'node:path';
 import { createCipheriv, createDecipheriv, randomBytes, createHash, scryptSync } from 'node:crypto';
 import nodemailer from 'nodemailer';
@@ -36,7 +36,7 @@ export interface LocalSmtpConfig {
 }
 
 export interface GatewayManagerOptions {
-  db: Database.Database;
+  db: Database;
   stalwart: StalwartAdmin;
   accountManager?: AccountManager;
   localSmtp?: LocalSmtpConfig;
@@ -102,7 +102,7 @@ function decryptSecret(value: string, key: string): string {
  * services (DNS, tunnels, registrar), and the local Stalwart instance.
  */
 export class GatewayManager {
-  private db: Database.Database;
+  private db: Database;
   private stalwart: StalwartAdmin;
   private accountManager: AccountManager | null;
   private relay: RelayGateway;
@@ -1057,7 +1057,7 @@ export class GatewayManager {
     if (!this.smsManager || !this.accountManager) return;
 
     // List all agents and check for SMS configs with separate credentials
-    const agents = this.db.prepare('SELECT id, name, metadata FROM agents').all() as Array<{ id: string; name: string; metadata: string }>;
+    const agents = this.db.prepare('SELECT id, name, metadata FROM agents').all() as unknown as Array<{ id: string; name: string; metadata: string }>;
 
     for (const agent of agents) {
       try {
@@ -1187,7 +1187,7 @@ export class GatewayManager {
   // --- Persistence ---
 
   private loadConfig(): void {
-    const row = this.db.prepare('SELECT * FROM gateway_config WHERE id = ?').get('default') as GatewayConfigRow | undefined;
+    const row = this.db.prepare('SELECT * FROM gateway_config WHERE id = ?').get('default') as unknown as GatewayConfigRow | undefined;
     if (row) {
       try {
         const parsed = JSON.parse(row.config);

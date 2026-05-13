@@ -36,7 +36,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 0.7.x of @agenticmail/core uses Node's built-in `node:sqlite`
+          # (stable since Node 22), so CI must run on >=22. Older versions
+          # of this workflow pinned 20 — the pin moved up with the DB
+          # migration that dropped better-sqlite3.
+          node-version: 22
           cache: npm
 
       - name: Install dependencies

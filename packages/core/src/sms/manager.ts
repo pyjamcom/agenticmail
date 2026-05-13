@@ -10,7 +10,7 @@
  * SMS config is stored in agent metadata under the "sms" key.
  */
 
-import type { Database } from 'better-sqlite3';
+import type { Database } from '../storage/db.js';
 
 export interface SmsConfig {
   /** Whether SMS is enabled for this agent */

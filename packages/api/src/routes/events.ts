@@ -61,7 +61,7 @@ export async function closeAllWatchers(): Promise<void> {
   activeWatchers.clear();
 }
 
-export function createEventRoutes(accountManager: AccountManager, config: AgenticMailConfig, db?: import('better-sqlite3').Database): Router {
+export function createEventRoutes(accountManager: AccountManager, config: AgenticMailConfig, db?: import('@agenticmail/core').Database): Router {
   const router = Router();
 
   // SSE endpoint for real-time events

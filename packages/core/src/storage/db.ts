@@ -1,18 +1,81 @@
-import Database from 'better-sqlite3';
+/**
+ * SQLite storage layer for AgenticMail.
+ *
+ * Migrated from `better-sqlite3` to Node's built-in `node:sqlite` module
+ * (stable since Node 22). The migration eliminates native compilation
+ * entirely — `better-sqlite3` ships pre-built binaries per
+ * NODE_MODULE_VERSION and intermittently lags new Node releases (Node
+ * 25.5.0 was a real example: prebuilds missing, node-gyp fails on the
+ * fallback compile-from-source path, fresh `npm install -g
+ * @agenticmail/cli` fails for users on bleeding-edge Node). `node:sqlite`
+ * is part of Node itself, so by definition it always matches the
+ * runtime — no prebuilds, no gyp, no binding errors.
+ *
+ * # API shape differences this file accommodates
+ *
+ *   - `new DatabaseSync(path)` instead of `new Database(path)`.
+ *   - No `db.pragma(x)` — use `db.exec("PRAGMA " + x)`.
+ *   - No `db.transaction(fn)` — wrap in BEGIN/COMMIT manually (see
+ *     `runTransactionally` below). Migrations are the only transaction
+ *     site in core right now; if more callers need transactions later
+ *     they should reuse the same helper.
+ *   - `stmt.run(...)` still returns `{ changes, lastInsertRowid }`.
+ *     One subtle gotcha: `lastInsertRowid` is a `bigint` in node:sqlite
+ *     where better-sqlite3 returned a `number`. Consumers that compare
+ *     with `===` or pass it to `Number(...)` need to be aware, but no
+ *     site inside AgenticMail today does that — all our rowids are
+ *     opaque or string-typed.
+ *   - The class type is `DatabaseSync`; we re-export it as `Database`
+ *     so consumer files can keep saying `Database` instead of plumbing
+ *     `DatabaseSync` through everywhere.
+ */
+
+import { createRequire } from 'node:module';
 import { ensureDataDir, type AgenticMailConfig } from '../config.js';
 
-let db: Database.Database | null = null;
+/**
+ * Load Node's built-in sqlite module via `createRequire` rather than a
+ * static `import { DatabaseSync } from 'node:sqlite'`.
+ *
+ * Why: esbuild (under tsup) normalises `node:sqlite` imports to plain
+ * `sqlite` in the bundled output even when targeting `node22` — see
+ * https://github.com/evanw/esbuild/issues/* (a known long-standing
+ * quirk). The stripped form fails at runtime because there is no
+ * userland `sqlite` package on disk. `createRequire(import.meta.url)`
+ * runs at runtime and is opaque to esbuild's static analysis, so the
+ * literal string `'node:sqlite'` is preserved verbatim and Node's
+ * loader resolves it as the built-in.
+ *
+ * The type import stays static so we keep full IntelliSense on
+ * DatabaseSync without paying for a separate type-only module.
+ */
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
+type DatabaseSync = InstanceType<typeof import('node:sqlite').DatabaseSync>;
 
-export function getDatabase(config: AgenticMailConfig): Database.Database {
+/**
+ * Public type alias for the database instance. Consumers should
+ * `import { type Database } from '@agenticmail/core'` rather than
+ * importing from `node:sqlite` directly — this insulates them from any
+ * future swap (back to better-sqlite3, or to a remote driver) without
+ * a cascade of changes across the workspace.
+ */
+export type Database = DatabaseSync;
+
+let db: Database | null = null;
+
+export function getDatabase(config: AgenticMailConfig): Database {
   if (db) return db;
 
   ensureDataDir(config);
   const dbPath = `${config.dataDir}/agenticmail.db`;
-  db = new Database(dbPath);
+  db = new DatabaseSync(dbPath);
 
-  // Enable WAL mode for better concurrent access
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+  // Enable WAL mode for better concurrent access. node:sqlite doesn't
+  // expose a .pragma() helper the way better-sqlite3 did, so we use
+  // .exec() with raw PRAGMA statements. Effect is identical.
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
 
   runMigrations(db);
   return db;
@@ -22,6 +85,27 @@ export function closeDatabase(): void {
   if (db) {
     db.close();
     db = null;
+  }
+}
+
+/**
+ * Run `fn` inside a manual SQLite transaction.
+ *
+ * node:sqlite does NOT provide `db.transaction()` the way better-sqlite3
+ * did, so we wrap a BEGIN/COMMIT pair around the callback. On any
+ * synchronous throw we ROLLBACK and re-throw so the caller sees the
+ * original error. Async callbacks are NOT supported here — node:sqlite
+ * is sync-only by design, mirroring better-sqlite3's contract, and the
+ * one transaction site in this file (migrations) is fully synchronous.
+ */
+function runTransactionally(database: Database, fn: () => void): void {
+  database.exec('BEGIN');
+  try {
+    fn();
+    database.exec('COMMIT');
+  } catch (err) {
+    try { database.exec('ROLLBACK'); } catch { /* best effort */ }
+    throw err;
   }
 }
 
@@ -275,7 +359,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_notification ON pending_outbound(notifica
 `,
 };
 
-function runMigrations(database: Database.Database): void {
+function runMigrations(database: Database): void {
   // Ensure migrations tracking table exists
   database.exec(`
     CREATE TABLE IF NOT EXISTS _migrations (
@@ -286,29 +370,28 @@ function runMigrations(database: Database.Database): void {
   `);
 
   const appliedStmt = database.prepare('SELECT name FROM _migrations');
-  const applied = new Set(appliedStmt.all().map((r: any) => r.name));
+  const applied = new Set(appliedStmt.all().map((r: any) => r.name as string));
 
   const insertStmt = database.prepare('INSERT INTO _migrations (name) VALUES (?)');
 
   // Sort migrations by name to ensure consistent ordering
   const sortedMigrations = Object.entries(MIGRATIONS).sort(([a], [b]) => a.localeCompare(b));
 
-  // Run each migration in a transaction for atomicity
-  const runMigration = database.transaction((name: string, sql: string) => {
-    database.exec(sql);
-    insertStmt.run(name);
-  });
-
+  // Run each migration in a transaction for atomicity. node:sqlite has
+  // no transaction() helper, so we wrap manually via runTransactionally.
   for (const [name, sql] of sortedMigrations) {
     if (applied.has(name)) continue;
-    runMigration(name, sql);
+    runTransactionally(database, () => {
+      database.exec(sql);
+      insertStmt.run(name);
+    });
   }
 }
 
-export function createTestDatabase(): Database.Database {
-  const testDb = new Database(':memory:');
-  testDb.pragma('journal_mode = WAL');
-  testDb.pragma('foreign_keys = ON');
+export function createTestDatabase(): Database {
+  const testDb = new DatabaseSync(':memory:');
+  testDb.exec('PRAGMA journal_mode = WAL');
+  testDb.exec('PRAGMA foreign_keys = ON');
 
   for (const sql of Object.values(MIGRATIONS)) {
     testDb.exec(sql);

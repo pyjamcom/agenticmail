@@ -57,7 +57,7 @@ export { InboxWatcher, type InboxWatcherOptions } from './inbox/watcher.js';
 export type { InboxEvent, InboxNewEvent, InboxExpungeEvent, InboxFlagsEvent, WatcherOptions } from './inbox/types.js';
 
 // Storage
-export { getDatabase, closeDatabase, createTestDatabase } from './storage/db.js';
+export { getDatabase, closeDatabase, createTestDatabase, type Database } from './storage/db.js';
 export { EmailSearchIndex, type SearchableEmail } from './storage/search.js';
 
 // Domain Management

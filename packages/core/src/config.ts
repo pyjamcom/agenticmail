@@ -69,7 +69,16 @@ const DEFAULT_CONFIG: AgenticMailConfig = {
     port: 143,
   },
   api: {
-    port: 3100,
+    // Default API port: 3829.
+    //
+    // We deliberately avoid 3000 (React/Express default), 3100 (Grafana
+    // Loki, also a common Express convention), 3200 (Grafana Tempo),
+    // 3300 (LMS-style apps), 4000/5000/8000/8080 (too common). 3829 sits
+    // in a quiet stretch — unassigned by IANA, and far enough from
+    // common dev tooling that a fresh `agenticmail setup` rarely
+    // collides. Users can override via the `AGENTICMAIL_API_PORT` env
+    // var or by editing `~/.agenticmail/config.json` after install.
+    port: 3829,
     host: '127.0.0.1',
   },
   masterKey: '',

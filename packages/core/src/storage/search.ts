@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import type { Database } from './db.js';
 
 export interface SearchableEmail {
   agentId: string;
@@ -11,7 +11,7 @@ export interface SearchableEmail {
 }
 
 export class EmailSearchIndex {
-  constructor(private db: Database.Database) {}
+  constructor(private db: Database) {}
 
   index(email: SearchableEmail): void {
     // FTS5 tables have no UNIQUE constraint — guard against duplicate entries
@@ -54,7 +54,7 @@ export class EmailSearchIndex {
         ORDER BY rank
         LIMIT ?
       `);
-      return stmt.all(agentId, sanitized, limit) as SearchableEmail[];
+      return stmt.all(agentId, sanitized, limit) as unknown as SearchableEmail[];
     } catch {
       // FTS5 query errors (e.g., malformed syntax) — return empty
       return [];

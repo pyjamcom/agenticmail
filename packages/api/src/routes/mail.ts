@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
-import type Database from 'better-sqlite3';
+import type { Database } from '@agenticmail/core';
 import {
   MailSender,
   MailReceiver,
@@ -378,7 +378,7 @@ function saveSentCopy(authUser: string, password: string, config: AgenticMailCon
   })();
 }
 
-export function createMailRoutes(accountManager: AccountManager, config: AgenticMailConfig, db: Database.Database, gatewayManager?: GatewayManager): Router {
+export function createMailRoutes(accountManager: AccountManager, config: AgenticMailConfig, db: Database, gatewayManager?: GatewayManager): Router {
   const router = Router();
 
   // Send email

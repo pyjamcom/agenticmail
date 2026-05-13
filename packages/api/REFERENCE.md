@@ -1297,7 +1297,7 @@ Signals: SIGTERM and SIGINT both trigger shutdown.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AGENTICMAIL_MASTER_KEY` | Yes | — | Master API key |
-| `AGENTICMAIL_API_PORT` | No | `3100` | Server port |
+| `AGENTICMAIL_API_PORT` | No | `3829` | Server port |
 | `STALWART_URL` | No | `http://localhost:8080` | Stalwart admin URL |
 | `STALWART_ADMIN_USER` | No | `admin` | Stalwart admin user |
 | `STALWART_ADMIN_PASSWORD` | No | `changeme` | Stalwart admin password |

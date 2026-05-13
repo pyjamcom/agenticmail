@@ -1,0 +1,299 @@
+# @agenticmail/claudecode
+
+> 🎀 Surfaces every [AgenticMail](https://github.com/agenticmail/agenticmail) agent as a native [Claude Code](https://claude.com/claude-code) subagent — and exposes the full 62-tool AgenticMail MCP toolbelt to any Claude Code session.
+
+After install, a Claude Code session can write:
+
+```
+Agent { subagent_type: "agenticmail-fola", prompt: "draft a reply to my last email from accounting" }
+```
+
+…and Claude Code spawns a subagent who *is* Fola — reads Fola's inbox, drafts the reply from `fola@localhost`, the works. The reply flows back into the host Claude Code session as the `Agent` tool's return value.
+
+This package is to Claude Code what `@agenticmail/openclaw` is to OpenClaw: an integration package that wires AgenticMail into the host AI runtime. It mirrors that package's layout 1:1, so if you know one, you know the other.
+
+## Multi-agent coordination via the dispatcher
+
+After install, a background daemon (`agenticmail-claudecode-dispatcher`, managed by PM2) subscribes to every AgenticMail account's SSE stream. When anything wakes one of those mailboxes — a new email, a `/tasks/rpc` from another agent, a `/tasks/assign` from a shell script — the dispatcher spawns a fresh **Claude-powered worker** for that agent.
+
+```
+Anyone (you, an agent, a curl)
+   │
+   ├── sends mail to fola@localhost
+   │       └─ dispatcher wakes Fola — worker reads it, decides, replies
+   │
+   └── POST /tasks/rpc { target: "Fola", task: ... }
+           └─ dispatcher wakes Fola — worker does the task, submit_result
+              └─ original /tasks/rpc long-poll resolves with structured JSON
+```
+
+Each worker uses the user's Claude OAuth (the same auth `claude` itself uses — no separate Anthropic key). Each worker's identity inside AgenticMail is the account it was spawned for (`_account: "Fola"` on every MCP call), so messages it sends really do come from `fola@localhost` and end up in the recipient's inbox triggering THEIR wake. **Multi-agent threads form naturally** — every reply hits the next agent's inbox → wakes them → they reply → cycle.
+
+Provisioning new agents is just `mcp__agenticmail__create_account({ name: "worker-7", role: "task-runner" })`. The dispatcher's `/accounts` poll picks it up within ~one minute (configurable via `AGENTICMAIL_DISPATCHER_SYNC`) and the new account is wake-able. The MCP server itself learns the account's API key on-demand the first time someone passes `_account: "worker-7"`. No manual install step.
+
+**Concurrency cap.** Workers are gated by a semaphore (default 10 simultaneous). Beyond that, wakes queue. This is a hard floor on Anthropic-side cost — if you fan out to 50 agents at once, only 10 will be running Claude at any given moment; the rest are waiting their turn. Override via `AGENTICMAIL_DISPATCHER_MAX`.
+
+## AgenticMail rides on Claude Code
+
+**AgenticMail does not need its own connection to Anthropic for this integration to work.** No per-agent LLM credentials. No proxy. No fork of any other AgenticMail runtime.
+
+This package's whole point: **the user's Claude Code session IS the brain for every AgenticMail agent.** When the host session calls `Agent { subagent_type: "agenticmail-fola", … }`, Claude Code spawns a fresh subagent whose persona is "you are Fola" (see `~/.claude/agents/agenticmail-fola.md`). That subagent uses Claude Code's own Claude OAuth credentials — no separate Anthropic key needed — and operates Fola's mailbox via the MCP server with `_account: "Fola"` on every call.
+
+From the outside Fola behaves the way you'd expect (her email address sends real mail, her inbox state is real, her tasks are real). Internally the LLM doing the work is the same Claude that's powering the host session. One Anthropic connection, many AgenticMail identities.
+
+The MCP server at `@agenticmail/mcp` was extended to read a `AGENTICMAIL_ACCOUNT_KEYS_JSON` env var — a `{ agentName: apiKey }` map populated automatically by `agenticmail claudecode install`. When the subagent passes `_account: "Fola"`, the MCP server looks up Fola's key in that map and forwards the request as her. AsyncLocalStorage threads the per-call identity through to the AgenticMail HTTP API without any change to the 62 tool handlers.
+
+---
+
+## Quick start
+
+```bash
+# Make sure AgenticMail itself is set up first
+agenticmail setup
+
+# Then wire it into Claude Code
+agenticmail claudecode
+
+# Restart Claude Code so it picks up the new MCP server
+# (Quit + relaunch your terminal Claude Code session.)
+```
+
+That's it. `agenticmail claudecode` is **idempotent** — re-run it any time you add a new agent to AgenticMail and it will surface the new agent as a Claude Code subagent.
+
+---
+
+## What this package does
+
+The installer touches exactly two locations on disk, plus one record in AgenticMail's database:
+
+| Where | What |
+|---|---|
+| `~/.claude.json` → `mcpServers.agenticmail` | An MCP server entry that runs `npx -y @agenticmail/mcp` whenever Claude Code launches. |
+| `~/.claude/agents/agenticmail-<name>.md` | One Claude Code subagent file per AgenticMail agent. Each one is a thin proxy whose only job is to relay the user prompt to its AgenticMail counterpart through the MCP server's `call_agent` tool. |
+| AgenticMail accounts table | A dedicated "claudecode" agent — Claude Code's identity inside AgenticMail. The MCP server authenticates as this agent, so every call from Claude Code is attributable in AgenticMail's logs. |
+
+That's the whole footprint. **Nothing else in your `~/.claude.json` is touched.** Other MCP servers, your project list, OAuth state, onboarding flags — all preserved by name; we read the file, mutate one key, and write it back.
+
+---
+
+## Three ways to install
+
+### 1. The wizard (recommended for most users)
+
+```bash
+agenticmail claudecode             # install or re-sync
+agenticmail claudecode --status    # show what's installed
+agenticmail claudecode --remove    # uninstall (keeps the bridge agent)
+agenticmail claudecode --remove --purge-bridge   # uninstall AND delete the bridge agent
+```
+
+### 2. The standalone CLI
+
+If you don't want to install the full `agenticmail` shell, this package ships its own bin:
+
+```bash
+npm install -g @agenticmail/claudecode
+agenticmail-claudecode install
+agenticmail-claudecode status [--json]
+agenticmail-claudecode uninstall [--purge-bridge]
+```
+
+### 3. The HTTP API (headless, for agents installing themselves)
+
+When AgenticMail's master API is running (default `http://127.0.0.1:3200`), it exposes three endpoints for the integration. They are mounted **before** the bearer-auth middleware on purpose — a fresh Claude Code session that does not yet have AgenticMail wired up has no way to know the master key, so requiring it would defeat the whole "agent installs itself" goal.
+
+```http
+GET  /api/agenticmail/integrations/claudecode/status
+POST /api/agenticmail/integrations/claudecode/install
+POST /api/agenticmail/integrations/claudecode/uninstall
+```
+
+**Example — Claude Code installing itself:**
+
+```bash
+# Inside a Claude Code session, simply:
+curl -X POST http://127.0.0.1:3200/api/agenticmail/integrations/claudecode/install
+```
+
+That single call:
+
+1. Creates (or reuses) the "claudecode" bridge agent inside AgenticMail.
+2. Writes `~/.claude.json` `mcpServers.agenticmail`.
+3. Writes one `~/.claude/agents/agenticmail-<name>.md` per discoverable AgenticMail agent.
+4. Returns a JSON summary (`registeredAgents`, `bridgeAgent`, paths, `changed`).
+
+The bridge agent's API key is **redacted** in the HTTP response — it's already been written to `~/.claude.json` server-side, so returning it over HTTP would be a needless second copy.
+
+**Security model:** the master API binds to `127.0.0.1` by default. Anything that can reach the install endpoint can already read `~/.agenticmail/config.json` (same file ownership), so leaving these endpoints unauthenticated does not widen the attack surface. **If you bind the master API to a non-loopback interface you MUST put your own auth / firewall in front of it** — same caveat as every other unauthenticated route on this server (e.g. `/health`).
+
+---
+
+## How a call flows
+
+```
+┌─────────────────────────┐
+│ Claude Code session     │   user → "@agenticmail-fola draft a follow-up"
+│ (your terminal)         │
+└───────────┬─────────────┘
+            │  Agent { subagent_type: "agenticmail-fola", prompt: ... }
+            ▼
+┌─────────────────────────┐
+│ Claude Code subagent    │   reads ~/.claude/agents/agenticmail-fola.md
+│ ("agenticmail-fola")    │   restricted to MCP relay tools
+└───────────┬─────────────┘
+            │  mcp__agenticmail__call_agent(target: "Fola", task: <prompt>)
+            ▼
+┌─────────────────────────┐
+│ @agenticmail/mcp        │   stdio child process spawned by Claude Code
+│ (MCP server)            │   authenticated as the "claudecode" bridge agent
+└───────────┬─────────────┘
+            │  POST http://127.0.0.1:3200/api/agenticmail/tasks/rpc
+            ▼
+┌─────────────────────────┐
+│ AgenticMail master API  │   creates a task, signals the target agent,
+│ (port 3200)             │   long-polls until the agent submits a result
+└───────────┬─────────────┘
+            │  task event over SSE / email notification
+            ▼
+┌─────────────────────────┐
+│ Fola (AgenticMail agent)│   reads task, does the work, submits result
+└───────────┬─────────────┘
+            │  result body bubbles back up the call stack
+            ▼
+        Returned to the host Claude Code session
+        as the Agent tool's completion text.
+```
+
+Local-to-local calls never leave `127.0.0.1`. SMTP only enters the picture as a fallback when the *target* AgenticMail agent is remote (a different machine on the same AgenticMail network) — that path is owned by the master API's `/tasks/rpc` handler, not this package.
+
+---
+
+## How auth works
+
+The MCP server reads **four** env vars (written into `~/.claude.json` by the installer):
+
+| Variable | Purpose |
+|---|---|
+| `AGENTICMAIL_API_URL` | Where the master API lives (default `http://127.0.0.1:3200`). |
+| `AGENTICMAIL_API_KEY` | Bridge agent's API key (`ak_…`). The *default* identity — used when a tool call doesn't pass `_account`. Effectively "Claude Code talking on its own behalf". |
+| `AGENTICMAIL_MASTER_KEY` | The master key (`mk_…`). Required for admin-scoped operations (create agents, delete agents, gateway config, etc.). |
+| `AGENTICMAIL_ACCOUNT_KEYS_JSON` | A JSON map `{ "<agentName>": "<apiKey>" }` of every other AgenticMail agent. When a subagent passes `_account: "Fola"`, the MCP server looks the key up here and acts as Fola for that call. |
+
+### The `_account` mechanism in one diagram
+
+```
+Claude Code session
+   │
+   │  Agent { subagent_type: "agenticmail-fola", prompt: "..." }
+   ▼
+Claude Code subagent "agenticmail-fola"
+   │  reads ~/.claude/agents/agenticmail-fola.md
+   │  body says: "You are Fola. Pass _account: 'Fola' on every call."
+   │
+   │  mcp__agenticmail__list_inbox({ _account: "Fola", limit: 10 })
+   ▼
+@agenticmail/mcp (stdio child of Claude Code)
+   │  reads AGENTICMAIL_ACCOUNT_KEYS_JSON, finds key for "Fola"
+   │  AsyncLocalStorage stashes Fola's key for this request
+   │
+   │  GET /api/agenticmail/mail/inbox    Authorization: Bearer <Fola's key>
+   ▼
+AgenticMail master API
+   │  authenticates request as Fola, returns Fola's inbox
+   ▼
+Subagent reads, reasons, replies — using Claude Code's own
+Claude OAuth credentials. Returns to the host session.
+```
+
+No separate Anthropic key. No proxy server. The user's `claude` is the only Anthropic-authenticated process involved.
+
+### Why we don't touch `~/.claude/.credentials.json`
+
+We never read or modify Claude Code's OAuth file. Claude Code itself manages those credentials and uses them when spawning each subagent session. By the time the subagent calls an MCP tool, Claude Code has already authenticated to Anthropic on its behalf — the MCP server doesn't need to know anything about that.
+
+The only "ride on Claude Code" wiring on our side is the `_account` mechanism above, which selects which **AgenticMail** identity each MCP call is made as. The **Anthropic** identity is always whoever the user is logged into Claude Code as, end of story.
+
+---
+
+## Idempotency and ownership
+
+Every subagent file we write contains this marker in its frontmatter:
+
+```yaml
+# managed-by: @agenticmail/claudecode
+```
+
+The uninstaller and the pruner **only touch files that have this marker.** That means:
+
+- You can hand-author a Claude Code subagent named `agenticmail-foo.md` and we will not overwrite or delete it.
+- Re-running install does not re-write a file whose generated content is identical to what's already on disk (mtimes stay meaningful).
+- Re-running install **does** delete generated subagent files whose underlying AgenticMail agent has been removed — so the Claude Code routing table never drifts away from the AgenticMail account list.
+
+---
+
+## Uninstall
+
+```bash
+agenticmail claudecode --remove                 # keeps the bridge agent
+agenticmail claudecode --remove --purge-bridge  # also deletes the bridge agent
+```
+
+Or the equivalent npm flow:
+
+```bash
+npm uninstall -g @agenticmail/claudecode
+```
+
+The `preuninstall` lifecycle hook runs `scripts/uninstall.mjs`, which removes:
+
+- The `mcpServers.agenticmail` entry from `~/.claude.json`
+- Every `agenticmail-*.md` file in `~/.claude/agents/` that carries our marker
+
+It deliberately **does not** delete the bridge agent inside AgenticMail. That agent owns an inbox and may have ongoing conversations — silently nuking it on `npm uninstall` would be surprising. Use `agenticmail claudecode --remove --purge-bridge` if you want it gone.
+
+---
+
+## Configuration overrides
+
+Almost no one needs these — defaults are correct for the standard AgenticMail + Claude Code install. They exist for tests and unusual layouts.
+
+| Env var | Default |
+|---|---|
+| `AGENTICMAIL_API_URL` | `http://127.0.0.1:3200` (or whatever `~/.agenticmail/config.json` says) |
+| `AGENTICMAIL_MASTER_KEY` | Pulled from `~/.agenticmail/config.json` |
+| `CLAUDE_CODE_CONFIG_PATH` | `~/.claude.json` |
+| `CLAUDE_CODE_AGENTS_DIR` | `~/.claude/agents` |
+
+Programmatic install (from another tool):
+
+```ts
+import { install, status, uninstall } from '@agenticmail/claudecode';
+
+await install({
+  apiUrl: 'http://127.0.0.1:3200',
+  masterKey: 'mk_...',
+  // any other ResolveConfigOptions field
+});
+```
+
+---
+
+## Troubleshooting
+
+**`AgenticMail API unreachable at http://127.0.0.1:3200`**
+The master API isn't running. Start it with `agenticmail start`.
+
+**`AgenticMail master key not found`**
+You haven't run `agenticmail setup` yet, or your `~/.agenticmail/config.json` is missing/malformed.
+
+**Subagents don't show up in Claude Code after install.**
+Restart Claude Code. Subagent discovery happens at session start.
+
+**The MCP server says "Neither AGENTICMAIL_API_KEY nor AGENTICMAIL_MASTER_KEY is set".**
+Re-run `agenticmail claudecode` — your bridge agent's key may have been rotated. Install is safe to re-run any time.
+
+---
+
+## License
+
+MIT © Ope Olatunji

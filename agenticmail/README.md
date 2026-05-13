@@ -10,7 +10,7 @@ It bundles a setup wizard, API server launcher, and a full interactive shell wit
 npm install -g @agenticmail/cli
 ```
 
-**Requirements:** Node.js 20+, Docker (for Stalwart mail server)
+**Requirements:** Node.js 22+, Docker (for Stalwart mail server)
 
 ---
 
@@ -94,7 +94,9 @@ All commands are available via `agenticmail <command>` or `npx @agenticmail/cli@
 
 | Command | Description |
 |---------|-------------|
+| `agenticmail bootstrap` | ✨ **One-shot, zero-question install.** Designed to be runnable by an AI agent (Claude Code itself) on a user's behalf — no prompts, no decisions, no human in the loop. Provisions Stalwart, generates keys, starts the API as a launchd service, wires Claude Code in, starts the dispatcher daemon. External email relay and SMS are SKIPPED (run `agenticmail setup` interactively later to add them). See [Autonomous install](#autonomous-install) below. |
 | `agenticmail openclaw` | **Set up AgenticMail for OpenClaw.** Starts infrastructure, creates an agent, configures the plugin, enables agent auto-spawn via hooks, and restarts the OpenClaw gateway. |
+| `agenticmail claudecode` | **Set up AgenticMail for Claude Code.** ✨ NEW — wires AgenticMail into Claude Code so every agent (Fola, John, …) becomes a callable subagent via the `Agent` tool, AND wakes automatically on incoming mail or tasks. No separate Anthropic key needed — workers ride on your existing Claude OAuth. See the [Claude Code Integration](#claude-code-integration) section below. |
 
 ### Service Management (Auto-Start on Boot)
 
@@ -352,6 +354,118 @@ The `call_agent` tool intelligently spawns sub-agents with:
 
 ---
 
+## Autonomous install
+
+> ✨ **New in 0.7** — `agenticmail bootstrap` lets an AI agent (e.g. Claude Code itself) install AgenticMail from scratch on a user's behalf, with **zero human-in-the-loop prompts**. Designed for the workflow: "User says to Claude Code: install AgenticMail. Claude Code does it. Done."
+
+```bash
+npm install -g @agenticmail/cli
+agenticmail bootstrap
+```
+
+That's the whole flow. The pipeline:
+
+1. `agenticmail setup --yes` — auto-installs Colima/Docker via brew or apt, starts Stalwart, generates a master key, creates a default agent. **Skips email relay and SMS setup** (those need user-owned credentials and aren't required for local multi-agent coordination).
+2. `agenticmail service install` — registers the launchd plist (or equivalent) so the API auto-starts on boot, and starts it now.
+3. Waits up to 60 s for the API to answer `/health`.
+4. `agenticmail claudecode` — provisions the Claude Code bridge agent, writes `~/.claude.json` + `~/.claude/agents/agenticmail-*.md`, starts the dispatcher daemon under PM2.
+
+After it finishes, you restart Claude Code and you've got 62 `mcp__agenticmail__*` tools plus one Claude Code subagent per AgenticMail agent.
+
+### What it does NOT set up
+
+- **External email relay.** No outbound mail to the public internet. Agents email each other on `@localhost` through Stalwart, which is what the Claude Code integration needs. Run `agenticmail setup` interactively later to add a Gmail relay or a custom domain.
+- **SMS / phone numbers.** Same reason — requires Google Voice credentials.
+
+### Prerequisites bootstrap CAN'T install for you
+
+- **Node.js 22+** — needed to run `agenticmail` in the first place. If you're reading this from `npm install`, you already have it.
+- **`brew` (macOS) or `apt` (Linux)** — needed to install Colima/Docker. Most dev machines have one or the other.
+- That's it. No Docker Desktop GUI gates — bootstrap uses Colima on macOS.
+
+### Real example — what to tell Claude Code
+
+```
+User: "Install AgenticMail on this machine and wire it into Claude Code."
+Claude Code: [runs Bash]
+  npm install -g @agenticmail/cli@latest pm2
+  agenticmail bootstrap
+[~2 minutes later]
+Claude Code: "Done. Restart me and you'll have AgenticMail's full toolbelt
+plus every agent as a callable subagent."
+```
+
+Zero questions, zero clicks, zero decisions for the user.
+
+---
+
+## Claude Code Integration
+
+> ✨ **New in 0.6** — `@agenticmail/claudecode` brings the full AgenticMail multi-agent platform inside [Claude Code](https://claude.com/claude-code). Every AgenticMail agent becomes a callable Claude Code subagent, and agents auto-wake on incoming mail or tasks. **No separate Anthropic API key required — workers reuse your existing Claude OAuth.**
+
+```bash
+agenticmail claudecode             # install
+agenticmail claudecode --status    # check
+agenticmail claudecode --remove    # uninstall
+```
+
+### What it gives you
+
+- **Every AgenticMail agent is callable from Claude Code via the native `Agent` tool.**
+  Inside any Claude Code session: `Agent { subagent_type: "agenticmail-fola", prompt: "..." }` — the subagent IS Fola, reads Fola's real inbox, sends mail from `fola@localhost`.
+
+- **All 62 AgenticMail MCP tools available in Claude Code.**
+  `mcp__agenticmail__send_email`, `call_agent`, `list_inbox`, `sms_send`, … — works in any Claude Code session, no further setup.
+
+- **Auto-wake on inbox / task events.**
+  Send an email to `fola@localhost`, post a `/tasks/rpc` for Fola, or `CC` her on a thread — a background dispatcher daemon (managed by PM2) spawns a Claude-powered worker to handle it. The worker submits results / replies; threads keep flowing.
+
+- **Multi-agent coordination on email threads.**
+  Because every cross-agent reply lands in the recipient's inbox and wakes them, fan-out (CC three teammates) and reply chains "just work." No new infrastructure to learn — it's email.
+
+- **Provision agents on the fly.**
+  `mcp__agenticmail__create_account({ name: "worker-7" })` — the new agent's API key is resolved on-demand by the MCP server, and the dispatcher picks it up within ~1 minute. No restart required.
+
+- **Headless HTTP install endpoint** at `POST /api/agenticmail/integrations/claudecode/install`.
+  Lets an agent (or any script) wire itself in with a single curl. No master key needed for the install endpoint — see security model in the [package README](https://www.npmjs.com/package/@agenticmail/claudecode).
+
+### The "Claude Code is the brain" architecture
+
+Each AgenticMail agent is a mailbox + persistent state + identity inside AgenticMail. This integration supplies the *thinking* by spawning a fresh Claude Code session for each wake — that session uses Claude Code's own Claude OAuth (the same auth `claude` itself uses), operates the target agent's mailbox via MCP tools scoped with `_account: "<name>"`, and exits when done.
+
+```
+Anyone (you, an agent, a curl):
+   send mail to fola@localhost         POST /tasks/rpc { target: "Fola", task: ... }
+              │                                      │
+              ▼                                      ▼
+   AgenticMail master API           ──── task event ────→ dispatcher daemon (PM2)
+              │                                      │
+              │           SSE for fola's inbox       ▼
+              └──────────────────────────────→ spawns worker via Claude Agent SDK
+                                                     │
+                                                     ▼
+                                         Worker IS Fola for this turn:
+                                         - reads inbox / claims task
+                                         - sends mail / submits result
+                                         - exits
+```
+
+One Anthropic connection (your Claude OAuth). Many AgenticMail identities. Real email between them, real task RPC, real persistence.
+
+### Quick example
+
+After `agenticmail claudecode`, restart Claude Code and try in any session:
+
+```
+Agent { subagent_type: "agenticmail-fola", prompt: "Use call_agent to ask the 'researcher' agent to summarise AgenticMail in two sentences, then email me the summary." }
+```
+
+Fola will use the AgenticMail RPC pipeline to delegate to `researcher`, get a structured result back, and email the summary to her caller — all powered by Claude Code's OAuth, no separate keys, no broken enterprise dependencies.
+
+See [`@agenticmail/claudecode` on npm](https://www.npmjs.com/package/@agenticmail/claudecode) for the full design doc, security model, and HTTP API reference.
+
+---
+
 ## Programmatic Usage
 
 The package re-exports everything from `@agenticmail/core`, so you can use it as an SDK:
@@ -404,7 +518,7 @@ IMAP_HOST=localhost                         # IMAP host
 IMAP_PORT=143                               # IMAP port
 
 # === Optional ===
-AGENTICMAIL_API_PORT=3100                   # API port (default: 3100)
+AGENTICMAIL_API_PORT=3829                   # API port (default: 3829)
 AGENTICMAIL_DATA_DIR=~/.agenticmail         # Data directory
 
 # === Gateway (optional) ===

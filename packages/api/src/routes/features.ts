@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import type Database from 'better-sqlite3';
+import type { Database } from '@agenticmail/core';
 import {
   MailSender,
   type AccountManager,
@@ -132,7 +132,7 @@ function parseScheduleTime(input: string): Date | null {
  * Feature routes: contacts, drafts, signatures, templates, scheduled emails
  */
 export function createFeatureRoutes(
-  db: Database.Database,
+  db: Database,
   _accountManager: AccountManager,
   config: AgenticMailConfig,
   gatewayManager?: GatewayManager,
@@ -518,7 +518,7 @@ export function createFeatureRoutes(
  * Evaluate email rules for an agent against a parsed email.
  * Returns the first matching rule's actions, or null if no match.
  */
-export function evaluateRules(db: Database.Database, agentId: string, email: { from?: { address?: string }[]; to?: { address?: string }[]; subject?: string; text?: string; attachments?: any[] }): { ruleId: string; actions: any } | null {
+export function evaluateRules(db: Database, agentId: string, email: { from?: { address?: string }[]; to?: { address?: string }[]; subject?: string; text?: string; attachments?: any[] }): { ruleId: string; actions: any } | null {
   const rules = db.prepare('SELECT * FROM email_rules WHERE agent_id = ? AND enabled = 1 ORDER BY priority DESC').all(agentId) as any[];
   for (const rule of rules) {
     const cond = JSON.parse(rule.conditions);
@@ -546,7 +546,7 @@ export function evaluateRules(db: Database.Database, agentId: string, email: { f
  * Checks every 30 seconds for emails that need to be sent.
  */
 export function startScheduledSender(
-  db: Database.Database,
+  db: Database,
   accountManager: AccountManager,
   config: AgenticMailConfig,
   gatewayManager?: GatewayManager,

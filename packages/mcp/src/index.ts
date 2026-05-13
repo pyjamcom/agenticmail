@@ -74,12 +74,34 @@ function createMcpServer(): McpServer {
     description: '🎀 AgenticMail — Email infrastructure for AI agents. By Ope Olatunji (https://github.com/agenticmail/agenticmail)',
   } as any);
 
-  // Register tools
+  // Register tools.
+  //
+  // Every tool's input schema is augmented with an optional `_account` param
+  // so callers can override the identity used for that single call (see
+  // tools.ts → handleToolCall). Without this augmentation, Zod's default
+  // "strip unknown keys" behaviour would drop `_account` before our handler
+  // ever saw it — which silently degrades back to the static API_KEY and
+  // makes the per-call account switching look like a no-op. Augmenting the
+  // schema (rather than swapping to `z.record(z.any())` or `.passthrough()`)
+  // also has the nice side effect of making `_account` discoverable in the
+  // tool surface that the MCP client publishes to the LLM.
+  const ACCOUNT_PROP = {
+    type: 'string',
+    description: 'Optional. Override identity for THIS call: pass the AgenticMail agent name (e.g. "Fola") to authenticate as that agent. Requires AGENTICMAIL_ACCOUNT_KEYS_JSON to contain a matching key. Omit to use the default identity (AGENTICMAIL_API_KEY).',
+  } as const;
+
   for (const tool of toolDefinitions) {
+    const augmentedSchema: JsonSchema = {
+      ...tool.inputSchema,
+      properties: {
+        ...(tool.inputSchema?.properties ?? {}),
+        _account: ACCOUNT_PROP,
+      },
+    };
     server.tool(
       tool.name,
       tool.description,
-      jsonSchemaToZod(tool.inputSchema, true) as any,
+      jsonSchemaToZod(augmentedSchema, true) as any,
       async (args: Record<string, unknown>) => {
         try {
           const result = await handleToolCall(tool.name, args as Record<string, unknown>);

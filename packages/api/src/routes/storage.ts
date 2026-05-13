@@ -160,11 +160,13 @@ function nowExpr(dialect: string): string {
 
 // ─── Routes ─────────────────────────────────────────────
 
-/** Issue #15 — adapter from a raw better-sqlite3 Database to the
- *  async-flavored {@link StorageDB} surface every route in this file
- *  uses. Without this, calls like {@code db.run('CREATE TABLE …')}
- *  hit {@code undefined(...)} (better-sqlite3 only exposes
- *  {@code db.prepare/exec}, not direct {@code run/get/all}), throw
+/** Issue #15 — adapter from a raw sync SQLite Database (today
+ *  {@code node:sqlite}'s {@code DatabaseSync}; was {@code
+ *  better-sqlite3} before the v0.7 migration) to the async-flavored
+ *  {@link StorageDB} surface every route in this file uses. Without
+ *  this, calls like {@code db.run('CREATE TABLE …')} hit
+ *  {@code undefined(...)} (the sync drivers only expose
+ *  {@code prepare/exec}, not direct {@code run/get/all}), throw
  *  synchronously, and the rejected promise from
  *  {@code ensureMetaTable()} (which sits OUTSIDE the per-route
  *  try/catch) escapes Express's default async handler — leaving
@@ -172,8 +174,9 @@ function nowExpr(dialect: string): string {
  *
  *  <p>The adapter lazily prepares each statement, falls back to
  *  {@code exec} for parameter-less DDL (CREATE TABLE / CREATE
- *  INDEX / PRAGMA), and returns plain (non-Promise) values; the
- *  awaits in the route handlers are no-ops on plain values, so
+ *  INDEX / PRAGMA — node:sqlite's {@code prepare} can't bind these
+ *  either, same constraint), and returns plain (non-Promise) values;
+ *  the awaits in the route handlers are no-ops on plain values, so
  *  no further changes were needed at the call sites. */
 function adaptBetterSqlite(raw: any): StorageDB {
   // If the caller already passed something that quacks like
@@ -184,11 +187,11 @@ function adaptBetterSqlite(raw: any): StorageDB {
         && typeof raw.all === 'function') {
     return raw as StorageDB;
   }
-  // Otherwise wrap the better-sqlite3 instance.
+  // Otherwise wrap the sync-style SQLite instance (node:sqlite DatabaseSync today).
   const exec = (sql: string, params?: any[]): void => {
     if (!params || params.length === 0) {
       // exec handles multi-statement DDL + statements that have
-      // tokens better-sqlite3's prepare can't bind (PRAGMA, etc.).
+      // tokens node:sqlite's prepare can't bind (PRAGMA, etc.).
       raw.exec(sql);
       return;
     }

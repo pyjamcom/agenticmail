@@ -22,7 +22,7 @@ Add to `~/.openclaw/openclaw.json`:
     "agenticmail": {
       "enabled": true,
       "config": {
-        "apiUrl": "http://127.0.0.1:3100",
+        "apiUrl": "http://127.0.0.1:3829",
         "apiKey": "ak_your_agent_key",
         "masterKey": "mk_your_master_key"
       }
@@ -100,7 +100,7 @@ The plugin registers email as an OpenClaw channel, which means:
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `apiUrl` | No | `http://127.0.0.1:3100` | AgenticMail API URL |
+| `apiUrl` | No | `http://127.0.0.1:3829` | AgenticMail API URL |
 | `apiKey` | Yes | — | Agent API key (`ak_...`). Determines which agent this plugin acts as. |
 | `masterKey` | No | — | Master key (`mk_...`). Required for admin operations. |
 
@@ -330,7 +330,7 @@ The `openclaw.plugin.json` file registers the plugin with OpenClaw:
   "description": "Full email channel + tools for AI agents",
   "channels": ["mail"],
   "configSchema": {
-    "apiUrl": { "type": "string", "default": "http://127.0.0.1:3100" },
+    "apiUrl": { "type": "string", "default": "http://127.0.0.1:3829" },
     "apiKey": { "type": "string", "required": true },
     "masterKey": { "type": "string" },
     "inboxInjectionMode": {

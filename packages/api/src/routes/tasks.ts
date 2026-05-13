@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import type Database from 'better-sqlite3';
-import { MailSender, type AccountManager, type AgenticMailConfig } from '@agenticmail/core';
+import { MailSender, type AccountManager, type AgenticMailConfig, type Database } from '@agenticmail/core';
 import { requireAgent, requireAuth, touchActivity } from '../middleware/auth.js';
 import { pushEventToAgent, broadcastEvent } from './events.js';
 import { getAgentPassword } from './mail.js';
@@ -10,7 +9,7 @@ import { getAgentPassword } from './mail.js';
 // when the target agent submits the task result, instead of relying on polling.
 const rpcResolvers = new Map<string, (row: { status: string; result?: string; error?: string }) => void>();
 
-export function createTaskRoutes(db: Database.Database, accountManager: AccountManager, config: AgenticMailConfig): Router {
+export function createTaskRoutes(db: Database, accountManager: AccountManager, config: AgenticMailConfig): Router {
   const router = Router();
 
   // Assign a task to another agent

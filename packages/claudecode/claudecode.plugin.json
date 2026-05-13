@@ -1,0 +1,73 @@
+{
+  "id": "claudecode",
+  "name": "agenticmail",
+  "version": "0.1.0",
+  "displayName": "🎀 AgenticMail for Claude Code",
+  "description": "🎀 Surfaces every AgenticMail agent as a native Claude Code subagent (callable through the Agent tool) and exposes the full 62-tool AgenticMail MCP toolbelt to any Claude Code session.",
+  "author": "agenticmail",
+  "license": "MIT",
+  "homepage": "https://github.com/agenticmail/agenticmail",
+
+  "host": {
+    "name": "claude-code",
+    "displayName": "Claude Code",
+    "homepage": "https://claude.com/claude-code"
+  },
+
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiUrl": {
+        "type": "string",
+        "description": "AgenticMail master API URL",
+        "default": "http://127.0.0.1:3200"
+      },
+      "claudeConfigPath": {
+        "type": "string",
+        "description": "Path to Claude Code's user-level config (default: ~/.claude.json)",
+        "default": "~/.claude.json"
+      },
+      "agentsDir": {
+        "type": "string",
+        "description": "Directory where per-agent Claude Code subagent files are written (default: ~/.claude/agents)",
+        "default": "~/.claude/agents"
+      },
+      "mcpServerName": {
+        "type": "string",
+        "description": "Key used under mcpServers in Claude Code config (default: agenticmail)",
+        "default": "agenticmail"
+      },
+      "bridgeAgentName": {
+        "type": "string",
+        "description": "Name of the dedicated AgenticMail agent that represents Claude Code (auto-provisioned if absent)",
+        "default": "claudecode"
+      },
+      "subagentPrefix": {
+        "type": "string",
+        "description": "Prefix for the generated Claude Code subagent names (default: agenticmail-)",
+        "default": "agenticmail-"
+      }
+    },
+    "required": []
+  },
+
+  "writes": [
+    "~/.claude.json (mcpServers.<mcpServerName> block only)",
+    "~/.claude/agents/<subagentPrefix><agent>.md (one per AgenticMail agent)"
+  ],
+
+  "tools": [
+    "Surfaces all 62 @agenticmail/mcp tools to Claude Code (mcp__agenticmail__*)",
+    "Plus one Claude Code subagent per AgenticMail agent (Agent { subagent_type: 'agenticmail-<name>' })"
+  ],
+
+  "requires": {
+    "services": [
+      "AgenticMail master API (default http://127.0.0.1:3200)"
+    ],
+    "bins": [
+      "agenticmail-mcp (from @agenticmail/mcp; auto-installed as a dependency)"
+    ]
+  }
+}

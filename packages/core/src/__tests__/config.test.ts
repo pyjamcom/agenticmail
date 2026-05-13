@@ -31,7 +31,7 @@ describe('resolveConfig', () => {
     expect(config.stalwart.url).toBe('http://localhost:8080');
     expect(config.smtp.port).toBe(587);
     expect(config.imap.port).toBe(143);
-    expect(config.api.port).toBe(3100);
+    expect(config.api.port).toBe(3829);
   });
 
   it('reads from env vars', () => {

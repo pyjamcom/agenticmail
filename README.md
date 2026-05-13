@@ -15,7 +15,7 @@
 AgenticMail is a self-hosted communication platform purpose-built for AI agents. It runs a local [Stalwart](https://stalw.art) mail server via Docker, integrates Google Voice for SMS/phone access, exposes a REST API with 75+ endpoints, and works with any MCP-compatible AI client and [OpenClaw](https://github.com/openclaw/openclaw) via plugin. Each agent gets its own email address, phone number, inbox, and API key.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/Node.js-22%2B-green)](https://nodejs.org)
 
 [![agenticmail MCP server](https://glama.ai/mcp/servers/agenticmail/agenticmail/badges/card.svg)](https://glama.ai/mcp/servers/agenticmail/agenticmail)
 
@@ -228,34 +228,53 @@ AI agents need to communicate with the real world. Email is the universal commun
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org) 20 or later
-- [Docker](https://docker.com) (for the Stalwart mail server)
+- [Node.js](https://nodejs.org) **22 or later** (we use the built-in `node:sqlite` module — zero native compilation, no `node-gyp` headaches)
+- `brew` (macOS) or `apt` (Linux) so the wizard can install Colima / Docker if you don't already have it
 
-### Install
+### Two install paths
+
+| Path | When to use | Command |
+|---|---|---|
+| **Autonomous** ✨ | Letting an AI agent (e.g. Claude Code) install AgenticMail on your behalf, or you just want zero questions | `npm install -g @agenticmail/cli && agenticmail bootstrap` |
+| **Interactive** | You want to connect a Gmail relay or your own domain right away | `npm install -g @agenticmail/cli && agenticmail setup` |
+
+#### Autonomous install (recommended for most users)
 
 ```bash
 npm install -g @agenticmail/cli
+agenticmail bootstrap
 ```
 
-### Setup
+Two commands. Zero prompts. The pipeline:
+
+1. **`agenticmail setup --yes`** — auto-installs Colima + Docker if missing, starts the Stalwart mail server, generates your master key, creates a default "secretary" agent. **Skips external email/SMS setup** (those need user-owned credentials; add them later if you want).
+2. **`agenticmail service install`** — registers a launchd plist (macOS) / systemd unit (Linux) so the API auto-starts on boot, and starts it now.
+3. Waits for `GET /api/agenticmail/health` to come up on the configured port (default `http://127.0.0.1:3829`).
+4. **`agenticmail claudecode`** — wires the Claude Code integration in if you have Claude Code installed (idempotent / no-op otherwise).
+
+After this, you have a fully working local AgenticMail with internal multi-agent coordination over `*@localhost`. Add an external Gmail relay or your own domain anytime with `agenticmail setup` (interactive).
+
+#### Interactive install
 
 ```bash
-# 1. Start the mail server
-docker compose up -d
-
-# 2. Run the setup wizard (creates config, initializes database, creates first agent)
+npm install -g @agenticmail/cli
 agenticmail setup
-
-# 3. Start the API server + interactive shell
-agenticmail start
 ```
 
-The setup wizard will:
-- Check Docker is running and Stalwart is healthy
-- Generate a master API key
-- Create the SQLite database with all required tables
-- Create your first AI agent with its own email address and API key
-- Optionally configure a gateway (relay or domain mode) for internet email
+The wizard walks you through everything: dependency checks, master key generation, mail-server start, optional Gmail relay or custom domain, optional Google Voice SMS, optional OpenClaw integration. Re-runnable any time.
+
+### Skip external email entirely?
+
+Yes. AgenticMail works in **local-only mode** — agents email each other at `*@localhost` through the bundled Stalwart server with full RFC-822 routing, threading, attachments, and search. That's all the Claude Code multi-agent flow needs. The external Gmail/domain relay is optional and only matters when you want agents to send mail to the public internet.
+
+### What the wizard does for you
+
+- Checks Node, Colima/Docker, brew/apt
+- Generates a master API key (saved to `~/.agenticmail/config.json`, file mode 0600)
+- Initialises the SQLite database (`node:sqlite` — Node 22+ built-in, **no native compilation, no prebuilt binaries needed**)
+- Starts Stalwart in a Docker container
+- Creates your first agent with its own email and API key
+- Optionally configures a gateway (relay or domain) for internet email
 
 ### Send your first email (programmatic)
 
@@ -263,7 +282,7 @@ The setup wizard will:
 import { AgenticMailClient } from 'agenticmail';
 
 const client = new AgenticMailClient({
-  apiUrl: 'http://127.0.0.1:3100',
+  apiUrl: 'http://127.0.0.1:3829',
   apiKey: 'ak_your_agent_api_key',
 });
 
@@ -299,7 +318,7 @@ Email sent! Message ID: <abc123@localhost>
 ### Send your first email (curl)
 
 ```bash
-curl -X POST http://127.0.0.1:3100/api/agenticmail/mail/send \
+curl -X POST http://127.0.0.1:3829/api/agenticmail/mail/send \
   -H "Authorization: Bearer ak_your_agent_key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -320,7 +339,8 @@ AgenticMail includes a full CLI for managing your server. All commands are avail
 | Command | Description |
 |---------|-------------|
 | `agenticmail` | **Start the server** (runs setup first if not initialized). Opens the interactive shell after startup. This is the default command — just run `agenticmail` with no arguments. |
-| `agenticmail setup` | **Run the setup wizard.** Walks you through system checks, account creation, service startup, email connection (Gmail/Outlook/custom domain), phone number setup, and OpenClaw integration. Safe to re-run — won't overwrite existing config. |
+| `agenticmail bootstrap` | ✨ **Zero-question install.** One-shot pipeline: setup + service install + claudecode wiring. Designed for AI agents (Claude Code, scripts, CI) to run on a user's behalf — no prompts, no decisions. Skips Gmail relay and SMS setup (which need user-owned credentials); add them later with `agenticmail setup`. |
+| `agenticmail setup` | **Run the setup wizard** interactively. Walks you through system checks, account creation, service startup, email connection (Gmail/Outlook/custom domain), phone number setup, and OpenClaw integration. Pass `--yes` (or `-y`, `--non-interactive`) to skip every prompt and use safe defaults. Safe to re-run — won't overwrite existing config. |
 | `agenticmail start` | **Start the server** and open the interactive shell. Ensures Docker is running, Stalwart is up, and the API server is reachable. Automatically installs the auto-start service if not already set up. |
 | `agenticmail stop` | **Stop the server.** Kills the background API server process. If auto-start is enabled, it will restart on next boot. Use `agenticmail service uninstall` to fully disable. |
 | `agenticmail status` | **Show what's running.** Displays the status of Docker, Stalwart, the API server, email connection, and auto-start service. |
@@ -330,6 +350,7 @@ AgenticMail includes a full CLI for managing your server. All commands are avail
 | Command | Description |
 |---------|-------------|
 | `agenticmail openclaw` | **Set up AgenticMail for OpenClaw.** Starts infrastructure, creates an agent, configures the OpenClaw plugin, enables agent auto-spawn via hooks, and restarts the OpenClaw gateway. |
+| `agenticmail claudecode` | ✨ **Set up AgenticMail for Claude Code.** Provisions a dedicated "claudecode" bridge agent, writes an MCP server entry to `~/.claude.json`, generates a Claude Code subagent file per AgenticMail agent under `~/.claude/agents/`, and starts the dispatcher daemon (PM2-managed) that auto-wakes agents on inbound mail or `/tasks/rpc`. No separate Anthropic key needed — workers ride on your existing Claude OAuth. Flags: `--status`, `--remove`, `--purge-bridge`. See [@agenticmail/claudecode on npm](https://www.npmjs.com/package/@agenticmail/claudecode) for the full design. |
 
 ### Service Management (Auto-Start)
 
@@ -386,7 +407,7 @@ Use your existing Gmail or Outlook account as a relay. No domain purchase needed
 agenticmail> /relay
 
 # Or via API:
-curl -X POST http://127.0.0.1:3100/api/agenticmail/gateway/relay \
+curl -X POST http://127.0.0.1:3829/api/agenticmail/gateway/relay \
   -H "Authorization: Bearer mk_your_master_key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -419,7 +440,7 @@ Full custom domain with Cloudflare. Agents send from `agent@yourdomain.com` with
 
 **Setup:**
 ```bash
-curl -X POST http://127.0.0.1:3100/api/agenticmail/gateway/domain \
+curl -X POST http://127.0.0.1:3829/api/agenticmail/gateway/domain \
   -H "Authorization: Bearer mk_your_master_key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -525,7 +546,7 @@ Add to your MCP client configuration (e.g., `.mcp.json` or project settings):
       "command": "npx",
       "args": ["agenticmail-mcp"],
       "env": {
-        "AGENTICMAIL_API_URL": "http://127.0.0.1:3100",
+        "AGENTICMAIL_API_URL": "http://127.0.0.1:3829",
         "AGENTICMAIL_API_KEY": "ak_your_agent_key"
       }
     }
@@ -578,7 +599,7 @@ If you prefer to configure manually, add to `~/.openclaw/openclaw.json`:
     "agenticmail": {
       "enabled": true,
       "config": {
-        "apiUrl": "http://127.0.0.1:3100",
+        "apiUrl": "http://127.0.0.1:3829",
         "apiKey": "ak_your_agent_key",
         "masterKey": "mk_your_master_key"
       }
@@ -736,7 +757,10 @@ IMAP_HOST=localhost                         # IMAP host
 IMAP_PORT=143                               # IMAP port
 
 # === Optional ===
-AGENTICMAIL_API_PORT=3100                   # API server port (default: 3100)
+AGENTICMAIL_API_PORT=3829                   # API server port (default: 3829 — chosen to
+                                            # avoid 3000/3100/3200/3300/4000/5000/8000/8080
+                                            # which are all common dev-tool defaults)
+AGENTICMAIL_API_HOST=127.0.0.1              # API bind host (default: 127.0.0.1; loopback only)
 AGENTICMAIL_DATA_DIR=~/.agenticmail         # Data directory for SQLite DB and config
 
 # === Gateway: Relay Mode ===
@@ -779,7 +803,9 @@ services:
 
 ### SQLite Database
 
-AgenticMail stores all state in a SQLite database at `~/.agenticmail/agenticmail.db`:
+AgenticMail stores all state in a SQLite database at `~/.agenticmail/agenticmail.db`. As of `@agenticmail/core@0.7.x` we use Node's built-in **`node:sqlite`** module (stable since Node 22) instead of `better-sqlite3`. The migration removed all native compilation from the install path — no `node-gyp`, no prebuilt-binary version-mismatch issues, no Python prerequisites. The on-disk database format is unchanged (it's still SQLite 3), so existing `~/.agenticmail/agenticmail.db` files continue to work without migration.
+
+Tables:
 
 - `agents` — agent accounts (name, email, API key, metadata)
 - `gateway_config` — relay or domain mode configuration

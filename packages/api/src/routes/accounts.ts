@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import type Database from 'better-sqlite3';
-import { AGENT_ROLES, AgentDeletionService, type AccountManager, type AgentRole, type AgenticMailConfig } from '@agenticmail/core';
+import { AGENT_ROLES, AgentDeletionService, type AccountManager, type AgentRole, type AgenticMailConfig, type Database } from '@agenticmail/core';
 import { requireMaster, requireAgent, requireAuth } from '../middleware/auth.js';
 
 /** Strip internal metadata fields (prefixed with _) from agent responses */
@@ -17,7 +16,7 @@ function sanitizeAgent(agent: any): any {
   return agent;
 }
 
-export function createAccountRoutes(accountManager: AccountManager, db: Database.Database, config: AgenticMailConfig): Router {
+export function createAccountRoutes(accountManager: AccountManager, db: Database, config: AgenticMailConfig): Router {
   const router = Router();
   const deletionService = new AgentDeletionService(db, accountManager, config);
 

@@ -825,7 +825,7 @@ class CloudflareClient {
 
 **`createTunnel()`** — Reuses existing tunnel if name matches. Generates random 32-byte secret.
 
-**`createTunnelRoute()`** — Creates ingress: `/api/agenticmail/*` → apiService (port 3100), `*` → primary service (port 8080), catch-all → 404.
+**`createTunnelRoute()`** — Creates ingress: `/api/agenticmail/*` → apiService (port 3829), `*` → primary service (port 8080), catch-all → 404.
 
 **`deployEmailWorker()`** — Multipart form upload with ES module metadata and plain_text env var bindings. Compatibility date: 2024-01-01.
 

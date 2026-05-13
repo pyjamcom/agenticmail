@@ -1,6 +1,6 @@
 {
   "name": "@agenticmail/mcp",
-  "version": "0.5.59",
+  "version": "0.7.1",
   "mcpName": "io.github.agenticmail/mcp",
   "description": "MCP server for AgenticMail — give any AI client real email and SMS capabilities",
   "type": "module",
@@ -22,7 +22,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean",
+    "build": "tsup --config tsup.config.ts",
     "dev": "tsx src/index.ts",
     "test": "vitest run --passWithNoTests",
     "prepublishOnly": "npm run build"
@@ -30,7 +30,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.24.0",
-    "@agenticmail/core": "^0.5.59"
+    "@agenticmail/core": "^0.7.0"
   },
   "devDependencies": {
     "tsup": "^8.4.0",
@@ -39,7 +39,7 @@
     "vitest": "^3.0.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",

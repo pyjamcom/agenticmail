@@ -10,7 +10,9 @@ This package runs a web server that handles everything: sending email and SMS, r
 npm install @agenticmail/api
 ```
 
-**Requirements:** Node.js 20+, `@agenticmail/core`, Stalwart Mail Server running (via Docker)
+**Requirements:** Node.js 22+ (uses Node's built-in `node:sqlite`, no native compilation), `@agenticmail/core@^0.7.0`, Stalwart Mail Server running (via Docker / Colima).
+
+**Default listen address:** `http://127.0.0.1:3829`. The port changed from `3100` to `3829` in `0.7.x` to avoid clashes with common dev-tool defaults (Grafana Loki, Express scaffolds, etc.). Override via `AGENTICMAIL_API_PORT` env var or `api.port` in `~/.agenticmail/config.json`.
 
 ---
 
@@ -24,7 +26,20 @@ The API server is the central hub. It sits between agents (or any client) and th
 - **The interactive shell** (`agenticmail start`) — powers every command in the CLI
 - **The MCP server** (`@agenticmail/mcp`) — translates AI tool calls into API requests
 - **OpenClaw sub-agents** (`@agenticmail/openclaw`) — same thing but for the OpenClaw framework
+- **Claude Code sessions** (`@agenticmail/claudecode`) — surfaces every AgenticMail agent as a callable subagent and bridges inbound mail/tasks to Claude-powered workers via a dispatcher daemon. The API auto-mounts integration routes under `/api/agenticmail/integrations/claudecode/*` when `@agenticmail/claudecode` is installed as an optional dependency.
 - **Your own code** — any HTTP client can use the API
+
+### Claude Code self-install endpoint
+
+When `@agenticmail/claudecode` is installed alongside the API server, three additional routes light up:
+
+```
+GET  /api/agenticmail/integrations/claudecode/status
+POST /api/agenticmail/integrations/claudecode/install
+POST /api/agenticmail/integrations/claudecode/uninstall
+```
+
+These are mounted **before** the master-key auth middleware on purpose — a fresh Claude Code session that doesn't yet have AgenticMail wired up has no way to know the master key, so requiring it would defeat the "agent installs itself" use case. The API binds to `127.0.0.1` by default, so anything that can reach these endpoints can already read `~/.agenticmail/config.json` — the unauthenticated install endpoint doesn't widen the attack surface beyond that. **If you bind the API to a non-loopback interface, put auth or a firewall in front of it** (same caveat as every other unauthenticated route on the server, e.g. `/health`).
 
 ---
 
@@ -354,7 +369,7 @@ JSON parse errors (malformed request bodies) return a clear 400 error rather tha
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AGENTICMAIL_MASTER_KEY` | Yes | — | Admin API key (the human owner's key) |
-| `AGENTICMAIL_API_PORT` | No | `3100` | Port for the API server |
+| `AGENTICMAIL_API_PORT` | No | `3829` | Port for the API server |
 | `STALWART_URL` | No | `http://localhost:8080` | Stalwart mail server admin URL |
 | `STALWART_ADMIN_USER` | No | `admin` | Stalwart admin username |
 | `STALWART_ADMIN_PASSWORD` | No | `changeme` | Stalwart admin password |

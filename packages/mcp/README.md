@@ -10,7 +10,7 @@ When connected, your AI agent can send emails and texts, check inboxes, reply to
 npm install -g @agenticmail/mcp
 ```
 
-**Requirements:** Node.js 20+, AgenticMail API server running
+**Requirements:** Node.js 22+, AgenticMail API server running
 
 ---
 
@@ -35,7 +35,7 @@ Add to your MCP client configuration (e.g., `.mcp.json` or project settings):
       "command": "npx",
       "args": ["agenticmail-mcp"],
       "env": {
-        "AGENTICMAIL_API_URL": "http://127.0.0.1:3100",
+        "AGENTICMAIL_API_URL": "http://127.0.0.1:3829",
         "AGENTICMAIL_API_KEY": "ak_your_agent_key"
       }
     }
@@ -56,7 +56,7 @@ For desktop AI applications, add to your MCP configuration file. Example paths:
       "command": "npx",
       "args": ["agenticmail-mcp"],
       "env": {
-        "AGENTICMAIL_API_URL": "http://127.0.0.1:3100",
+        "AGENTICMAIL_API_URL": "http://127.0.0.1:3829",
         "AGENTICMAIL_API_KEY": "ak_your_agent_key"
       }
     }
@@ -68,9 +68,27 @@ For desktop AI applications, add to your MCP configuration file. Example paths:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AGENTICMAIL_API_URL` | Yes | AgenticMail API server URL (e.g., `http://127.0.0.1:3100`) |
-| `AGENTICMAIL_API_KEY` | Yes | Agent API key (`ak_...`). Determines which agent this MCP server acts as. |
-| `AGENTICMAIL_MASTER_KEY` | No | Master key (`mk_...`). Required for admin operations (create/delete agents, approve emails, gateway config). |
+| `AGENTICMAIL_API_URL` | Yes | AgenticMail API server URL. Default port is **`3829`** (changed from `3100` in `@agenticmail/mcp@0.7.x` to avoid common dev-tool conflicts). Example: `http://127.0.0.1:3829`. |
+| `AGENTICMAIL_API_KEY` | Yes¹ | Agent API key (`ak_...`). Determines the default identity this MCP server acts as when a tool call doesn't pass `_account`. |
+| `AGENTICMAIL_MASTER_KEY` | No | Master key (`mk_...`). Required for admin operations (create/delete agents, approve emails, gateway config). **Also enables on-demand `_account` resolution** — any tool call passing `_account: "<name>"` will lazily fetch that agent's API key via the master key the first time it sees the name, so freshly-`create_account`'d agents become addressable without restarting the MCP server. |
+| `AGENTICMAIL_ACCOUNT_KEYS_JSON` | No | JSON map of `{"<agentName>": "<apiKey>"}` for per-call identity switching. When the caller passes `_account: "Fola"` (etc.), the server authenticates AS that agent for the duration of the call. Populated automatically by `agenticmail claudecode install` for the Claude Code integration. |
+
+¹ Either `AGENTICMAIL_API_KEY` OR `AGENTICMAIL_MASTER_KEY` (or `AGENTICMAIL_ACCOUNT_KEYS_JSON`) must be set, but you don't strictly need all three.
+
+### Per-call identity switching (`_account`)
+
+Every tool's input schema accepts an optional `_account: "<name>"` parameter. When passed, the server resolves that name to an apiKey (from `AGENTICMAIL_ACCOUNT_KEYS_JSON`, then falling back to a live master-keyed lookup of `/accounts`) and runs the call as that agent. Without `_account`, the call uses `AGENTICMAIL_API_KEY` as the default identity.
+
+This is what powers the [`@agenticmail/claudecode`](https://www.npmjs.com/package/@agenticmail/claudecode) integration: one MCP server process, many AgenticMail identities. A Claude Code subagent that "is" Fola passes `_account: "Fola"` on every call and ends up reading Fola's real inbox, sending mail from `fola@localhost`, and so on.
+
+### Meta-tools for cheap discovery (`request_tools` + `invoke`)
+
+To keep host context windows small, only ~10 of the 62 tools are pre-declared in a typical subagent's `tools:` whitelist. The other ~50 stay reachable through two always-on meta-tools:
+
+- **`request_tools({ query?, sets? })`** — Returns a text catalogue of the unloaded tools, grouped by set (`mail_extras`, `mail_compose`, `sms`, `account_admin`, …). Optional substring filter or set-name filter.
+- **`invoke({ tool, args, _account? })`** — Dispatches to any of the 62 tools by name. The agent uses `request_tools` to discover, `invoke` to call.
+
+Token impact: a typical subagent spawn loads ~3K tokens of tool schemas instead of ~15K. The cost is one extra round trip for uncommon operations (discover → invoke), which is almost always a worthwhile trade.
 
 ---
 

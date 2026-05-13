@@ -1,9 +1,16 @@
 import 'dotenv/config';
 import { networkInterfaces } from 'node:os';
-import { createApp } from './app.js';
+import { createApp, prepareIntegrations } from './app.js';
 import { closeCaches } from './routes/mail.js';
 import { closeAllWatchers } from './routes/events.js';
 import { startScheduledSender } from './routes/features.js';
+
+// Pre-resolve dynamically-loaded integration packages (e.g. @agenticmail/claudecode)
+// BEFORE the app is constructed, so their Express routes get mounted in the
+// correct middleware order. Without this, the routes would land after the
+// master-key auth middleware and unauthenticated callers (the AI agents we
+// want to support) would get 401 instead of the install endpoint.
+await prepareIntegrations();
 
 function getLocalIp(): string {
   const nets = networkInterfaces();

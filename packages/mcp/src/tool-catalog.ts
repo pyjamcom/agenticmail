@@ -1,0 +1,190 @@
+/**
+ * Categorisation of the MCP tool surface into "sets", used by the
+ * `request_tools` meta-tool.
+ *
+ * # Why this exists
+ *
+ * Loading all 62 tool schemas into a Claude Code subagent's context costs
+ * ~10K tokens per spawn — most of it never used. To stay cheap, subagents
+ * are launched with a small curated whitelist (the ESSENTIAL set below)
+ * plus a `request_tools` meta-tool. When they need something outside the
+ * curated set, they call `request_tools` to discover what exists, then
+ * `invoke` to call it by name.
+ *
+ * This mirrors the enterprise tool-resolver's three-tier lazy-loading
+ * design (see /enterprise/src/agent-tools/tool-resolver.ts), adapted for
+ * the constraint that Claude Code's subagent tool list is fixed at spawn
+ * time — so instead of dynamically extending the tool list, we let the
+ * agent dispatch through a single generic `invoke` tool.
+ *
+ * # Editing the catalogue
+ *
+ * Adding a new tool to AgenticMail: drop it into the right set below
+ * (and if no set fits, create one — keep them small and topical).
+ *
+ * Adding a new SET: keep `SET_DESCRIPTIONS` aligned with `TOOL_SETS`.
+ * The order in SET_DESCRIPTIONS is the order shown to the agent by
+ * request_tools, so put the most-commonly-needed sets first.
+ *
+ * Anything in NO set still works via `invoke` — `request_tools` will
+ * surface it under an `"_uncategorised"` heading. That's a soft signal
+ * to come back here and categorise it properly, but won't break.
+ */
+
+/** Tool sets — short, topical, ideally ≤10 tools each. */
+export const TOOL_SETS = {
+  /**
+   * Always loaded — the common operations every agent needs immediately.
+   * If you add to this list, add to ESSENTIAL_TOOLS in the subagent
+   * template too (they should track each other).
+   */
+  essential: [
+    'whoami',
+    'list_inbox',
+    'read_email',
+    'send_email',
+    'reply_email',
+    'search_emails',
+    'list_agents',
+    'message_agent',
+    // call_agent is the headline coordination primitive: synchronous RPC
+    // to another AgenticMail agent that returns a structured result. It is
+    // the reason multi-agent setups exist on this platform and belongs in
+    // the pre-loaded toolset, not behind a request_tools indirection.
+    'call_agent',
+    'check_tasks',
+  ],
+
+  /** Less-common mail operations. */
+  mail_extras: [
+    'forward_email',
+    'list_folders',
+    'list_folder',
+    'mark_read',
+    'mark_unread',
+    'move_email',
+    'delete_email',
+    'create_folder',
+    'manage_tags',
+  ],
+
+  /** Bulk mail operations — fan-out reads, mass-mark, mass-move. */
+  mail_bulk: [
+    'batch_delete',
+    'batch_read',
+    'batch_mark_read',
+    'batch_mark_unread',
+    'batch_move',
+    'inbox_digest',
+  ],
+
+  /** Compose-time helpers — drafts, templates, signatures, scheduling. */
+  mail_compose: [
+    'manage_drafts',
+    'manage_templates',
+    'manage_signatures',
+    'manage_scheduled',
+    'template_send',
+    'import_relay_email',
+  ],
+
+  /** Outbound safety + rules. */
+  mail_safety: [
+    'manage_pending_emails',
+    'manage_rules',
+    'manage_spam',
+  ],
+
+  /** Agent coordination beyond the basics in `essential`. */
+  agent_coord: [
+    'check_messages',
+    'wait_for_email',
+    'claim_task',
+    'submit_result',
+  ],
+
+  /** Address book. */
+  contacts: [
+    'manage_contacts',
+    'update_metadata',
+  ],
+
+  /** SMS / voice messaging. */
+  sms: [
+    'sms_send',
+    'sms_messages',
+    'sms_check_code',
+    'sms_parse_email',
+    'sms_read_voice',
+    'sms_record',
+    'sms_setup',
+    'sms_config',
+  ],
+
+  /** Account admin (master-key territory — create/delete accounts, cleanup). */
+  account_admin: [
+    'create_account',
+    'delete_agent',
+    'deletion_reports',
+    'cleanup_agents',
+  ],
+
+  /** Storage of arbitrary files for an agent. */
+  storage: [
+    'storage',
+  ],
+
+  /** Mail-server setup / onboarding wizards. */
+  setup: [
+    'setup_guide',
+    'setup_email_relay',
+    'setup_email_domain',
+    'setup_gmail_alias',
+    'setup_payment',
+    'purchase_domain',
+    'send_test_email',
+  ],
+
+  /** System health / gateway status. */
+  system: [
+    'check_health',
+    'check_gateway_status',
+  ],
+} as const;
+
+export type ToolSetName = keyof typeof TOOL_SETS;
+
+/** One-line description shown in the request_tools catalogue. */
+export const SET_DESCRIPTIONS: Record<ToolSetName, string> = {
+  essential: 'Always-on baseline — inbox, send/reply, search, agent discover/message/call (RPC), tasks',
+  mail_extras: 'Less-common mail ops — forward, folders, mark/move/delete, tags',
+  mail_bulk: 'Bulk operations — fan-out read, mass-mark, mass-move, digest',
+  mail_compose: 'Compose-time — drafts, templates, signatures, scheduling',
+  mail_safety: 'Outbound safety — pending approvals, rules, spam controls',
+  agent_coord: 'Beyond-basic coordination — push wait, task lifecycle (claim/submit), check_messages',
+  contacts: 'Address book and your own metadata',
+  sms: 'SMS / voice — send/read/setup/parse/record',
+  account_admin: 'Account admin — create/delete agents, cleanup (master key required)',
+  storage: 'File storage for an agent',
+  setup: 'Mail-server onboarding wizards (one-time setup)',
+  system: 'System health and gateway status checks',
+};
+
+/**
+ * Reverse index built from TOOL_SETS — { toolName: setName }. Used by
+ * `request_tools` to label tools that came up in a query filter, and to
+ * surface "uncategorised" tools when a new tool is added but not yet
+ * placed in a set.
+ */
+export const TOOL_TO_SET: Record<string, ToolSetName> = (() => {
+  const out: Record<string, ToolSetName> = {};
+  for (const [setName, tools] of Object.entries(TOOL_SETS)) {
+    for (const tool of tools) out[tool] = setName as ToolSetName;
+  }
+  return out;
+})();
+
+/** Convenience: the always-loaded tool names. The subagent template
+ *  generator imports this so the .md frontmatter `tools:` list stays
+ *  in sync with the MCP catalogue without a manual second source. */
+export const ESSENTIAL_TOOLS: readonly string[] = TOOL_SETS.essential;

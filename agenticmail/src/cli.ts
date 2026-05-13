@@ -468,7 +468,65 @@ function stopApiServer(): boolean {
 
 // --- Commands ---
 
+/**
+ * Non-interactive mode flag — set by `--yes` / `--non-interactive` / `-y`
+ * on the `agenticmail setup` command line, OR by the `bootstrap` command.
+ *
+ * When true, every interactive prompt in the setup flow falls back to a
+ * safe default:
+ *   - Email setup → "Skip for now" (no relay, no domain — local-only)
+ *   - SMS setup  → No
+ *   - Retry prompts → No (proceed past partial config)
+ *   - Agent name → "secretary"
+ *
+ * The result is a fully-provisioned LOCAL AgenticMail (Stalwart + master
+ * key + default agent) with no outbound mail relay. Internal multi-agent
+ * coordination over `*@localhost` still works. The user can add external
+ * mail later with `agenticmail setup` (interactive).
+ *
+ * Why a module-level flag instead of plumbing it through every function:
+ * the prompts live deep inside `cmdSetup` (~1000 lines) at many sites; a
+ * module global is the smallest patch that catches every prompt without
+ * a wholesale refactor. The flag is set once at the top of cmdSetup and
+ * read by `nonInteractiveDefault()` whenever a prompt is about to fire.
+ */
+let NON_INTERACTIVE = false;
+
+/**
+ * Resolve a prompt's answer in non-interactive mode without blocking on
+ * stdin. Returns the default if NON_INTERACTIVE is set; otherwise returns
+ * null and the caller should fall back to the live prompt.
+ */
+function nonInteractiveDefault<T>(value: T): T | null {
+  return NON_INTERACTIVE ? value : null;
+}
+
 async function cmdSetup() {
+  // Parse setup-specific flags (--yes, --non-interactive, -y, --help).
+  const setupArgs = process.argv.slice(3);
+  if (setupArgs.some(a => a === '--help' || a === '-h' || a === 'help')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 agenticmail setup ')}`);
+    log('');
+    log(`  ${c.bold('Usage:')} agenticmail setup [flags]`);
+    log('');
+    log(`  ${c.bold('Flags:')}`);
+    log(`    ${c.green('-y, --yes, --non-interactive')}`);
+    log(`        Skip every prompt and use safe defaults. Provisions Stalwart +`);
+    log(`        master key + a default "secretary" agent; SKIPS external email`);
+    log(`        and SMS setup. Run \`agenticmail setup\` interactively later to`);
+    log(`        add a Gmail relay or your own domain.`);
+    log(`    ${c.green('-h, --help')}`);
+    log(`        Show this help and exit.`);
+    log('');
+    return;
+  }
+  if (setupArgs.some(a => a === '--yes' || a === '-y' || a === '--non-interactive')) {
+    NON_INTERACTIVE = true;
+    log('');
+    log(`  ${c.dim('[non-interactive mode — using safe defaults for every prompt]')}`);
+  }
+
   log('');
   log(`   ${c.bold('🎀 AgenticMail Setup')} `);
   log('');
@@ -485,12 +543,14 @@ async function cmdSetup() {
   log(`    ${c.dim('4.')} Connect your email`);
   if (hasOpenClaw) log(`    ${c.dim('5.')} Configure OpenClaw integration`);
   log('');
-  await pick(`  ${c.magenta('Press any key to get started...')} `, [
-    '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
-    'a','b','c','d','e','f','g','h','i','j','k','l','m',
-    'n','o','p','q','r','s','t','u','v','w','x','y','z',
-    ' ', '\r', '\n',
-  ]);
+  if (!NON_INTERACTIVE) {
+    await pick(`  ${c.magenta('Press any key to get started...')} `, [
+      '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+      'a','b','c','d','e','f','g','h','i','j','k','l','m',
+      'n','o','p','q','r','s','t','u','v','w','x','y','z',
+      ' ', '\r', '\n',
+    ]);
+  }
   log('');
 
   const setup = new SetupManager();
@@ -691,7 +751,9 @@ async function cmdSetup() {
     log(`  ${c.cyan('2.')} Remove and connect a different email`);
     log(`  ${c.cyan('3.')} Set up a custom domain instead`);
     log('');
-    const existChoice = await pick(`  ${c.magenta('>')} `, ['1', '2', '3']);
+    // Non-interactive mode: keep whatever's already configured. Don't
+    // surprise the user by replacing or removing existing email setup.
+    const existChoice = nonInteractiveDefault<string>('1') ?? await pick(`  ${c.magenta('>')} `, ['1', '2', '3']);
     if (existChoice === '1') {
       choice = '3'; // skip — keep existing
       log('');
@@ -715,7 +777,12 @@ async function cmdSetup() {
     log(`  ${c.cyan('3.')} Skip for now`);
     log(`     ${c.dim('You can always set this up later.')}`);
     log('');
-    choice = await pick(`  ${c.magenta('>')} `, ['1', '2', '3']);
+    // Non-interactive mode: skip external email setup. The user can
+    // configure relay or domain later by running `agenticmail setup`
+    // interactively. For the Claude Code integration's local multi-agent
+    // coordination this is enough — agents email each other on @localhost
+    // through Stalwart without needing any external mail relay.
+    choice = nonInteractiveDefault<string>('3') ?? await pick(`  ${c.magenta('>')} `, ['1', '2', '3']);
   }
   log('');
 
@@ -771,7 +838,7 @@ async function cmdSetup() {
     log(`  ${c.dim('This lets agents receive verification codes and send texts.')}`);
     log('');
 
-    const wantSms = await ask(`  ${c.bold('Set up phone number access?')} ${c.dim('(y/N)')} `);
+    const wantSms = nonInteractiveDefault<string>('N') ?? await ask(`  ${c.bold('Set up phone number access?')} ${c.dim('(y/N)')} `);
     if (wantSms.toLowerCase().startsWith('y')) {
       log('');
       log(`  ${c.bold('What this does:')}`);
@@ -907,8 +974,11 @@ async function cmdSetup() {
 
   printSummary(result, false);
 
-  // Drop into the interactive shell — server keeps running in background after exit
-  if (serverReady) {
+  // Drop into the interactive shell — server keeps running in background after exit.
+  // Skip the shell in non-interactive mode (e.g. bootstrap pipeline); the caller is
+  // expected to continue with subsequent phases and an interactive REPL would just
+  // block forever waiting for stdin that isn't there.
+  if (serverReady && !NON_INTERACTIVE) {
     await interactiveShell({ config: result.config, onExit: () => {} });
   }
 }
@@ -1678,6 +1748,307 @@ function mergePluginConfig(
   return result;
 }
 
+/**
+ * `agenticmail claudecode` — install / status / remove flows for the
+ * Claude Code integration. Delegates to @agenticmail/claudecode so this
+ * function stays a thin wrapper around the package's public API; all the
+ * file-writing and HTTP-talking lives there.
+ *
+ * Flags:
+ *   --status        Print the current install state and exit.
+ *   --remove        Remove the integration (preserves the bridge agent
+ *                   unless --purge-bridge is also passed).
+ *   --purge-bridge  Additionally delete the bridge AgenticMail agent.
+ *   -h / --help     Print help and exit.
+ */
+/**
+ * `agenticmail bootstrap` — the one-shot zero-question install.
+ *
+ * Designed to be runnable by an AI agent (Claude Code itself) without any
+ * human in the loop, so a user can say "Claude, install AgenticMail" and
+ * the whole pipeline — Stalwart + master key + API server + Claude Code
+ * integration + dispatcher daemon — comes up on its own.
+ *
+ * Pipeline:
+ *   1. `agenticmail setup --yes` (skips email/SMS; local-only mode)
+ *   2. `agenticmail service install` (launchd plist + auto-start the API)
+ *   3. wait for the API to answer /health
+ *   4. `agenticmail claudecode` (provision bridge agent, write
+ *      ~/.claude.json + ~/.claude/agents/*.md, start the dispatcher)
+ *   5. final status check
+ *
+ * External email relay and SMS are deliberately skipped — they require
+ * user-owned credentials nobody else has. Run `agenticmail setup`
+ * interactively later to add them.
+ *
+ * Honest scope: this still requires Docker (or Colima — auto-installed
+ * via brew on macOS, apt on Linux) and Node 20+. Everything past that
+ * comes up unattended.
+ */
+async function cmdBootstrap() {
+  const sub = process.argv.slice(3);
+  if (sub.includes('--help') || sub.includes('-h')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 agenticmail bootstrap ')}`);
+    log('');
+    log(`  ${c.bold('Usage:')} agenticmail bootstrap`);
+    log('');
+    log('  One-shot, zero-question install. Designed for AI agents (like Claude');
+    log('  Code) to run on a user\'s behalf without any prompts.');
+    log('');
+    log('  Pipeline:');
+    log(`    ${c.dim('1.')} agenticmail setup --yes        ${c.dim('(skips email/SMS; local-only)')}`);
+    log(`    ${c.dim('2.')} agenticmail service install    ${c.dim('(auto-start the API)')}`);
+    log(`    ${c.dim('3.')} wait for API on http://127.0.0.1:<configured port>/api/agenticmail/health`);
+    log(`    ${c.dim('4.')} agenticmail claudecode         ${c.dim('(wire Claude Code integration)')}`);
+    log('');
+    log(`  ${c.bold('Notes:')}`);
+    log('    - Docker (or Colima on macOS) will be auto-installed via brew/apt');
+    log('      if missing. No GUI gates — uses Colima on macOS, not Docker Desktop.');
+    log('    - External email relay and SMS setup are SKIPPED. The local');
+    log('      multi-agent flow works without them. Run `agenticmail setup`');
+    log('      interactively later if you want outbound mail to the real internet.');
+    log('');
+    return;
+  }
+
+  log('');
+  log(`  ${c.pinkBg(' 🎀 AgenticMail bootstrap — fully autonomous install ')}`);
+  log('');
+  log(`  ${c.dim('No prompts. No human in the loop. Everything is auto-configured.')}`);
+  log('');
+
+  // ── Phase 1: setup ───────────────────────────────────────────────
+  log(`  ${c.bold('Phase 1 of 4')} ${c.dim('—')} ${c.bold('Provisioning infrastructure (Stalwart + master key)')}`);
+  log('');
+  // Inject --yes into argv so cmdSetup picks it up. Save + restore.
+  const savedArgv = process.argv.slice();
+  process.argv = [savedArgv[0]!, savedArgv[1]!, 'setup', '--yes'];
+  try {
+    await cmdSetup();
+  } finally {
+    process.argv = savedArgv;
+  }
+  log('');
+
+  // ── Phase 2: service install + start ─────────────────────────────
+  log(`  ${c.bold('Phase 2 of 4')} ${c.dim('—')} ${c.bold('Installing the auto-start service')}`);
+  log('');
+  const savedArgvSvc = process.argv.slice();
+  process.argv = [savedArgvSvc[0]!, savedArgvSvc[1]!, 'service', 'install'];
+  try {
+    await cmdService();
+  } finally {
+    process.argv = savedArgvSvc;
+  }
+  log('');
+
+  // ── Phase 3: wait for API health ─────────────────────────────────
+  // Read the actual port from the freshly-written config — never hardcode
+  // it, because (a) the default changed in 0.6 (3100→3829) so old assumptions
+  // are wrong, and (b) the operator may have overridden it via env var.
+  const { apiUrl: healthUrl } = readApiUrlFromConfig();
+  log(`  ${c.bold('Phase 3 of 4')} ${c.dim('—')} ${c.bold('Waiting for the API to come online')} ${c.dim('(' + healthUrl + ')')}`);
+  log('');
+  const apiHealthOk = await waitForApiHealth(healthUrl, 60_000);
+  if (!apiHealthOk) {
+    fail(`API did not respond on ${healthUrl}/api/agenticmail/health within 60 s`);
+    info('Check the logs: tail -f ~/.agenticmail/logs/server.log');
+    process.exit(1);
+  }
+  ok('API server is online and healthy');
+  log('');
+
+  // ── Phase 4: claudecode integration ──────────────────────────────
+  log(`  ${c.bold('Phase 4 of 4')} ${c.dim('—')} ${c.bold('Wiring Claude Code integration')}`);
+  log('');
+  const savedArgvCc = process.argv.slice();
+  process.argv = [savedArgvCc[0]!, savedArgvCc[1]!, 'claudecode'];
+  try {
+    await cmdClaudeCode();
+  } finally {
+    process.argv = savedArgvCc;
+  }
+
+  // ── Done ─────────────────────────────────────────────────────────
+  log('');
+  log(`  ${c.pinkBg(' ✅ Bootstrap complete ')}`);
+  log('');
+  log(`  ${c.bold('Restart Claude Code')} and you'll have:`);
+  log(`    - 62 ${c.cyan('mcp__agenticmail__*')} tools in every session`);
+  log(`    - The ${c.cyan('Agent')} tool surfaces each AgenticMail agent as a subagent`);
+  log(`    - Send mail to ${c.cyan('<agent>@localhost')} or call_agent → dispatcher auto-wakes them`);
+  log('');
+  log(`  ${c.dim('To add an external email relay later:')} ${c.green('agenticmail setup')}`);
+  log('');
+}
+
+/**
+ * Read the API host+port from ~/.agenticmail/config.json. Used by the
+ * bootstrap flow to wait on the RIGHT URL regardless of what default
+ * AgenticMail-core happens to ship with this month. Falls back to
+ * 127.0.0.1:3829 if the config file is missing or malformed (matches
+ * the current core default).
+ */
+function readApiUrlFromConfig(): { apiUrl: string; host: string; port: number } {
+  const configPath = join(homedir(), '.agenticmail', 'config.json');
+  let host = '127.0.0.1';
+  let port = 3829;
+  if (existsSync(configPath)) {
+    try {
+      const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
+      if (cfg?.api?.host) host = cfg.api.host;
+      if (typeof cfg?.api?.port === 'number') port = cfg.api.port;
+    } catch { /* fall back to defaults */ }
+  }
+  return { apiUrl: `http://${host}:${port}`, host, port };
+}
+
+/**
+ * Poll the master API's /health endpoint until it answers 200 or we hit
+ * the timeout. Used by `cmdBootstrap` to wait for the freshly-installed
+ * launchd service to come online before running `cmdClaudeCode`.
+ */
+async function waitForApiHealth(baseUrl: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/agenticmail/health`, {
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (res.ok) return true;
+    } catch { /* not up yet */ }
+    await new Promise(r => setTimeout(r, 1_000));
+  }
+  return false;
+}
+
+async function cmdClaudeCode() {
+  const sub = process.argv.slice(3);
+  if (sub.includes('--help') || sub.includes('-h') || sub.includes('help')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 AgenticMail for Claude Code ')}`);
+    log('');
+    log(`  ${c.bold('Usage:')} agenticmail claudecode [flags]`);
+    log('');
+    log('  Registers AgenticMail with Claude Code so every Claude Code session');
+    log('  can call AgenticMail agents (Fola, John, …) the same way it calls');
+    log('  native subagents via the Agent tool.');
+    log('');
+    log('  Specifically, this command:');
+    log(`    ${c.dim('1.')} Provisions a dedicated "claudecode" AgenticMail agent (Claude Code's identity)`);
+    log(`    ${c.dim('2.')} Writes an MCP server entry into ~/.claude.json`);
+    log(`    ${c.dim('3.')} Generates one Claude Code subagent file per AgenticMail agent`);
+    log(`        (in ${c.cyan('~/.claude/agents/agenticmail-<name>.md')})`);
+    log('');
+    log(`  ${c.bold('Flags:')}`);
+    log(`    ${c.green('--status')}        Show what's currently installed and exit`);
+    log(`    ${c.green('--remove')}        Uninstall (keeps the bridge agent by default)`);
+    log(`    ${c.green('--purge-bridge')}  When used with --remove, also delete the bridge agent`);
+    log(`    ${c.green('-h, --help')}      Show this help and exit`);
+    log('');
+    log(`  After install, restart Claude Code so it picks up the new MCP server.`);
+    log('');
+    return;
+  }
+
+  // Lazy-load the integration package so the rest of the CLI still works
+  // even if @agenticmail/claudecode is unavailable (e.g. someone built from
+  // source without running the workspace install). We give the user an
+  // actionable error in that case rather than a cryptic ESM resolver miss.
+  let mod: typeof import('@agenticmail/claudecode');
+  try {
+    mod = await import('@agenticmail/claudecode');
+  } catch (err) {
+    fail(`Could not load @agenticmail/claudecode: ${(err as Error).message}`);
+    log('');
+    info(`Install it with: ${c.green('npm install -g @agenticmail/claudecode')}`);
+    process.exit(1);
+    return;
+  }
+
+  // --- Branch on the requested action ---
+  if (sub.includes('--status')) {
+    const s = await mod.status();
+    log('');
+    log(`  ${c.pinkBg(' 🎀 AgenticMail for Claude Code ')}`);
+    log('');
+    const stateLabel = s.state === 'installed' ? c.green('installed')
+      : s.state === 'partial' ? c.yellow('partial')
+      : c.dim('not installed');
+    log(`  Status: ${stateLabel}`);
+    log(`  MCP server registered: ${s.mcpInstalled ? c.green('yes') : c.dim('no')}`);
+    log(`  Bridge agent in AgenticMail: ${s.bridgeAgentExists ? c.green('yes') : c.dim('no')}`);
+    log(`  Subagent files: ${s.subagents.length > 0 ? c.green(String(s.subagents.length)) : c.dim('0')}`);
+    if (s.subagents.length > 0) for (const name of s.subagents) info(`  • ${name}`);
+    if (s.notes.length > 0) {
+      log('');
+      log(`  ${c.bold('Notes:')}`);
+      for (const n of s.notes) info(`  • ${n}`);
+    }
+    log('');
+    process.exit(s.state === 'installed' ? 0 : 1);
+  }
+
+  if (sub.includes('--remove') || sub.includes('--uninstall')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 Removing AgenticMail from Claude Code ')}`);
+    log('');
+    const purgeBridge = sub.includes('--purge-bridge');
+    const result = await mod.uninstall({ purgeBridgeAgent: purgeBridge });
+    if (result.mcpBlockRemoved) ok('Removed MCP server entry from Claude Code config');
+    else info('No MCP server entry was registered.');
+    if (result.removedSubagents.length > 0) ok(`Removed ${result.removedSubagents.length} subagent file(s)`);
+    else info('No subagent files were registered.');
+    if (result.bridgeAgentDeleted) ok('Deleted bridge agent from AgenticMail');
+    else if (purgeBridge) info('Bridge agent could not be deleted (already gone or AgenticMail unreachable).');
+    log('');
+    if (!result.changed) info('Nothing to remove.');
+    log('');
+    return;
+  }
+
+  // Default action = install.
+  log('');
+  log(`  ${c.pinkBg(' 🎀 AgenticMail for Claude Code ')}`);
+  log('');
+  log(`  ${c.bold('Wiring AgenticMail into Claude Code.')} This will:`);
+  log(`    ${c.dim('1.')} Provision a "claudecode" agent inside AgenticMail`);
+  log(`    ${c.dim('2.')} Add an MCP server entry to ~/.claude.json`);
+  log(`    ${c.dim('3.')} Generate one Claude Code subagent file per AgenticMail agent`);
+  log('');
+
+  const spinner = new Spinner('general', 'Talking to AgenticMail…');
+  spinner.start();
+  let result: Awaited<ReturnType<typeof mod.install>>;
+  try {
+    result = await mod.install();
+    spinner.succeed('Integration installed');
+  } catch (err) {
+    spinner.fail(`Install failed: ${(err as Error).message}`);
+    log('');
+    if ((err as { status?: number }).status === 0) {
+      info(`Is the AgenticMail server running? Try: ${c.green('agenticmail start')}`);
+    }
+    log('');
+    process.exit(1);
+    return;
+  }
+
+  ok(`Bridge agent ${c.bold(result.bridgeAgent.name)} ${c.dim('(' + result.bridgeAgent.email + ')')}`);
+  ok(`MCP server registered in ${c.cyan(result.claudeConfigPath)}`);
+  ok(`${result.registeredAgents.length} Claude Code subagent${result.registeredAgents.length === 1 ? '' : 's'} written to ${c.cyan(result.agentsDir)}`);
+  for (const a of result.registeredAgents) info(`  • agenticmail-${a.name.toLowerCase()}  →  ${a.email}`);
+  log('');
+  if (!result.changed) {
+    info('Already up to date — no files were modified.');
+  } else {
+    log(`  ${c.bold('Next:')} restart Claude Code so it picks up the new MCP server.`);
+    info(`Try inside Claude Code: ${c.green('Agent { subagent_type: "agenticmail-fola", prompt: "hi" }')}`);
+  }
+  log('');
+}
+
 async function cmdOpenClaw() {
   // Issue #18 — `agenticmail openclaw --help` previously dropped
   // straight into the interactive setup flow because the
@@ -2040,7 +2411,7 @@ async function cmdOpenClaw() {
   }
 
   if (!smsAlreadyConfigured) {
-    const wantSms = await ask(`  ${c.bold('Set up phone number access?')} ${c.dim('(y/N)')} `);
+    const wantSms = nonInteractiveDefault<string>('N') ?? await ask(`  ${c.bold('Set up phone number access?')} ${c.dim('(y/N)')} `);
     if (wantSms.toLowerCase().startsWith('y')) {
       log('');
 
@@ -2544,7 +2915,7 @@ async function cmdStatus() {
   // Read config for API host/port
   const configPath = join(homedir(), '.agenticmail', 'config.json');
   let apiHost = '127.0.0.1';
-  let apiPort = 3100;
+  let apiPort = 3829;
   let masterKey = process.env.AGENTICMAIL_MASTER_KEY;
   if (existsSync(configPath)) {
     try {
@@ -2961,6 +3332,15 @@ switch (command) {
   case 'openclaw':
     cmdOpenClaw().catch(err => { console.error(err); process.exit(1); });
     break;
+  case 'claudecode':
+  case 'claude-code':
+  case 'claude':
+    cmdClaudeCode().catch(err => { console.error(err); process.exit(1); });
+    break;
+  case 'bootstrap':
+  case 'quickstart':
+    cmdBootstrap().catch(err => { console.error(err); process.exit(1); });
+    break;
   case 'service':
     cmdService().then(() => { process.exit(0); }).catch(err => { console.error(err); process.exit(1); });
     break;
@@ -2994,11 +3374,13 @@ switch (command) {
     log('');
     log('  Commands:');
     log(`    ${c.green('agenticmail')}           Get started (setup + start)`);
-    log(`    ${c.green('agenticmail setup')}     Re-run the setup wizard`);
+    log(`    ${c.green('agenticmail bootstrap')} ${c.dim('Zero-question install — for AI agents (Claude Code) to run on a user\'s behalf')}`);
+    log(`    ${c.green('agenticmail setup')}     Re-run the setup wizard ${c.dim('(use --yes for non-interactive)')}`);
     log(`    ${c.green('agenticmail start')}     Start the server`);
     log(`    ${c.green('agenticmail stop')}      Stop the server`);
     log(`    ${c.green('agenticmail status')}    See what's running`);
     log(`    ${c.green('agenticmail openclaw')}  Set up AgenticMail for OpenClaw`);
+    log(`    ${c.green('agenticmail claudecode')} Set up AgenticMail for Claude Code`);
     log(`    ${c.green('agenticmail service')}   Manage auto-start (install/uninstall/status)`);
     log(`    ${c.green('agenticmail update')}    Update to the latest version`);
     log('');

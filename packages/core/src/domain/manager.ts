@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import type { Database } from '../storage/db.js';
 import { StalwartAdmin } from '../stalwart/admin.js';
 import type { DomainInfo, DomainRow, DomainSetupResult, DnsRecord } from './types.js';
 
@@ -15,7 +15,7 @@ function rowToDomain(row: DomainRow): DomainInfo {
 
 export class DomainManager {
   constructor(
-    private db: Database.Database,
+    private db: Database,
     private stalwart: StalwartAdmin,
   ) {}
 
@@ -80,13 +80,13 @@ export class DomainManager {
 
   async get(domain: string): Promise<DomainInfo | null> {
     const stmt = this.db.prepare('SELECT * FROM domains WHERE domain = ?');
-    const row = stmt.get(domain) as DomainRow | undefined;
+    const row = stmt.get(domain) as unknown as DomainRow | undefined;
     return row ? rowToDomain(row) : null;
   }
 
   async list(): Promise<DomainInfo[]> {
     const stmt = this.db.prepare('SELECT * FROM domains ORDER BY created_at DESC');
-    const rows = stmt.all() as DomainRow[];
+    const rows = stmt.all() as unknown as DomainRow[];
     return rows.map(rowToDomain);
   }
 

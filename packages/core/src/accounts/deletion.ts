@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type Database from 'better-sqlite3';
+import type { Database } from '../storage/db.js';
 import type { AccountManager } from './manager.js';
 import type { Agent } from './types.js';
 import { MailReceiver } from '../mail/receiver.js';
@@ -68,7 +68,7 @@ export interface ArchiveAndDeleteOptions {
 
 export class AgentDeletionService {
   constructor(
-    private db: Database.Database,
+    private db: Database,
     private accountManager: AccountManager,
     private config: AgenticMailConfig,
   ) {}

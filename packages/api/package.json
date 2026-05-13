@@ -1,6 +1,6 @@
 {
   "name": "@agenticmail/api",
-  "version": "0.5.62",
+  "version": "0.7.1",
   "description": "REST API server for AgenticMail — email and SMS endpoints for AI agents",
   "type": "module",
   "main": "dist/index.js",
@@ -19,7 +19,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts --format esm --dts --clean --external @agenticmail/claudecode",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run --passWithNoTests",
@@ -27,12 +27,15 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@agenticmail/core": "^0.5.61",
+    "@agenticmail/core": "^0.7.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.0",
     "express-rate-limit": "^7.5.0",
     "uuid": "^11.1.0"
+  },
+  "optionalDependencies": {
+    "@agenticmail/claudecode": "^0.1.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -44,7 +47,7 @@
     "vitest": "^3.0.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",

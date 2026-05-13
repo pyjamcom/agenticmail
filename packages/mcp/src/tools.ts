@@ -1,12 +1,102 @@
 import { scheduleFollowUp, drainFollowUps, cancelFollowUp } from './pending-followup.js';
 import { recordToolCall } from '@agenticmail/core';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { TOOL_SETS, SET_DESCRIPTIONS, TOOL_TO_SET, type ToolSetName } from './tool-catalog.js';
 
-const API_URL = process.env.AGENTICMAIL_API_URL ?? 'http://127.0.0.1:3100';
+const API_URL = process.env.AGENTICMAIL_API_URL ?? 'http://127.0.0.1:3829';
 const API_KEY = process.env.AGENTICMAIL_API_KEY ?? '';
 const MASTER_KEY = process.env.AGENTICMAIL_MASTER_KEY ?? '';
 
-if (!API_KEY && !MASTER_KEY) {
-  console.error('[agenticmail-mcp] Warning: Neither AGENTICMAIL_API_KEY nor AGENTICMAIL_MASTER_KEY is set');
+/**
+ * Per-call identity override.
+ *
+ * The MCP server has a single "default" identity (AGENTICMAIL_API_KEY). For
+ * the @agenticmail/claudecode integration, a single Claude Code session
+ * needs to act as MANY AgenticMail agents — one subagent per agent, each
+ * operating its own mailbox. Spawning one MCP server per identity at
+ * Claude Code startup would be expensive (one stdio child per agent, every
+ * session). Instead, the host writes the full set of agent API keys into
+ * `AGENTICMAIL_ACCOUNT_KEYS_JSON` at install time, and the subagent passes
+ * `_account: "Fola"` (etc.) on every tool call — we look the key up here.
+ *
+ * Falsy / missing / unknown account → falls back to the default API_KEY,
+ * which keeps the standalone MCP-server use case unaffected.
+ */
+/**
+ * Account-key cache, lower-case name → apiKey.
+ *
+ * Two paths populate this:
+ *   1. Initial seeding from AGENTICMAIL_ACCOUNT_KEYS_JSON at module load
+ *      (the @agenticmail/claudecode installer writes a snapshot of every
+ *      AgenticMail account here so the common case is zero round trips).
+ *   2. Lazy on-demand fill via the master API when a tool call references
+ *      an unknown name (see resolveAccountKey below). This means a fresh
+ *      `create_account` followed immediately by an `_account: "<new-name>"`
+ *      call WORKS without anyone having to restart the MCP server or
+ *      rewrite `~/.claude.json` — the cache extends itself.
+ *
+ * The cache only ever grows. Account deletions are rare; the worst case
+ * for a stale entry is one extra 401 from the API, which the tool layer
+ * surfaces as a normal error.
+ */
+const ACCOUNT_KEYS: Map<string, string> = new Map();
+(() => {
+  const raw = process.env.AGENTICMAIL_ACCOUNT_KEYS_JSON ?? '';
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === 'string' && v) ACCOUNT_KEYS.set(k.toLowerCase(), v);
+      }
+    }
+  } catch (err) {
+    console.error(`[agenticmail-mcp] Warning: AGENTICMAIL_ACCOUNT_KEYS_JSON is not valid JSON: ${(err as Error).message}`);
+  }
+})();
+
+/**
+ * Resolve an account name to its apiKey, falling back to a master-keyed
+ * lookup when the cache misses. Returns null if the account doesn't
+ * exist OR if no master key is configured.
+ *
+ * Negative results are NOT cached — if a worker creates an account and
+ * immediately tries to use it, an earlier negative cache hit would lock
+ * us into the wrong answer for the rest of the process's lifetime. The
+ * positive cache is cheap to refill; the cost of an extra GET /accounts
+ * for misses is bounded by the create-account rate, which is low.
+ */
+async function resolveAccountKey(name: string): Promise<string | null> {
+  const lower = name.toLowerCase();
+  const cached = ACCOUNT_KEYS.get(lower);
+  if (cached) return cached;
+  if (!MASTER_KEY) return null;
+  try {
+    const res = await fetch(`${API_URL}/api/agenticmail/accounts`, {
+      headers: { 'Authorization': `Bearer ${MASTER_KEY}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { agents?: Array<{ name?: string; apiKey?: string }> };
+    for (const agent of data.agents ?? []) {
+      if (typeof agent.name === 'string' && typeof agent.apiKey === 'string' && agent.apiKey) {
+        ACCOUNT_KEYS.set(agent.name.toLowerCase(), agent.apiKey);
+      }
+    }
+    return ACCOUNT_KEYS.get(lower) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+interface ToolCallContext {
+  /** Per-call API key override; null = use default API_KEY. */
+  apiKey: string | null;
+}
+const toolCallContext = new AsyncLocalStorage<ToolCallContext>();
+
+if (!API_KEY && !MASTER_KEY && ACCOUNT_KEYS.size === 0) {
+  console.error('[agenticmail-mcp] Warning: No AGENTICMAIL_API_KEY, AGENTICMAIL_MASTER_KEY, or AGENTICMAIL_ACCOUNT_KEYS_JSON is set');
 }
 
 type ApiJsonObject = Record<string, any>;
@@ -38,11 +128,25 @@ function withReminders(text: string): string {
 }
 
 async function apiRequest<T extends ApiResponse = ApiJsonObject>(method: string, path: string, body?: unknown, useMasterKey = false, timeoutMs = 30_000): Promise<T> {
-  const key = useMasterKey && MASTER_KEY ? MASTER_KEY : API_KEY;
+  // Resolution order:
+  //   1. If the tool needs the master key (admin-scoped ops) AND we have one — master wins.
+  //   2. Otherwise prefer the per-call identity from toolCallContext (set by
+  //      handleToolCall when the caller passed `_account: "..."`).
+  //   3. Otherwise fall back to the static AGENTICMAIL_API_KEY.
+  const perCallKey = toolCallContext.getStore()?.apiKey ?? null;
+  const key = useMasterKey && MASTER_KEY ? MASTER_KEY : (perCallKey ?? API_KEY);
+  // AGENTICMAIL_MCP_DEBUG flips on a per-request trace of which identity was
+  // used. Kept here permanently because identity-routing bugs (forgotten
+  // `_account` arg, typo in account name, missing key in the map) are
+  // notoriously silent — they degrade back to the default identity and look
+  // like "the inbox is just empty", which is the wrong intuition.
+  if (process.env.AGENTICMAIL_MCP_DEBUG) {
+    console.error(`[mcp-debug] apiRequest ${method} ${path} | perCall=${perCallKey ? perCallKey.slice(0, 12) + '…' : 'none'} | resolved=${key.slice(0, 12)}…`);
+  }
   if (!key) {
     throw new Error(useMasterKey
       ? 'Master key is required for this operation. Set AGENTICMAIL_MASTER_KEY.'
-      : 'API key is not configured. Set AGENTICMAIL_API_KEY.');
+      : 'API key is not configured. Set AGENTICMAIL_API_KEY (or pass _account to use a per-agent key).');
   }
 
   const headers: Record<string, string> = { 'Authorization': `Bearer ${key}` };
@@ -891,6 +995,47 @@ export const toolDefinitions = [
       required: ['from', 'body'],
     },
   },
+  // ─── Meta-tools for tiered tool loading ────────────────────────────
+  // These exist so a Claude Code subagent (or any host that wants to keep
+  // its spawn context small) can load this MCP server with only a handful
+  // of pre-declared tools and still reach the full 60+ tool surface on
+  // demand. See tool-catalog.ts for the categorisation behind this.
+  {
+    name: 'request_tools',
+    description: 'Discover AgenticMail tools that are NOT already in your loaded tool list. Returns a text catalogue grouped by set (mail_extras, sms, agent_coord, …) with each tool name and its schema summary. After calling this, use `invoke` to call any tool by name. Optional filters: `query` (substring match on tool name/description) or `sets` (return only the named sets).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Case-insensitive substring filter on tool name or description (e.g. "signature", "voice").',
+        },
+        sets: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Restrict the output to these set names (e.g. ["sms", "mail_extras"]). See SET_DESCRIPTIONS for valid names.',
+        },
+      },
+    },
+  },
+  {
+    name: 'invoke',
+    description: 'Call ANY AgenticMail tool by name with structured args — including tools not in your pre-loaded tool list. Use after `request_tools` to discover the right tool. Pass `_account` either at the top level OR inside `args`; either works. Example: invoke({ tool: "manage_signatures", args: { action: "create", name: "default", body: "—\\nFola" }, _account: "Fola" }).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tool: {
+          type: 'string',
+          description: 'The AgenticMail tool name to call (e.g. "manage_signatures", "sms_send"). See request_tools for the full catalogue.',
+        },
+        args: {
+          type: 'object',
+          description: 'Arguments for the target tool. Same shape you would pass if calling the tool directly.',
+        },
+      },
+      required: ['tool'],
+    },
+  },
 ];
 
 // Tools that require master key access
@@ -1047,6 +1192,36 @@ export async function handleToolCall(name: string, args: Record<string, unknown>
   recordToolCall(name);
   const useMaster = MASTER_KEY_TOOLS.has(name);
 
+  // Per-call identity override: when the caller passes `_account: "Fola"`,
+  // resolve it to that agent's apiKey and run the whole dispatch inside an
+  // AsyncLocalStorage context so deep inside apiRequest we can grab the
+  // right key without threading it through every tool handler manually.
+  //
+  // Resolution path: in-memory cache → master-keyed lookup of /accounts
+  // (if MASTER_KEY is set). The lookup is what lets dynamically-created
+  // accounts (e.g. workers provisioned by the dispatcher) be addressable
+  // immediately, without any restart-the-MCP-server dance.
+  //
+  // Unknown / missing _account → null, which falls back to the default key.
+  const requestedAccount = typeof args?._account === 'string' ? args._account.toLowerCase() : null;
+  let accountKey: string | null = null;
+  if (requestedAccount) {
+    accountKey = await resolveAccountKey(requestedAccount);
+    if (!accountKey) {
+      // Soft warning — we don't reject the call. A typo'd or actually
+      // nonexistent account silently falls back to the default identity,
+      // which is the common foot-gun when wiring up new agents.
+      console.warn(`[agenticmail-mcp] _account="${requestedAccount}" did not resolve to a known account; falling back to the default identity.`);
+    }
+  }
+
+  if (process.env.AGENTICMAIL_MCP_DEBUG) {
+    console.error(`[mcp-debug] handleToolCall name=${name} requested=${requestedAccount ?? 'none'} accountKey=${accountKey ? accountKey.slice(0, 12) + '…' : 'null'} ACCOUNT_KEYS.size=${ACCOUNT_KEYS.size}`);
+  }
+  return toolCallContext.run({ apiKey: accountKey }, () => dispatchToolCall(name, args, useMaster));
+}
+
+async function dispatchToolCall(name: string, args: Record<string, unknown>, useMaster: boolean): Promise<string> {
   switch (name) {
     case 'send_email': {
       const sendBody: Record<string, unknown> = {
@@ -2233,7 +2408,125 @@ export async function handleToolCall(name: string, args: Record<string, unknown>
       return JSON.stringify(result, null, 2);
     }
 
+    // ─── Meta-tools ──────────────────────────────────────────────────
+    case 'request_tools': {
+      return renderToolCatalogue({
+        query: typeof args.query === 'string' ? args.query : undefined,
+        sets: Array.isArray(args.sets) ? (args.sets as string[]) : undefined,
+      });
+    }
+    case 'invoke': {
+      const targetTool = args.tool;
+      if (typeof targetTool !== 'string' || !targetTool) {
+        throw new Error('invoke: `tool` (string) is required.');
+      }
+      if (targetTool === 'invoke' || targetTool === 'request_tools') {
+        // Calling invoke through invoke is a confused-deputy footgun. Refuse
+        // explicitly so the agent gets a clear error instead of a confusing
+        // recursion or no-op.
+        throw new Error(`invoke: cannot invoke the meta-tool "${targetTool}" through invoke.`);
+      }
+      const rawInner = (args.args ?? {}) as Record<string, unknown>;
+      // Allow `_account` to be passed at either the outer level (so it's
+      // visually attached to the invoke call) OR inside `args` (so the
+      // inner call looks the same as a direct call). The outer level wins
+      // if both are supplied; that matches "invoke as Fola" being the
+      // explicit operator intent.
+      const innerArgs: Record<string, unknown> = { ...rawInner };
+      if (typeof args._account === 'string' && args._account) {
+        innerArgs._account = args._account;
+      }
+      // Re-enter the public entrypoint so the `_account` resolution +
+      // AsyncLocalStorage context setup happen exactly once and exactly
+      // the same way as a direct call. This keeps the auth path single-
+      // sourced rather than duplicating the resolution inside invoke.
+      return await handleToolCall(targetTool, innerArgs);
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+/**
+ * Build the human-readable catalogue returned by `request_tools`.
+ *
+ * Format is deliberately Markdown-ish so it renders well both as a tool
+ * response and inside the agent's reasoning. Each set is a heading, each
+ * tool a bullet with name + description, truncated to the first sentence
+ * to keep the catalogue under ~3K tokens even unfiltered. The agent can
+ * always re-call with `query=...` for more detail on a specific tool.
+ */
+function renderToolCatalogue(opts: { query?: string; sets?: string[] }): string {
+  const query = opts.query?.toLowerCase().trim();
+  const wantedSets = opts.sets && opts.sets.length > 0 ? new Set(opts.sets) : null;
+
+  // Index tool definitions by name for fast description lookup.
+  const byName = new Map<string, { name: string; description: string }>();
+  for (const tool of toolDefinitions) {
+    byName.set(tool.name, { name: tool.name, description: tool.description ?? '' });
+  }
+
+  const matches = (toolName: string): boolean => {
+    if (!query) return true;
+    const def = byName.get(toolName);
+    return toolName.toLowerCase().includes(query)
+      || (def?.description.toLowerCase().includes(query) ?? false);
+  };
+
+  // First sentence only — keeps catalogue compact. Falls back to whole
+  // description if the period detection fails.
+  const firstSentence = (s: string): string => {
+    const m = s.match(/^([^.!?]+[.!?])/);
+    return (m ? m[1] : s).trim();
+  };
+
+  const lines: string[] = [];
+  let totalShown = 0;
+
+  for (const [setName, description] of Object.entries(SET_DESCRIPTIONS)) {
+    if (wantedSets && !wantedSets.has(setName)) continue;
+    const toolsInSet = TOOL_SETS[setName as ToolSetName];
+    const filtered = toolsInSet.filter(matches);
+    if (filtered.length === 0) continue;
+    lines.push(`## ${setName} — ${description}`);
+    for (const toolName of filtered) {
+      const def = byName.get(toolName);
+      if (!def) continue;
+      lines.push(`- **${toolName}**: ${firstSentence(def.description)}`);
+      totalShown++;
+    }
+    lines.push('');
+  }
+
+  // Surface any tools that exist in the runtime but aren't in any set —
+  // a soft nudge to come back and categorise them.
+  const allCategorised = new Set<string>(Object.keys(TOOL_TO_SET));
+  const uncategorised = [...byName.keys()].filter(
+    n => !allCategorised.has(n) && n !== 'request_tools' && n !== 'invoke' && matches(n),
+  );
+  if (uncategorised.length > 0 && !wantedSets) {
+    lines.push('## _uncategorised — present in runtime but not yet placed in a set');
+    for (const n of uncategorised) {
+      const def = byName.get(n);
+      lines.push(`- **${n}**: ${firstSentence(def?.description ?? '')}`);
+      totalShown++;
+    }
+    lines.push('');
+  }
+
+  if (totalShown === 0) {
+    return query
+      ? `No tools matched query="${opts.query}". Try a broader term, or call request_tools() with no arguments to see the full catalogue.`
+      : 'No tools available.';
+  }
+
+  const header = [
+    `# AgenticMail tool catalogue (${totalShown} tool${totalShown === 1 ? '' : 's'} shown)`,
+    '',
+    'Call any tool below with: `invoke({ tool: "<name>", args: { ... }, _account: "<your account>" })`.',
+    '',
+  ].join('\n');
+
+  return header + lines.join('\n').trimEnd();
 }

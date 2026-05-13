@@ -1,14 +1,13 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
-import type Database from 'better-sqlite3';
-import type { AccountManager, Agent } from '@agenticmail/core';
+import type { AccountManager, Agent, Database } from '@agenticmail/core';
 
 // Throttle activity tracking to at most once per 60s per agent
 const lastActivityUpdate = new Map<string, number>();
 const ACTIVITY_THROTTLE_MS = 60_000;
 
 /** Update an agent's last_activity_at (throttled to once per 60s per agent) */
-export function touchActivity(db: Database.Database, agentId: string): void {
+export function touchActivity(db: Database, agentId: string): void {
   const now = Date.now();
   const last = lastActivityUpdate.get(agentId) ?? 0;
   if (now - last > ACTIVITY_THROTTLE_MS) {
@@ -33,7 +32,7 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-export function createAuthMiddleware(masterKey: string, accountManager: AccountManager, db?: Database.Database) {
+export function createAuthMiddleware(masterKey: string, accountManager: AccountManager, db?: Database) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {

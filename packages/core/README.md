@@ -174,7 +174,7 @@ Full custom domain through Cloudflare. Agents send from `agent@yourdomain.com` w
 4. Stalwart hostname set to the domain (critical for SMTP EHLO greeting)
 5. DKIM signing key generated in Stalwart (selector: `agenticmail`)
 6. DNS records configured: MX (via Email Routing), SPF, DMARC, DKIM TXT, tunnel CNAME
-7. Tunnel started with ingress rules routing traffic to the API server (port 3100) and Stalwart (port 8080)
+7. Tunnel started with ingress rules routing traffic to the API server (port 3829) and Stalwart (port 8080)
 8. Cloudflare Email Routing enabled on the zone
 9. Email Worker deployed — catches all inbound email, base64-encodes the raw RFC822 content, and POSTs it to the AgenticMail inbound webhook with a shared secret
 10. Catch-all Email Routing rule set to route all `*@domain` to the Worker
@@ -410,7 +410,9 @@ Limits: minimum 1 result, maximum 1000 results per query (default 20).
 
 ## Data Storage
 
-AgenticMail uses a SQLite database with WAL mode (Write-Ahead Logging) for better concurrent access and foreign keys enabled for referential integrity. The database is initialized with automatic migrations that run on first access.
+AgenticMail uses Node's built-in **`node:sqlite`** module (stable since Node 22). The database runs with WAL mode (Write-Ahead Logging) for better concurrent access and foreign keys enabled for referential integrity. Automatic migrations run on first `getDatabase()` call.
+
+> **Why `node:sqlite` instead of `better-sqlite3`?** Before `0.7.0` this package depended on `better-sqlite3`, a native module that ships pre-built binaries per `NODE_MODULE_VERSION` and intermittently lags new Node releases. When prebuilds were missing, installers fell back to `node-gyp` compile-from-source — which requires Python, a C++ toolchain, and a working network at install time. `node:sqlite` is part of Node itself, so by definition it always matches the runtime. No prebuilds, no gyp, no native compilation, no Python prereq. The on-disk database format is unchanged (still SQLite 3); existing data files migrate transparently. **Cost:** Node 22+ is now the minimum supported runtime.
 
 **Database location:** `~/.agenticmail/agenticmail.db`
 
@@ -447,14 +449,14 @@ The SetupManager handles getting everything installed and configured for the fir
 - cloudflared — checks managed binary at `~/.agenticmail/bin/cloudflared` or system-wide via `which`
 
 **Automatic installation:**
-- Docker: via Homebrew (`brew install --cask docker`) on macOS, or the official install script on Linux. Opens Docker Desktop on macOS and waits up to 60 seconds for the daemon to start.
+- Docker: via Homebrew (`brew install colima docker docker-compose`) on macOS — **uses Colima, not Docker Desktop**, so there's no GUI gate and no terms-acceptance dialog. On Linux, the official install script. Starts Colima (`colima start --cpu 2 --memory 2 --disk 10`) and waits for the daemon to come up.
 - Stalwart: starts the container via `docker compose up -d` and waits up to 30 seconds for it to be running.
 - cloudflared: downloads the platform-specific binary from GitHub releases (supports macOS ARM/Intel and Linux ARM/Intel). Installs atomically (write to temp file, chmod, rename) at `~/.agenticmail/bin/cloudflared`.
 
 **Configuration generation:**
 - `docker-compose.yml` — Stalwart service with ports 8080 (HTTP admin), 587 (SMTP submission), 143 (IMAP), 25 (SMTP inbound)
 - `stalwart.toml` — Stalwart configuration with RocksDB storage, internal directory, stdout logging, and fallback admin credentials
-- `config.json` — Master key, Stalwart URL/credentials, SMTP/IMAP host/port, API host/port, data directory (written with mode 0600 for security)
+- `config.json` — Master key, Stalwart URL/credentials, SMTP/IMAP host/port, API host (default `127.0.0.1`) and API port (**default `3829`** — chosen to avoid common dev-tool ports like 3000/3100/3200/3300/4000/5000/8000/8080), data directory (written with mode 0600 for security)
 - `.env` — Environment variables (written with mode 0600)
 
 Configuration files are placed in the data directory (default: `~/.agenticmail/`). Calling `initConfig()` is idempotent — it loads existing config if present, but always regenerates Docker files to keep passwords in sync.
