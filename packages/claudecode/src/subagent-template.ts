@@ -26,12 +26,16 @@ const ESSENTIAL_TOOL_NAMES = [
   'search_emails',
   'list_agents',
   'message_agent',
-  // call_agent is the synchronous RPC primitive — fire a task at another
-  // AgenticMail agent and get back a structured result. It is the reason
-  // multi-agent setups work, so it MUST be pre-loaded; making subagents
-  // call request_tools just to discover it would be a usability disaster
-  // for the most common coordination pattern.
+  // call_agent is the one-shot RPC primitive — sync request, sync answer.
+  // For multi-step coordination use the thread pattern (send_email with
+  // CC + reply_email with replyAll) instead.
   'call_agent',
+  // wait_for_email is the thread-coordination primitive: block until a
+  // specific reply lands in your inbox (filter by from / subject /
+  // inReplyTo / participants). Essential for delegate-then-wait flows;
+  // making subagents discover it via request_tools would be a usability
+  // disaster for the most common coordination pattern.
+  'wait_for_email',
   'check_tasks',
   // Meta-tools — these unlock the other ~50 tools on demand.
   'request_tools',
@@ -195,7 +199,16 @@ export function renderPersonaBody(input: SubagentTemplateInput): string {
     `${tool('whoami')}({ _account: "${agent.name}" })`,
     '```',
     '',
-    `**Coordination tip:** When you need another agent to *do work and report back*, prefer \`${tool('call_agent')}\` over \`${tool('message_agent')}\`. message_agent just delivers an email and returns immediately; call_agent runs the AgenticMail RPC pipeline — the target agent gets the task, processes it, and the structured result flows back into your call. That is the entire reason this platform has multiple agents.`,
+    `**Coordination — the thread is the workspace.** When you wake on new mail and it's part of a thread (Subject starts with "Re:" or an In-Reply-To header is present):`,
+    '',
+    `  1. Read the new message with \`${tool('read_email')}\`.`,
+    `  2. Load the rest of the thread with \`${tool('search_emails')}({ subject: "<core subject>", _account: "${agent.name}" })\` and read each prior message. You MUST have full thread context before acting.`,
+    `  3. Look at To + CC across the thread — those are your teammates. They will each be woken on every reply-all just like you were.`,
+    `  4. Decide if it's YOUR turn: are you addressed by name? Is the previous-stage handoff to your role? Is a question pending for you? When in doubt, stay silent — over-replying creates noise.`,
+    `  5. If yes: \`${tool('reply_email')}({ uid, replyAll: true, text: "...", _account: "${agent.name}" })\`. Sign with your name. If you're handing off, name the next teammate explicitly ("Orion — over to you, please …"). To bring a new teammate in, just add them to CC.`,
+    `  6. If no: \`mark_read\` and return. Silence IS a valid contribution.`,
+    '',
+    `**When to use \`${tool('call_agent')}\` instead:** only when you need ONE structured answer from ONE teammate, inline in your current turn — e.g. "give me a JSON list of X". For multi-step / multi-agent work, the thread pattern above is the right primitive.`,
     '',
     `On-demand (via invoke) examples — anything NOT in the pre-loaded list:`,
     '',

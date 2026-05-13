@@ -67,65 +67,96 @@ in `~/.claude.json` takes effect.
 ## 2. If the user asks you to use AgenticMail for multi-agent coordination
 
 **This is the single most-misused thing in this codebase.** Read carefully.
-The rule below is provider-agnostic — it applies whether your host is
+The pattern below is provider-agnostic — it applies whether your host is
 Claude Code, ChatGPT, Cursor, Grok, Aider, or any other MCP client.
 
 AgenticMail agents are **persistent identities with their own inboxes,
-API keys, personas, and audit trails**. Address them through AgenticMail's
-own primitives — never through your host's native sub-agent / sub-task
-tool with a "you are <name>" prompt.
+API keys, personas, and audit trails**. They coordinate the way humans
+do: in **shared email threads**, with everyone CC'd, taking turns
+implicitly from context.
 
-### Right way
+### Preferred pattern — single thread, CC everyone
+
+This is how a human boss coordinates a small team and it is the right
+primitive for AgenticMail too:
 
 ```
-1. list_agents()                          // discover who exists, or...
-2. create_account({ name: "Lyra", ... })  // ...spawn fresh identities
-3. call_agent({ target: "Lyra", task: "design the game brief" })
-   // → Lyra processes the task as herself (real identity + mailbox),
-   //   structured result returns into your call.
-4. call_agent({ target: "Orion", task: "implement: <Lyra's brief>" })
-5. Read final artefacts via list_inbox / read_email if needed.
+1. list_agents()                            // discover, or...
+2. create_account({ name: "Vesper", role: "creative-director" })
+   create_account({ name: "Orion",  role: "developer" })
+
+3. send_email({
+     to:   "vesper@localhost",                          // primary owner of step 1
+     cc:   "orion@localhost, claudecode@localhost",     // teammates + yourself
+     subject: "Build a small terminal game",
+     text: [
+       "Team —",
+       "",
+       "Vesper, please design a minimal terminal game (under ~80 LOC).",
+       "Reply-all with the design doc when ready.",
+       "",
+       "Orion, once Vesper signs off, implement it and reply-all with the code.",
+       "",
+       "I (the host) will watch the thread and step in if needed.",
+     ].join("\n"),
+   })
+
+4. list_inbox / read_email on your bridge inbox to watch progress.
+   Step in by reply-all'ing into the same thread whenever needed.
 ```
 
-For fire-and-forget handoffs, swap `call_agent` for `send_email` or
-`message_agent` — mail lands in their inbox and they reply on their own
-schedule. Use `wait_for_email` if you need to block until they respond.
+What happens under the hood:
+- The mail server pushes an SSE wake-up to **every local recipient**
+  the moment the email lands.
+- Each agent wakes, reads the **full thread**, sees who else is CC'd,
+  and decides if it's their turn. Vesper goes first because she was
+  named first in the body. Orion stays silent until Vesper hands off.
+  You (the host) see every reply in your bridge inbox.
+- Thread continues until someone says "done" or no agent has anything
+  to add. No RPC, no scheduler, no out-of-band protocol.
+
+### When to use `call_agent` instead
+
+Only when you need **one structured answer from one agent**, inline in
+your current host turn. Examples: "what's the current count of unread
+mail in Fola's inbox?", "produce a JSON list of contacts tagged
+'investor'". For anything multi-step or multi-agent, prefer the thread.
 
 ### Wrong way (do not do this — regardless of host)
 
 ```
-✗ create_account({ name: "Lyra" })
-✗ <host>.spawn_sub_agent({ prompt: "You are Lyra the designer..." })
+✗ create_account({ name: "Vesper" })
+✗ <host>.spawn_sub_agent({ prompt: "You are Vesper the designer..." })
 ✗ send_email({ from: bridge, to: "orion@localhost",
                text: "<the brief your native sub-agent wrote>" })
 ```
 
-That spawns a generic sub-agent under YOUR identity (no Lyra persona,
-no Lyra mailbox, no audit trail) and then forges mail "from" Lyra. The
-AgenticMail agent named "Lyra" never actually thought anything — you
-just used her name as a label on a manually-shuttled message.
+That spawns a generic sub-agent under YOUR identity (no Vesper persona,
+no Vesper mailbox, no audit trail) and then forges mail "from" Vesper.
+The AgenticMail agent named "Vesper" never actually thought anything —
+you just used her name as a label on a manually-shuttled message.
+
+Equally wrong: serialising the work yourself with sequential
+`call_agent` calls ("get Vesper's design, then call Orion with it").
+That works but is fragile and slow. The thread pattern lets the
+agents drive their own handoffs.
 
 ### Why this matters
 
-- AgenticMail's RPC pipeline (`call_agent`) and the optional dispatcher
-  daemon are what give each agent real, isolated identity. Bypassing
-  them and roleplaying inside your host throws away every benefit:
-  per-agent signatures, per-agent outbound guard, persona consistency,
-  searchable history, and per-agent rate / cost tracking.
-- With the Claude Code integration installed, a dispatcher process
-  subscribes to each agent's inbox and auto-wakes them under your
-  existing Claude OAuth — zero extra cost vs. a native sub-agent.
-  Without that integration (other MCP hosts), `call_agent` still
-  queues the task and `send_email` still delivers; whatever worker
-  your environment provides processes them as the target agent.
-- Never pass `_account: "<other-agent>"` from the host to "act as"
-  another agent. That falsifies the `From:` header. Use `call_agent`.
+- Every agent has **full context every time they wake** — they read
+  the whole thread, not just the latest message.
+- Turn-taking is implicit; no scheduler, no RPC ceremony.
+- The thread is **searchable history**. The host sees everything.
+- Bringing in another teammate later is just adding them to CC.
+- Per-agent signatures, outbound guard, persona consistency, and
+  audit trail all stay intact — everything you lose by roleplaying.
 
 ### TL;DR rule
 
-> If the human says "have agent A coordinate with agent B", reach for
-> `call_agent` / `send_email` / `message_agent`. Never reach for your
-> host's native sub-agent tool with a roleplay prompt.
+> If the human says "have agents A and B coordinate", reach for
+> `send_email` with everyone on CC. Let them take turns in the thread.
+> Use `call_agent` only for one-shot RPC. Never reach for your host's
+> native sub-agent tool with a roleplay prompt.
 
 ---
 

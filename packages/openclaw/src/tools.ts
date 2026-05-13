@@ -1558,24 +1558,63 @@ export function registerTools(
   });
 
   reg('agenticmail_wait_for_email', {
-    description: 'Wait for a new email or task notification using push notifications (SSE). Blocks until an email arrives, a task is assigned to you, or timeout is reached. Much more efficient than polling — use this when waiting for a reply or a task from another agent.',
+    description: 'Block until a matching email (or task) lands in your inbox. Push-based (SSE) — efficient. Supports filtering by sender, subject substring, thread (In-Reply-To), or a participants list. The single-most-useful tool for thread-based coordination: send a kickoff email CC\'ing your team, then wait_for_email({ subject: "<core thread subject>" }) to wake on the first reply. Non-matching events that arrive during the wait are ignored.',
     parameters: {
       timeout: { type: 'number', description: 'Max seconds to wait (default: 120, max: 300)' },
+      from: { type: 'string', description: 'Only resume on an email FROM this address (case-insensitive substring match — "orion" matches "orion@localhost").' },
+      subject: { type: 'string', description: 'Only resume on an email whose subject contains this string (case-insensitive). The thread\'s core subject works — "Build a small game" matches "Re: Build a small game".' },
+      inReplyTo: { type: 'string', description: 'Only resume on an email whose In-Reply-To header equals this Message-ID.' },
+      participants: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Only resume on an email from ANY of these addresses (case-insensitive).',
+      },
+      includeTasks: { type: 'boolean', description: 'Include task-assignment events as matches (default: true).' },
     },
     handler: async (params: any) => {
       try {
         const c = await ctxForParams(ctx, params);
         const timeoutSec = Math.min(Math.max(Number(params.timeout) || 120, 5), 300);
+        const includeTasks = params.includeTasks !== false;
+
+        // Normalise filters once (case-insensitive, address-tolerant).
+        const fromFilter = typeof params.from === 'string' ? params.from.trim().toLowerCase() : '';
+        const subjectFilter = typeof params.subject === 'string' ? params.subject.trim().toLowerCase() : '';
+        const inReplyToFilter = typeof params.inReplyTo === 'string' ? params.inReplyTo.trim() : '';
+        const participantsRaw = Array.isArray(params.participants) ? (params.participants as unknown[]) : [];
+        const participantsFilter: string[] = participantsRaw
+          .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+          .map(p => p.trim().toLowerCase());
+        const hasAnyFilter = !!(fromFilter || subjectFilter || inReplyToFilter || participantsFilter.length);
+
+        const bareAddr = (s: string | undefined): string => {
+          if (!s) return '';
+          const m = s.match(/<([^>]+)>/);
+          return (m ? m[1] : s).trim().toLowerCase();
+        };
+
+        const emailMatches = (email: any): boolean => {
+          if (!hasAnyFilter) return true;
+          const fromAddr = bareAddr(email?.from?.[0]?.address);
+          const subj = String(email?.subject ?? '').toLowerCase();
+          const ire = String(email?.inReplyTo ?? '').trim();
+          if (fromFilter && !fromAddr.includes(fromFilter)) return false;
+          if (subjectFilter && !subj.includes(subjectFilter)) return false;
+          if (inReplyToFilter && ire !== inReplyToFilter) return false;
+          if (participantsFilter.length > 0) {
+            const ok = participantsFilter.some(p => fromAddr.includes(p));
+            if (!ok) return false;
+          }
+          return true;
+        };
 
         const apiUrl = c.config.apiUrl;
         const apiKey = c.config.apiKey;
 
-        // Create an abort controller for timeout
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
 
         try {
-          // Connect to SSE events endpoint
           const res = await fetch(`${apiUrl}/api/agenticmail/events`, {
             headers: { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'text/event-stream' },
             signal: controller.signal,
@@ -1583,25 +1622,41 @@ export function registerTools(
 
           if (!res.ok) {
             clearTimeout(timer);
-            // Fallback: if SSE not available, do a single poll
-            const search = await apiRequest(c, 'POST', '/mail/search', { seen: false });
+            // Fallback: filtered single poll.
+            const searchBody: Record<string, unknown> = { seen: false };
+            if (fromFilter) searchBody.from = fromFilter;
+            if (subjectFilter) searchBody.subject = subjectFilter;
+            const search = await apiRequest(c, 'POST', '/mail/search', searchBody);
             const uids: number[] = search?.uids ?? [];
-            if (uids.length > 0) {
-              const email = await apiRequest(c, 'GET', `/mail/messages/${uids[0]}`);
+            for (const uid of [...uids].reverse()) {
+              const email = await apiRequest(c, 'GET', `/mail/messages/${uid}`);
+              if (!email || !emailMatches(email)) continue;
+              const fromAddr = bareAddr(email.from?.[0]?.address);
               return {
                 arrived: true,
                 mode: 'poll-fallback',
-                email: email ? {
-                  uid: uids[0],
-                  from: email.from?.[0]?.address ?? '',
+                eventType: 'email',
+                email: {
+                  uid,
+                  from: fromAddr,
+                  fromName: email.from?.[0]?.name ?? fromAddr,
                   subject: email.subject ?? '(no subject)',
                   date: email.date,
                   preview: (email.text ?? '').slice(0, 300),
-                } : null,
+                  messageId: email.messageId,
+                  inReplyTo: email.inReplyTo,
+                  isInterAgent: fromAddr.endsWith('@localhost'),
+                },
                 totalUnread: uids.length,
               };
             }
-            return { arrived: false, reason: 'SSE unavailable and no unread emails', timedOut: true };
+            return {
+              arrived: false,
+              reason: hasAnyFilter
+                ? 'SSE unavailable and no unread emails match the filters'
+                : 'SSE unavailable and no unread emails',
+              timedOut: true,
+            };
           }
 
           if (!res.body) {
@@ -1609,10 +1664,10 @@ export function registerTools(
             return { arrived: false, reason: 'SSE response has no body' };
           }
 
-          // Stream SSE events until we get a 'new' email or 'task' event
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
+          let skipped = 0;
 
           try {
             while (true) {
@@ -1627,66 +1682,65 @@ export function registerTools(
                 buffer = buffer.slice(boundary + 2);
 
                 for (const line of frame.split('\n')) {
-                  if (line.startsWith('data: ')) {
-                    try {
-                      const event = JSON.parse(line.slice(6));
+                  if (!line.startsWith('data: ')) continue;
+                  let event: any;
+                  try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
-                      // Task event — pushed directly by the task assign/RPC endpoints
-                      if (event.type === 'task' && event.taskId) {
-                        clearTimeout(timer);
-                        try { reader.cancel(); } catch { /* ignore */ }
-                        return {
-                          arrived: true,
-                          mode: 'push',
-                          eventType: 'task',
-                          task: {
-                            taskId: event.taskId,
-                            taskType: event.taskType,
-                            description: event.task,
-                            from: event.from,
-                          },
-                          hint: 'You have a new task. Use agenticmail_check_tasks(action="pending") to see and claim it.',
-                        };
+                  if (event.type === 'task' && event.taskId) {
+                    if (!includeTasks || hasAnyFilter) { skipped++; continue; }
+                    clearTimeout(timer);
+                    try { reader.cancel(); } catch { /* ignore */ }
+                    return {
+                      arrived: true,
+                      mode: 'push',
+                      eventType: 'task',
+                      task: {
+                        taskId: event.taskId,
+                        taskType: event.taskType,
+                        description: event.task,
+                        from: event.from,
+                      },
+                      hint: 'You have a new task. Use agenticmail_check_tasks(action="pending") to see and claim it.',
+                    };
+                  }
+
+                  if (event.type === 'new' && event.uid) {
+                    const email = await apiRequest(c, 'GET', `/mail/messages/${event.uid}`);
+                    if (!email || !emailMatches(email)) { skipped++; continue; }
+                    const fromAddr = bareAddr(email.from?.[0]?.address);
+                    clearTimeout(timer);
+                    try { reader.cancel(); } catch { /* ignore */ }
+
+                    // Update rate limiter (only for inter-agent local mail)
+                    if (fromAddr.endsWith('@localhost')) {
+                      let myName = '';
+                      try {
+                        const me = await apiRequest(c, 'GET', '/accounts/me');
+                        myName = me?.name ?? '';
+                      } catch { /* ignore */ }
+                      if (myName) {
+                        const senderLocal = fromAddr.split('@')[0] ?? '';
+                        if (senderLocal) recordInboundAgentMessage(senderLocal, myName);
                       }
+                    }
 
-                      // New email event — from IMAP IDLE
-                      if (event.type === 'new' && event.uid) {
-                        clearTimeout(timer);
-                        try { reader.cancel(); } catch { /* ignore */ }
-
-                        const email = await apiRequest(c, 'GET', `/mail/messages/${event.uid}`);
-                        const fromAddr = email?.from?.[0]?.address ?? '';
-
-                        // Update rate limiter
-                        if (fromAddr.endsWith('@localhost')) {
-                          let myName = '';
-                          try {
-                            const me = await apiRequest(c, 'GET', '/accounts/me');
-                            myName = me?.name ?? '';
-                          } catch { /* ignore */ }
-                          if (myName) {
-                            const senderLocal = fromAddr.split('@')[0] ?? '';
-                            if (senderLocal) recordInboundAgentMessage(senderLocal, myName);
-                          }
-                        }
-
-                        return {
-                          arrived: true,
-                          mode: 'push',
-                          eventType: 'email',
-                          email: email ? {
-                            uid: event.uid,
-                            from: fromAddr,
-                            fromName: email.from?.[0]?.name ?? fromAddr,
-                            subject: email.subject ?? '(no subject)',
-                            date: email.date,
-                            preview: (email.text ?? '').slice(0, 300),
-                            messageId: email.messageId,
-                            isInterAgent: fromAddr.endsWith('@localhost'),
-                          } : null,
-                        };
-                      }
-                    } catch { /* skip malformed JSON */ }
+                    return {
+                      arrived: true,
+                      mode: 'push',
+                      eventType: 'email',
+                      skippedEvents: skipped,
+                      email: {
+                        uid: event.uid,
+                        from: fromAddr,
+                        fromName: email.from?.[0]?.name ?? fromAddr,
+                        subject: email.subject ?? '(no subject)',
+                        date: email.date,
+                        preview: (email.text ?? '').slice(0, 300),
+                        messageId: email.messageId,
+                        inReplyTo: email.inReplyTo,
+                        isInterAgent: fromAddr.endsWith('@localhost'),
+                      },
+                    };
                   }
                 }
               }
@@ -1696,12 +1750,18 @@ export function registerTools(
           }
 
           clearTimeout(timer);
-          return { arrived: false, reason: 'SSE connection closed', timedOut: false };
+          return { arrived: false, reason: 'SSE connection closed', timedOut: false, skippedEvents: skipped };
 
         } catch (err) {
           clearTimeout(timer);
           if ((err as Error).name === 'AbortError') {
-            return { arrived: false, reason: `No email received within ${timeoutSec}s`, timedOut: true };
+            return {
+              arrived: false,
+              reason: hasAnyFilter
+                ? `Timed out after ${timeoutSec}s — no matching email arrived`
+                : `No email received within ${timeoutSec}s`,
+              timedOut: true,
+            };
           }
           return { arrived: false, reason: (err as Error).message };
         }

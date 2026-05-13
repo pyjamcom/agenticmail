@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] - 2026-05-13
+
+The thread-as-workspace release. Multi-agent coordination now mirrors
+how humans actually work: one shared email thread, every participant
+CC'd, agents take turns implicitly from context, the host watches.
+No RPC ceremony, no out-of-band protocol — just mail.
+
+### Added
+
+- **`wait_for_email` now supports filtering.** New optional params:
+  - `from` — case-insensitive substring match on sender address
+  - `subject` — substring match (the thread's core subject works,
+    matches both the kickoff and every "Re:" reply)
+  - `inReplyTo` — exact Message-ID match (most precise thread filter)
+  - `participants` — array of senders; resume on a reply from any
+  - `includeTasks` — opt out of task-event matches if you only want mail
+
+  Non-matching events that arrive during the wait are now IGNORED
+  (previously the call returned on the first event). The response
+  carries `skippedEvents` so callers can distinguish "nothing happened"
+  from "things happened but none matched".
+
+  Both the `@agenticmail/mcp` tool and the `@agenticmail/openclaw`
+  mirror got the same upgrade. Both fall back to a filtered single
+  poll when SSE is unavailable.
+
+- **`wait_for_email` promoted to the `essential` tool set** — every
+  Claude Code subagent now ships with it pre-loaded. Was previously
+  under `agent_coord` and required `request_tools` discovery; for the
+  delegate-then-wait pattern that's friction that doesn't pay off.
+
+- **MCP server `instructions` field now leads with the thread pattern**
+  — one kickoff email, everyone on CC, agents take turns. `call_agent`
+  demoted to a one-shot-RPC special-case (use it for a single
+  structured answer from a single agent).
+
+- **AGENTS.md section 2 rewritten** around the thread pattern with a
+  worked example: boss creates Vesper + Orion, sends one kickoff with
+  both on CC + bridge on CC, watches the thread.
+
+- **Dispatcher wake prompt teaches thread-aware turn-taking.** When an
+  agent wakes on new mail, the prompt now walks them through:
+  load the full thread → identify CC participants → decide if it's MY
+  turn → reply-all (or stay silent). Reply-all is preferred over
+  side-channel `call_agent` for ongoing thread work.
+
+### Changed
+
+- **Dispatcher no longer spawns workers for the bridge agent.** The
+  `claudecode` bridge inbox is the HOST session's to monitor — it's
+  consumed via MCP `list_inbox` / `wait_for_email`, not by an
+  autonomous worker. Spawning a worker for the bridge was wasteful
+  AND risked autonomous-loop behaviour (bridge replies-all → bridge
+  wakes on its own reply → ad infinitum). Bridge identification is by
+  `bridgeAgentName` (default `"claudecode"`) or `role === "bridge"`.
+
+- **Dispatcher account-sync interval dropped from 60s to 5s.** An
+  AgenticMail agent created mid-session via `create_account` now gets
+  an SSE channel within ~5 seconds, not a minute. The /accounts call
+  is cheap (one HTTP GET, small JSON) — the latency saving is
+  obvious the first time you do `create_account → call_agent`.
+
+- **MCP tool descriptions updated** for `send_email` (now leads with
+  "primary primitive for multi-agent coordination — put one actor on
+  To, the team on CC, every local recipient is auto-woken") and
+  `reply_email` (now leads with "pass replyAll: true for thread
+  coordination so every CC'd participant stays in context").
+
+- **Subagent persona template teaches the same protocol** so it lands
+  at spawn time regardless of how the agent was woken.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/mcp`        | 0.7.2  | 0.7.3  |
+| `@agenticmail/claudecode` | 0.1.5  | 0.1.6  |
+| `@agenticmail/openclaw`   | 0.5.59 | 0.5.60 |
+| `@agenticmail/cli`        | 0.8.6  | 0.8.7  |
+
+(`@agenticmail/core` and `@agenticmail/api` unchanged — fix is in MCP
++ dispatcher + persona, all of which run on top of the unchanged API.)
+
 ## [0.8.6] - 2026-05-13
 
 ### Added — provider-agnostic "how to coordinate" guidance

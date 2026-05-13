@@ -47,11 +47,18 @@ export const TOOL_SETS = {
     'search_emails',
     'list_agents',
     'message_agent',
-    // call_agent is the headline coordination primitive: synchronous RPC
-    // to another AgenticMail agent that returns a structured result. It is
-    // the reason multi-agent setups exist on this platform and belongs in
-    // the pre-loaded toolset, not behind a request_tools indirection.
+    // call_agent is the one-shot RPC primitive — sync request, sync answer.
+    // Used when you need ONE structured result from ONE teammate; for
+    // multi-step coordination use the thread pattern (send_email with CC
+    // + reply_email with replyAll) instead.
     'call_agent',
+    // wait_for_email is the thread-coordination primitive: block until a
+    // specific reply lands in your inbox (filter by from / subject /
+    // inReplyTo / participants). The host uses it to wake on the next
+    // teammate reply; agents use it when they delegate and need an answer
+    // back. Essential enough that paying its tokens at every spawn beats
+    // making the agent discover it via request_tools.
+    'wait_for_email',
     'check_tasks',
   ],
 
@@ -98,7 +105,6 @@ export const TOOL_SETS = {
   /** Agent coordination beyond the basics in `essential`. */
   agent_coord: [
     'check_messages',
-    'wait_for_email',
     'claim_task',
     'submit_result',
   ],

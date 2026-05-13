@@ -155,7 +155,12 @@ function rememberBounded<T>(set: Set<T>, item: T): void {
 }
 
 const DEFAULT_MAX_CONCURRENT = 10;
-const DEFAULT_SYNC_INTERVAL_MS = 60_000;
+// Was 60s. Dropped to 5s so an agent created mid-session via MCP
+// `create_account` gets an SSE channel within seconds — otherwise the
+// caller's `call_agent` / `send_email` to a brand-new agent will hang
+// for up to a minute before any worker is awake to drain it. The
+// /accounts call is cheap (one HTTP GET, small JSON).
+const DEFAULT_SYNC_INTERVAL_MS = 5_000;
 const DEFAULT_RECONNECT_BASE_MS = 2_000;
 const DEFAULT_RECONNECT_MAX_MS = 60_000;
 
@@ -224,6 +229,7 @@ async function runWorker(
       `mcp__${mcpServerName}__list_agents`,
       `mcp__${mcpServerName}__message_agent`,
       `mcp__${mcpServerName}__call_agent`,
+      `mcp__${mcpServerName}__wait_for_email`,
       `mcp__${mcpServerName}__check_tasks`,
       `mcp__${mcpServerName}__claim_task`,
       `mcp__${mcpServerName}__submit_result`,
@@ -282,13 +288,55 @@ function newMailPrompt(agent: AgenticMailAccount, event: SSEEvent): string {
     `- Subject: ${subject}`,
     uid ? `- UID: ${uid}` : '',
     ``,
-    `Open it (with read_email if a UID was given, or list_inbox otherwise), decide what to do as ${agent.name} would, and act:`,
-    `  - if it's a question or request → reply with reply_email`,
-    `  - if it requires research → use call_agent to ask the right teammate, then reply`,
-    `  - if it's an FYI → archive (mark_read) and move on`,
-    `  - if it's spam-looking → trust the auto-spam-filter; only intervene if it slipped through`,
+    `## Thread-aware coordination protocol`,
     ``,
-    `When you've handled it, return a one-line summary of what you did.`,
+    `You are ${agent.name}. Multiple agents may be CC'd on the same thread —`,
+    `that is intentional: a thread is the shared workspace, and turn-taking is`,
+    `implicit from context (who was addressed last, whose stage of the workflow`,
+    `is next, who was @mentioned). Follow these steps in order:`,
+    ``,
+    `1. **Read this message.** read_email({ uid: ${uid ?? '<uid>'}, _account: "${agent.name}" }).`,
+    ``,
+    `2. **If this is a reply (Subject starts with "Re:" or an In-Reply-To header is present), load the rest of the thread.**`,
+    `   Use search_emails({ subject: "<core subject without Re:>", _account: "${agent.name}" })`,
+    `   to surface earlier messages in the thread, then read_email each prior UID.`,
+    `   You MUST read the full thread before deciding what to do.`,
+    ``,
+    `3. **Identify the participants.** Look at To + CC across the thread. Those`,
+    `   are your collaborators. Their names map to AgenticMail agents at`,
+    `   <name>@localhost. They will each be woken on every reply-all the same way you were.`,
+    ``,
+    `4. **Decide: is it MY turn?** Yes if any of:`,
+    `     - The latest message addresses you by name ("Vesper, please …", "@${agent.name} …").`,
+    `     - The previous-stage handoff is to your role (e.g. designer → developer, and you are the developer).`,
+    `     - You were directly asked a question and nobody has answered yet.`,
+    `   No if:`,
+    `     - The current ask is targeted at a teammate (their turn, not yours).`,
+    `     - You have nothing substantive to add right now.`,
+    `   When in doubt, stay silent — over-replying creates noise. Better to let`,
+    `   the right teammate take the turn than to step on theirs.`,
+    ``,
+    `5. **If it's your turn — reply-all so the whole thread sees it.**`,
+    `   reply_email({ uid: ${uid ?? '<uid>'}, replyAll: true, text: "...", _account: "${agent.name}" })`,
+    `   Sign with your name. Be substantive but concise. If you are handing off`,
+    `   to the next teammate, name them explicitly in your reply ("Orion — over to you, please …").`,
+    ``,
+    `6. **If you need additional help from a teammate not yet on the thread,**`,
+    `   include them by CC'ing in your reply-all — DO NOT spin up a separate`,
+    `   call_agent / message_agent side-channel. The thread is the workspace;`,
+    `   everyone stays in context.`,
+    ``,
+    `7. **If it's NOT your turn,** mark the message read with mark_read and return.`,
+    `   Do not reply just to acknowledge. Silence IS a valid contribution.`,
+    ``,
+    `When you finish, return a one-line summary of what you did:`,
+    `  "Contributed: <one-line description>"  OR  "Stayed silent — not my turn."`,
+    ``,
+    `## Fallback for non-thread mail`,
+    ``,
+    `If this is a fresh standalone email (not part of a thread, only addressed`,
+    `to you), handle it directly: answer the question, do the work, reply.`,
+    `Spam: trust the auto-filter unless something obviously slipped through.`,
   ].filter(Boolean).join('\n');
 }
 
@@ -413,6 +461,30 @@ export class Dispatcher {
     // reconnect_failed, etc.) — ignore.
   }
 
+  /**
+   * Should the dispatcher own a wake-channel for this account?
+   *
+   * We skip the bridge agent (default name "claudecode"). The bridge is
+   * the host session's own inbox proxy — when mail lands there, the
+   * HOST Claude Code session reads it via MCP (`list_inbox` /
+   * `wait_for_email` / `read_email`), NOT via a separately-spawned
+   * dispatcher worker. Spawning a worker for the bridge would:
+   *   1. Compete with the host (two Claude instances trying to "be"
+   *      Claude Code, both potentially replying autonomously).
+   *   2. Waste tokens — the host is already aware via its MCP polling.
+   *   3. Send the bridge into an autonomous loop if it ever replies-all
+   *      (because that mail would wake it again, ad infinitum).
+   *
+   * Role="bridge" is also skipped for symmetry with selectExposableAgents
+   * in install.ts — anything tagged as a bridge is host-managed.
+   */
+  private shouldWatch(account: AgenticMailAccount): boolean {
+    const bridgeName = this.cfg.bridgeAgentName.toLowerCase();
+    if (account.name.toLowerCase() === bridgeName) return false;
+    if (account.role === 'bridge') return false;
+    return true;
+  }
+
   /** Re-fetch /accounts; open SSE for new ones, close for vanished ones. */
   private async syncAccounts(): Promise<void> {
     let accounts: AgenticMailAccount[];
@@ -422,6 +494,8 @@ export class Dispatcher {
       this.log('warn', `[dispatcher] could not list accounts: ${(err as Error).message}`);
       return;
     }
+    // Filter out the bridge — it's host-owned, not dispatcher-owned.
+    accounts = accounts.filter(a => this.shouldWatch(a));
     const liveIds = new Set(accounts.map(a => a.id));
     // Close channels for accounts that disappeared.
     for (const [id, ch] of this.channels) {
