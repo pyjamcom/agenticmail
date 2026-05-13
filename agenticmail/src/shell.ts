@@ -3528,7 +3528,7 @@ export async function interactiveShell(options: ShellOptions): Promise<void> {
         // Check latest version on npm
         let latestVersion = 'unknown';
         try {
-          latestVersion = execSync('npm view agenticmail version', { encoding: 'utf-8', timeout: 15000 }).trim();
+          latestVersion = execSync('npm view @agenticmail/cli version', { encoding: 'utf-8', timeout: 15000 }).trim();
         } catch {
           fail('Could not check npm for latest version. Check your internet connection.');
           return;
@@ -3556,7 +3556,7 @@ export async function interactiveShell(options: ShellOptions): Promise<void> {
           info(`OpenClaw detected: ${c.bold(openClawVersion)}`);
           // Check if the new version is compatible
           try {
-            const peerDeps = execSync(`npm view agenticmail@${latestVersion} peerDependencies --json 2>/dev/null`, { encoding: 'utf-8', timeout: 15000 }).trim();
+            const peerDeps = execSync(`npm view @agenticmail/cli@${latestVersion} peerDependencies --json 2>/dev/null`, { encoding: 'utf-8', timeout: 15000 }).trim();
             if (peerDeps) {
               const deps = JSON.parse(peerDeps);
               if (deps.openclaw) {
@@ -3596,17 +3596,27 @@ export async function interactiveShell(options: ShellOptions): Promise<void> {
             } catch {}
           }
 
-          // Check if installed globally or locally
+          // Check if installed globally — query the scoped name first
+          // (current), fall back to the unscoped one for legacy installs.
+          // The unscoped `agenticmail` package on npm has been a 1.6 KB
+          // redirect stub since 0.8.20; the real CLI lives at
+          // @agenticmail/cli, which is what this update path installs.
           let isGlobal = false;
           try {
-            const globalList = execSync(`${pm === 'npm' ? 'npm' : pm} list -g agenticmail 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
-            if (globalList.includes('agenticmail')) isGlobal = true;
+            const globalList = execSync(`${pm} list -g @agenticmail/cli 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+            if (globalList.includes('@agenticmail/cli')) isGlobal = true;
           } catch {}
+          if (!isGlobal) {
+            try {
+              const globalList = execSync(`${pm} list -g agenticmail 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+              if (globalList.includes('agenticmail')) isGlobal = true;
+            } catch {}
+          }
 
           const scope = isGlobal ? '-g' : '';
           const installCmd = pm === 'bun'
-            ? `bun add ${scope} agenticmail@latest`
-            : `${pm} install ${scope} agenticmail@latest`;
+            ? `bun add ${scope} @agenticmail/cli@latest`
+            : `${pm} install ${scope} @agenticmail/cli@latest`;
 
           info(`Running: ${c.dim(installCmd)}`);
           execSync(installCmd, { stdio: 'inherit', timeout: 120000 });
@@ -3635,12 +3645,12 @@ export async function interactiveShell(options: ShellOptions): Promise<void> {
           }
 
           log('');
-          ok(`Updated to agenticmail@${latestVersion}`);
+          ok(`Updated to @agenticmail/cli@${latestVersion}`);
           info('Restart the shell to use the new version.');
           log('');
         } catch (err) {
           fail(`Update failed: ${(err as Error).message}`);
-          info(`Try manually: ${c.green('npm install -g agenticmail@latest')}`);
+          info(`Try manually: ${c.green('npm install -g @agenticmail/cli@latest')}`);
           log('');
         }
       },

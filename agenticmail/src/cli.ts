@@ -2883,7 +2883,22 @@ async function cmdWeb() {
     log('');
     return;
   }
-  const { apiUrl: url } = readApiUrlFromConfig();
+  const { apiUrl } = readApiUrlFromConfig();
+
+  // Pull the master key from ~/.agenticmail/config.json and tack it on
+  // as a one-time URL parameter so the user lands signed in. The web
+  // UI reads `?key=…` once, stores it in localStorage, then strips it
+  // from the address bar via `history.replaceState`. Safe because:
+  //   1. The URL is loopback-only (127.0.0.1), never leaves the box.
+  //   2. The key is owned by the same user who's running this command.
+  //   3. The browser's address bar gets cleaned on the next tick so the
+  //      key doesn't end up in history / Referer / screenshare frames.
+  let masterKey = '';
+  try {
+    const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
+    if (typeof cfg?.masterKey === 'string') masterKey = cfg.masterKey;
+  } catch { /* fall through — URL without key just shows the auth gate */ }
+  const url = masterKey ? `${apiUrl}/?key=${encodeURIComponent(masterKey)}` : apiUrl;
 
   // Quick liveness check so we can give the user a clear yes/no on
   // whether the server is actually accepting requests.
@@ -2900,14 +2915,20 @@ async function cmdWeb() {
     return;
   }
 
-  log(`  ${c.green('✓')} API server is running at ${c.cyan(url)}`);
+  log(`  ${c.green('✓')} API server is running at ${c.cyan(apiUrl)}`);
   log('');
-  log(`  ${c.bold('Open the web UI in your browser:')}`);
-  log('');
-  log(`    ${c.green(url)}`);
-  log('');
-  log(`  ${c.dim('When prompted, paste your master key:')}`);
-  log(`    ${c.dim('cat ~/.agenticmail/config.json | grep masterKey')}`);
+  if (masterKey) {
+    log(`  ${c.bold('Opening the web UI — you\'ll be signed in automatically.')}`);
+    log('');
+    log(`    ${c.dim(apiUrl)}`);
+  } else {
+    log(`  ${c.yellow('!')} ${c.bold('Master key not found in config; you\'ll need to paste it manually.')}`);
+    log('');
+    log(`    ${c.green(apiUrl)}`);
+    log('');
+    log(`  ${c.dim('When prompted:')}`);
+    log(`    ${c.dim('cat ~/.agenticmail/config.json | grep masterKey')}`);
+  }
   log('');
 
   // Try to open the browser. macOS = open, Linux = xdg-open, Windows = start.
@@ -3295,10 +3316,13 @@ async function cmdUpdate() {
   } catch {}
   info(`Current version: ${c.bold(currentVersion)}`);
 
-  // Latest version
+  // Latest version. The package was renamed to @agenticmail/cli in 0.7.x;
+  // the unscoped `agenticmail` package on npm is now a 1.6 KB redirect
+  // stub. Always query the scoped name so this code keeps working
+  // regardless of which package the user originally installed from.
   let latestVersion = 'unknown';
   try {
-    latestVersion = execSync('npm view agenticmail version', { encoding: 'utf-8', timeout: 15000 }).trim();
+    latestVersion = execSync('npm view @agenticmail/cli version', { encoding: 'utf-8', timeout: 15000 }).trim();
   } catch {
     fail('Could not check npm. Check your internet connection.');
     process.exit(1);
@@ -3329,25 +3353,36 @@ async function cmdUpdate() {
     try { execSync('bun --version', { stdio: 'ignore', timeout: 5000 }); pm = 'bun'; } catch {}
   }
 
-  // Global or local?
+  // Global or local? Detect by querying the scoped name. We also check
+  // the unscoped name as a fallback so users who installed back when
+  // the package was just `agenticmail` (pre-0.7) still get a clean
+  // upgrade path — we'll install the new scoped one and they can
+  // `npm uninstall -g agenticmail` to remove the deprecated alias.
   let isGlobal = false;
   try {
-    const list = execSync(`npm list -g agenticmail 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
-    if (list.includes('agenticmail@')) isGlobal = true;
+    const list = execSync(`npm list -g @agenticmail/cli 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+    if (list.includes('@agenticmail/cli@')) isGlobal = true;
   } catch {}
+  if (!isGlobal) {
+    try {
+      const list = execSync(`npm list -g agenticmail 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+      // Unscoped install detected — install the scoped one globally.
+      if (list.includes('agenticmail@')) isGlobal = true;
+    } catch {}
+  }
 
   const scope = isGlobal ? '-g' : '';
   const installCmd = pm === 'bun'
-    ? `bun add ${scope} agenticmail@latest`.trim()
-    : `${pm} install ${scope} agenticmail@latest`.trim();
+    ? `bun add ${scope} @agenticmail/cli@latest`.trim()
+    : `${pm} install ${scope} @agenticmail/cli@latest`.trim();
 
   info(`Running: ${c.dim(installCmd)}`);
   try {
     execSync(installCmd, { stdio: 'inherit', timeout: 120000 });
-    ok(`Updated to agenticmail@${latestVersion}`);
+    ok(`Updated to @agenticmail/cli@${latestVersion}`);
   } catch (err) {
     fail(`Update failed: ${(err as Error).message}`);
-    info(`Try: ${c.green('npm install -g agenticmail@latest')}`);
+    info(`Try: ${c.green('npm install -g @agenticmail/cli@latest')}`);
     process.exit(1);
   }
 

@@ -57,6 +57,7 @@
   .topbar {
     display: flex; align-items: center; gap: 16px;
     padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--bg);
+    position: relative;
   }
   .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; }
   .brand-bow { font-size: 22px; }
@@ -65,16 +66,128 @@
     flex: 1; max-width: 720px;
     position: relative;
   }
+
+  /* ─── Profile switcher (Gmail-style top-right) ──────────────────── */
+  .profile {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px 4px 4px; border-radius: 20px;
+    border: 1px solid var(--line); background: var(--bg);
+    cursor: pointer; font: inherit; color: var(--ink);
+  }
+  .profile:hover { background: var(--row-hover); }
+  .profile-name { font-weight: 500; font-size: 13px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .profile-caret { font-size: 10px; color: var(--muted); }
+
+  /* Avatar circles */
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 600; color: white;
+    flex-shrink: 0; position: relative;
+  }
+  .avatar-sm { width: 24px; height: 24px; font-size: 11px; }
+  .avatar-lg { width: 40px; height: 40px; font-size: 16px; }
+  .avatar-host {
+    background: #f1f1f3;       /* light card behind the Claude mark */
+    color: #cc785c;             /* Claude orange */
+  }
+  @media (prefers-color-scheme: dark) { .avatar-host { background: #1f1f23; } }
+  .avatar svg { width: 60%; height: 60%; }
+  /* Verified-host check badge — small green tick overlaid bottom-right */
+  .avatar-check {
+    position: absolute; bottom: -2px; right: -2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #22c55e; color: white;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700;
+    border: 2px solid var(--bg);
+  }
+
+  /* Dropdown panel */
+  .profile-menu {
+    position: absolute; top: 56px; right: 8px;
+    width: 320px; max-height: 70vh; overflow-y: auto;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+    padding: 8px 0; z-index: 25;
+    display: none;
+  }
+  .profile-menu.open { display: block; }
+  .profile-menu-section {
+    padding: 8px 14px 4px; font-size: 10px; font-weight: 700;
+    color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
+  }
+  .profile-menu-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; cursor: pointer;
+    color: var(--ink);
+  }
+  .profile-menu-item:hover { background: var(--row-hover); }
+  .profile-menu-item .meta { flex: 1; min-width: 0; }
+  .profile-menu-item .name {
+    font-weight: 500; font-size: 14px;
+    display: flex; align-items: center; gap: 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .profile-menu-item .email {
+    font-size: 12px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .profile-menu-item .selected-check {
+    color: var(--pink); font-size: 18px; font-weight: 700;
+    margin-left: 4px;
+  }
+  .role-badge {
+    font-size: 10px; font-weight: 600;
+    padding: 2px 7px; border-radius: 10px;
+    text-transform: uppercase; letter-spacing: .04em;
+    flex-shrink: 0;
+  }
+  .role-badge-host { background: #fef3c7; color: #92400e; }
+  .role-badge-sub { background: var(--pink-soft); color: var(--accent-strong); }
+  @media (prefers-color-scheme: dark) {
+    .role-badge-host { background: #44290c; color: #fcd34d; }
+  }
+  .profile-menu-divider {
+    height: 1px; background: var(--line); margin: 4px 0;
+  }
+  .profile-menu-footer {
+    padding: 10px 14px; font-size: 12px; color: var(--muted);
+  }
+  .profile-menu-footer a {
+    color: var(--accent-strong); cursor: pointer; text-decoration: none;
+  }
+  .profile-menu-footer a:hover { text-decoration: underline; }
   .search input {
-    width: 100%; height: 38px; padding: 0 14px 0 38px;
+    width: 100%; height: 38px; padding: 0 38px 0 38px;
     border: 1px solid var(--line); border-radius: 10px;
     background: var(--bg-soft); color: var(--ink); outline: none;
-    transition: border-color .15s;
+    transition: border-color .15s, background .15s;
   }
-  .search input:focus { border-color: var(--pink); }
+  .search input:focus { border-color: var(--pink); background: var(--bg); }
+  .search input.has-query { background: var(--bg); border-color: var(--pink-rule); }
   .search::before {
     content: "🔍"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
-    font-size: 14px; opacity: .7;
+    font-size: 14px; opacity: .7; pointer-events: none;
+  }
+  .search-clear {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: 22px; height: 22px; border-radius: 50%; border: none;
+    background: var(--row-hover); color: var(--ink-soft);
+    cursor: pointer; font-size: 14px; line-height: 1;
+    display: none;
+  }
+  .search-clear.show { display: flex; align-items: center; justify-content: center; }
+  .search-clear:hover { background: var(--line); color: var(--ink); }
+  .search-hint {
+    position: absolute; right: 40px; top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: var(--muted); pointer-events: none;
+    display: none;
+  }
+  .search-hint.show { display: block; }
+  mark.search-hl {
+    background: var(--pink-soft); color: var(--accent-strong);
+    padding: 0 2px; border-radius: 2px; font-weight: 500;
   }
   .btn {
     height: 36px; padding: 0 14px;
@@ -90,33 +203,15 @@
   .btn-ghost { background: transparent; border-color: transparent; padding: 0 10px; }
   .btn-ghost:hover { background: var(--row-hover); }
 
-  /* ─── Three-pane layout ─────────────────────────────────────────── */
-  .main { display: grid; grid-template-columns: 240px 380px 1fr; overflow: hidden; }
-  @media (max-width: 1100px) { .main { grid-template-columns: 200px 340px 1fr; } }
+  /* ─── Two-pane layout (inbox list | message detail) ─────────────── */
+  .main { display: grid; grid-template-columns: 420px 1fr; overflow: hidden; }
+  @media (max-width: 1100px) { .main { grid-template-columns: 360px 1fr; } }
   .pane { overflow-y: auto; border-right: 1px solid var(--line); }
   .pane:last-child { border-right: none; }
-
-  /* ─── Agents sidebar ────────────────────────────────────────────── */
-  .pane-agents { background: var(--bg-soft); }
   .pane-header {
     padding: 12px 14px 6px; font-size: 11px; font-weight: 600;
     color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
   }
-  .agent-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 14px; cursor: pointer; border-left: 3px solid transparent;
-    color: var(--ink-soft);
-  }
-  .agent-row:hover { background: var(--row-hover); }
-  .agent-row.selected { background: var(--row-selected); border-left-color: var(--pink); color: var(--ink); font-weight: 500; }
-  .agent-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-  .agent-row.selected .dot { background: var(--pink); }
-  .agent-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-row .count {
-    font-size: 11px; padding: 1px 6px; border-radius: 10px;
-    background: var(--pink); color: white; min-width: 18px; text-align: center;
-  }
-  .agent-row .count[data-zero] { display: none; }
 
   /* ─── Inbox list ────────────────────────────────────────────────── */
   .pane-inbox { background: var(--bg); }
@@ -294,22 +389,31 @@
       <span>AgenticMail</span>
     </div>
     <div class="search">
-      <input id="search-input" placeholder="Search this inbox — subject, sender, or text" />
+      <input id="search-input" placeholder="Search this inbox — subject, sender, body, or from:name" autocomplete="off" />
+      <span id="search-hint" class="search-hint"></span>
+      <button id="search-clear" class="search-clear" onclick="clearSearch()" title="Clear (Esc)">✕</button>
     </div>
-    <button class="btn btn-ghost" onclick="refresh()" title="Refresh">⟳</button>
+    <button class="btn btn-ghost" onclick="refresh()" title="Refresh (r)">⟳</button>
     <button class="btn btn-primary" onclick="openCompose()">Compose</button>
-    <button class="btn btn-ghost" onclick="signOut()" title="Sign out">⎋</button>
+    <button id="profile-btn" class="profile" onclick="toggleProfileMenu(event)">
+      <span id="profile-avatar"></span>
+      <span class="profile-name" id="profile-name">Loading…</span>
+      <span class="profile-caret">▾</span>
+    </button>
+    <div id="profile-menu" class="profile-menu" onclick="event.stopPropagation()">
+      <div class="profile-menu-section">Inbox</div>
+      <div id="profile-menu-list"></div>
+      <div class="profile-menu-divider"></div>
+      <div class="profile-menu-footer">
+        <a onclick="signOut()">Sign out</a>
+      </div>
+    </div>
   </header>
 
   <div class="main">
-    <aside class="pane pane-agents">
-      <div class="pane-header">Agents</div>
-      <div id="agent-list"></div>
-    </aside>
-
     <section class="pane pane-inbox">
       <div class="pane-header"><span id="inbox-title">Inbox</span></div>
-      <div id="inbox-list"><div class="empty">Pick an agent on the left.</div></div>
+      <div id="inbox-list"><div class="empty">Loading…</div></div>
     </section>
 
     <article class="pane pane-message">
@@ -421,39 +525,144 @@ async function apiPost(path, body, opts = {}) {
 async function bootstrap() {
   try {
     const data = await apiGet('/accounts');
-    state.agents = (data.agents ?? data ?? []).sort((a, b) => a.name.localeCompare(b.name));
-    renderAgents();
-    // Auto-select first agent on load.
-    if (state.agents.length > 0) selectAgent(state.agents[0]);
+    // Sort: bridge agent first (always pinned to top of the switcher),
+    // everyone else alphabetically.
+    const all = (data.agents ?? data ?? []);
+    all.sort((a, b) => {
+      const aBridge = isBridgeAgent(a) ? 0 : 1;
+      const bBridge = isBridgeAgent(b) ? 0 : 1;
+      if (aBridge !== bBridge) return aBridge - bBridge;
+      return a.name.localeCompare(b.name);
+    });
+    state.agents = all;
+    // Auto-select the bridge agent if present, otherwise the first agent.
+    // The bridge is the host's natural "main" inbox — it's the address
+    // every kickoff email gets CC'd to.
+    const initial = state.agents.find(isBridgeAgent) ?? state.agents[0];
+    if (initial) await selectAgent(initial);
+    renderProfile();
     populateComposeFrom();
     subscribeToAllAgents();
+    maybeRequestNotificationPermission();
   } catch (err) {
     toast(`Failed to load agents: ${err.message}`, true);
   }
 }
 
-/* ─── Agents sidebar ─────────────────────────────────────────────── */
-function renderAgents() {
-  const root = document.getElementById('agent-list');
-  if (state.agents.length === 0) {
-    root.innerHTML = '<div class="empty">No agents yet. Create one with <code class="mono">agenticmail shell</code>.</div>';
-    return;
+/* ─── Identity helpers ───────────────────────────────────────────── */
+//
+// The bridge agent (default name "claudecode") is the host's
+// identity inside AgenticMail — the address every Claude Code
+// session uses to send/receive on its own behalf. We surface it
+// differently in the UI: Claude's orange asterisk icon as the
+// avatar, a "Host" badge, and a verified checkmark badge so users
+// can tell at a glance which inbox is the orchestrator's.
+function isBridgeAgent(agent) {
+  if (!agent) return false;
+  const name = (agent.name ?? '').toLowerCase();
+  const role = (agent.role ?? '').toLowerCase();
+  return name === 'claudecode' || name === 'claude' || role === 'bridge';
+}
+
+// Deterministic color picker for non-bridge avatars — stable per
+// agent name so each teammate keeps the same color across sessions.
+const AVATAR_PALETTE = [
+  '#ec4899', // pink
+  '#8b5cf6', // violet
+  '#3b82f6', // blue
+  '#06b6d4', // cyan
+  '#10b981', // emerald
+  '#f59e0b', // amber
+  '#ef4444', // red
+  '#84cc16', // lime
+];
+function avatarColorFor(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return AVATAR_PALETTE[hash % AVATAR_PALETTE.length];
+}
+
+// Inline SVG approximating Claude's orange asterisk mark. We render
+// the bridge agent's avatar with this so the host inbox is visually
+// recognisable at a glance.
+const CLAUDE_MARK_SVG = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+  <path d="M12 1.5 L13.2 8.6 L19.5 6.6 L15 12 L19.5 17.4 L13.2 15.4 L12 22.5 L10.8 15.4 L4.5 17.4 L9 12 L4.5 6.6 L10.8 8.6 Z"/>
+</svg>`;
+
+function avatarHtml(agent, size = '') {
+  const cls = `avatar ${size}`.trim();
+  if (isBridgeAgent(agent)) {
+    return `<span class="${cls} avatar-host">${CLAUDE_MARK_SVG}<span class="avatar-check">✓</span></span>`;
   }
-  root.innerHTML = state.agents.map(a => `
-    <div class="agent-row ${state.selectedAgent?.id === a.id ? 'selected' : ''}" data-id="${a.id}">
-      <span class="dot"></span>
-      <span class="name">${escapeHtml(a.name)}</span>
-      <span class="count" data-id="${a.id}" data-zero>0</span>
-    </div>
-  `).join('');
-  root.querySelectorAll('.agent-row').forEach(el => {
+  const initial = (agent.name ?? '?').slice(0, 1).toUpperCase();
+  const color = avatarColorFor(agent.name ?? '');
+  return `<span class="${cls}" style="background:${color}">${escapeHtml(initial)}</span>`;
+}
+
+/* ─── Profile switcher (top-right Gmail-style dropdown) ──────────── */
+function renderProfile() {
+  const a = state.selectedAgent;
+  // Compute total unread across non-selected agents → red dot on
+  // the profile button as a "you have new mail elsewhere" cue.
+  const totalOtherUnread = Object.entries(state.unread ?? {})
+    .filter(([id]) => id !== a?.id)
+    .reduce((sum, [, n]) => sum + n, 0);
+
+  document.getElementById('profile-avatar').innerHTML = a
+    ? avatarHtml(a) + (totalOtherUnread > 0 ? '<span class="avatar-check" style="background:#dc2626">●</span>' : '')
+    : '';
+  document.getElementById('profile-name').textContent = a ? a.name : '—';
+
+  const list = document.getElementById('profile-menu-list');
+  list.innerHTML = state.agents.map(agent => {
+    const selected = state.selectedAgent?.id === agent.id;
+    const badge = isBridgeAgent(agent)
+      ? '<span class="role-badge role-badge-host">Host</span>'
+      : '<span class="role-badge role-badge-sub">Sub-agent</span>';
+    const check = selected ? '<span class="selected-check">✓</span>' : '';
+    const unread = state.unread?.[agent.id] ?? 0;
+    const unreadDot = unread > 0
+      ? `<span class="role-badge" style="background:var(--pink);color:white;">${unread} new</span>`
+      : '';
+    return `
+      <div class="profile-menu-item" data-id="${agent.id}">
+        ${avatarHtml(agent, 'avatar-lg')}
+        <div class="meta">
+          <div class="name">${escapeHtml(agent.name)} ${badge} ${unreadDot}</div>
+          <div class="email">${escapeHtml(agent.email ?? '')}</div>
+        </div>
+        ${check}
+      </div>
+    `;
+  }).join('');
+  list.querySelectorAll('.profile-menu-item').forEach(el => {
     el.addEventListener('click', () => {
       const id = el.dataset.id;
       const agent = state.agents.find(a => a.id === id);
-      if (agent) selectAgent(agent);
+      if (agent && agent.id !== state.selectedAgent?.id) {
+        selectAgent(agent);
+      }
+      closeProfileMenu();
     });
   });
 }
+
+function toggleProfileMenu(e) {
+  if (e) e.stopPropagation();
+  const menu = document.getElementById('profile-menu');
+  menu.classList.toggle('open');
+}
+function closeProfileMenu() {
+  document.getElementById('profile-menu').classList.remove('open');
+}
+// Close on outside click.
+document.addEventListener('click', e => {
+  const menu = document.getElementById('profile-menu');
+  const btn = document.getElementById('profile-btn');
+  if (!menu || !btn) return;
+  if (!menu.contains(e.target) && !btn.contains(e.target)) closeProfileMenu();
+});
+
 async function selectAgent(agent) {
   state.selectedAgent = agent;
   state.selectedUid = null;
@@ -462,10 +671,8 @@ async function selectAgent(agent) {
   document.querySelector('.pane-message #message-view').innerHTML = `
     <div class="msg-empty"><div class="big">🎀</div><div>Select an email to read it here.</div></div>
   `;
-  renderAgents();
+  renderProfile();
   await loadInbox(agent);
-  // Clear unread count badge on open.
-  setAgentUnread(agent.id, 0);
 }
 
 /* ─── Inbox list ─────────────────────────────────────────────────── */
@@ -479,18 +686,80 @@ async function loadInbox(agent) {
     document.getElementById('inbox-list').innerHTML = `<div class="empty">Failed to load: ${escapeHtml(err.message)}</div>`;
   }
 }
+// Parse a Gmail-style query into structured filters + free-text.
+// Supports `from:`, `subject:` operators (case-insensitive). Anything
+// outside an operator is free-text matched against subject + body
+// + sender (case-insensitive substring). Quotes group multi-word values.
+//
+//   "from:vesper"           → only mail FROM vesper
+//   "subject:audit"         → only mail with "audit" in the subject
+//   "audit from:vesper"     → both must match
+//   "build small game"      → free-text match anywhere
+function parseSearch(query) {
+  const filters = { from: '', subject: '', text: '' };
+  const remaining = [];
+  const tokenRe = /(\w+):("([^"]*)"|(\S+))|("([^"]*)"|(\S+))/g;
+  let m;
+  while ((m = tokenRe.exec(query)) !== null) {
+    const op = m[1]?.toLowerCase();
+    const opVal = (m[3] ?? m[4] ?? '').toLowerCase();
+    const free = (m[6] ?? m[7] ?? '').toLowerCase();
+    if (op === 'from') filters.from = opVal;
+    else if (op === 'subject') filters.subject = opVal;
+    else if (free) remaining.push(free);
+  }
+  filters.text = remaining.join(' ');
+  return filters;
+}
+
+function matchesSearch(msg, filters) {
+  const fromAddr = (msg.from?.[0]?.address ?? '').toLowerCase();
+  const fromName = (msg.from?.[0]?.name ?? '').toLowerCase();
+  const subject = (msg.subject ?? '').toLowerCase();
+  const preview = (msg.preview ?? '').toLowerCase();
+  if (filters.from && !fromAddr.includes(filters.from) && !fromName.includes(filters.from)) return false;
+  if (filters.subject && !subject.includes(filters.subject)) return false;
+  if (filters.text) {
+    const hay = `${fromAddr} ${fromName} ${subject} ${preview}`;
+    if (!hay.includes(filters.text)) return false;
+  }
+  return true;
+}
+
+// Wrap matches in <mark> for visual highlight. Escapes input first.
+function highlightTerm(text, term) {
+  const safe = escapeHtml(text ?? '');
+  if (!term) return safe;
+  // Build a case-insensitive regex but escape the term for safety.
+  const escaped = term.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+  return safe.replace(new RegExp(`(${escaped})`, 'ig'), '<mark class="search-hl">$1</mark>');
+}
+
 function renderInbox() {
   const root = document.getElementById('inbox-list');
-  const q = state.searchQuery.toLowerCase();
-  const filtered = q
-    ? state.inboxMessages.filter(m =>
-        (m.subject ?? '').toLowerCase().includes(q) ||
-        (m.from?.[0]?.address ?? '').toLowerCase().includes(q) ||
-        (m.from?.[0]?.name ?? '').toLowerCase().includes(q) ||
-        (m.preview ?? '').toLowerCase().includes(q))
+  const q = state.searchQuery.trim();
+  const filters = q ? parseSearch(q) : null;
+  const filtered = filters
+    ? state.inboxMessages.filter(m => matchesSearch(m, filters))
     : state.inboxMessages;
+
+  // Pick the term used for visual highlighting — the most "primary"
+  // user intent. `subject:` wins over `from:` wins over free text.
+  const hlTerm = filters?.subject || filters?.from || filters?.text || '';
+
+  // Hint shows match count when filtering.
+  const hintEl = document.getElementById('search-hint');
+  if (q) {
+    hintEl.textContent = `${filtered.length}/${state.inboxMessages.length}`;
+    hintEl.classList.add('show');
+  } else {
+    hintEl.classList.remove('show');
+  }
+
   if (filtered.length === 0) {
-    root.innerHTML = '<div class="empty">Inbox is empty.</div>';
+    root.innerHTML = q
+      ? `<div class="empty">No messages match "${escapeHtml(q)}".<br><br><a onclick="clearSearch()" style="cursor:pointer;color:var(--accent-strong)">Clear search</a></div>`
+      : '<div class="empty">Inbox is empty.</div>';
     return;
   }
   root.innerHTML = filtered.map(m => {
@@ -502,17 +771,28 @@ function renderInbox() {
     return `
       <div class="inbox-row ${unread ? 'unread' : ''} ${state.selectedUid === m.uid ? 'selected' : ''}" data-uid="${m.uid}">
         <div class="inbox-from">
-          <span class="name">${escapeHtml(fromName)}</span>
+          <span class="name">${highlightTerm(fromName, hlTerm)}</span>
           <span class="date">${escapeHtml(date)}</span>
         </div>
-        <div class="subject">${escapeHtml(subject)}</div>
-        <div class="preview">${escapeHtml((m.preview ?? '').slice(0, 120))}</div>
+        <div class="subject">${highlightTerm(subject, hlTerm)}</div>
+        <div class="preview">${highlightTerm((m.preview ?? '').slice(0, 120), hlTerm)}</div>
       </div>
     `;
   }).join('');
   root.querySelectorAll('.inbox-row').forEach(el => {
     el.addEventListener('click', () => openMessage(Number(el.dataset.uid)));
   });
+}
+
+function clearSearch() {
+  const input = document.getElementById('search-input');
+  input.value = '';
+  state.searchQuery = '';
+  input.classList.remove('has-query');
+  document.getElementById('search-clear').classList.remove('show');
+  document.getElementById('search-hint').classList.remove('show');
+  renderInbox();
+  input.focus();
 }
 
 /* ─── Message view ───────────────────────────────────────────────── */
@@ -786,12 +1066,39 @@ async function refresh() {
 }
 
 /* ─── Search ─────────────────────────────────────────────────────── */
+//
+// Gmail-style operators (from:, subject:) + free-text. Debounced so
+// typing fast doesn't re-render on every keystroke. Esc clears.
+let searchDebounce = null;
 document.getElementById('search-input').addEventListener('input', e => {
-  state.searchQuery = e.target.value;
-  renderInbox();
+  const v = e.target.value;
+  e.target.classList.toggle('has-query', v.length > 0);
+  document.getElementById('search-clear').classList.toggle('show', v.length > 0);
+  if (searchDebounce) clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    state.searchQuery = v;
+    renderInbox();
+  }, 80);
+});
+document.getElementById('search-input').addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    clearSearch();
+  }
 });
 
-/* ─── Real-time SSE (per-agent) ─────────────────────────────────── */
+/* ─── Real-time SSE — Gmail-style live updates ──────────────────── */
+//
+// Every agent gets its own SSE subscription. New-mail events are
+// fanned out to three places:
+//
+//   1. Inbox list — if the agent is the one currently open, prepend
+//      the new message without a full reload (instant "ping" feel).
+//   2. Profile dropdown — bump the per-agent unread badge so the user
+//      sees other inboxes activity at a glance.
+//   3. Browser notification — fires a system notification (with
+//      permission) so you get pinged even when the tab is in the
+//      background. Click the notification to jump to the message.
 function subscribeToAllAgents() {
   // Tear down any previous controllers.
   for (const c of state.sseControllers) { try { c.abort(); } catch {} }
@@ -820,26 +1127,91 @@ function subscribeToAllAgents() {
           }
         }
       }
-    }).catch(() => { /* connection dropped */ });
+    }).catch(() => { /* connection dropped — browser will retry on user action */ });
   }
 }
-function handleSseEvent(agent, event) {
+
+async function handleSseEvent(agent, event) {
   if (event.type !== 'new') return;
-  // Bump unread badge on the agent row.
-  const el = document.querySelector(`.count[data-id="${agent.id}"]`);
-  if (el) {
-    const n = parseInt(el.textContent || '0', 10) + 1;
-    el.textContent = String(n);
-    el.removeAttribute('data-zero');
+
+  // 1. Bump the unread counter for this agent. Stored on state so
+  //    the profile dropdown picks it up next render.
+  state.unread = state.unread ?? {};
+  state.unread[agent.id] = (state.unread[agent.id] ?? 0) + 1;
+  renderProfile();
+
+  // 2. If this agent's inbox is currently open → reload inbox in
+  //    place. We use loadInbox rather than a manual prepend because
+  //    the API normalises message ordering, pagination, and IMAP UID
+  //    resolution; replicating that client-side would drift.
+  const isOpen = state.selectedAgent?.id === agent.id;
+  if (isOpen) {
+    await loadInbox(agent);
+    flashInboxArrival();
+    state.unread[agent.id] = 0;   // user is looking — clear the badge
+    renderProfile();
   }
-  // If this agent's inbox is open, reload it.
-  if (state.selectedAgent?.id === agent.id) loadInbox(agent);
+
+  // 3. Browser notification (only if the user granted permission).
+  fireBrowserNotification(agent, event, isOpen);
+
+  // 4. Sound a soft toast for in-app awareness regardless of permission.
+  if (!isOpen) {
+    const fromAddr = event.from?.address ?? event.from ?? 'someone';
+    const subject = event.subject ?? '(no subject)';
+    toast(`${agent.name}: ${subject} — from ${fromAddr}`);
+  }
 }
-function setAgentUnread(agentId, n) {
-  const el = document.querySelector(`.count[data-id="${agentId}"]`);
+
+// Small green flash animation at the top of the inbox list to draw
+// the eye when a new message arrives in the currently-open inbox.
+function flashInboxArrival() {
+  const el = document.getElementById('inbox-list');
   if (!el) return;
-  el.textContent = String(n);
-  if (n === 0) el.setAttribute('data-zero', ''); else el.removeAttribute('data-zero');
+  el.style.transition = 'background-color .15s';
+  el.style.backgroundColor = 'rgba(34, 197, 94, 0.08)';
+  setTimeout(() => { el.style.backgroundColor = ''; }, 600);
+}
+
+// ─── Browser notifications ───────────────────────────────────────
+// Ask once on first load; remember the answer in localStorage so we
+// don't pester the user on every refresh. If the user denied, we
+// silently fall back to the in-app toast only.
+function maybeRequestNotificationPermission() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted' || Notification.permission === 'denied') return;
+  const asked = localStorage.getItem('agenticmail.notif.asked');
+  if (asked) return;
+  // Defer the ask by a couple of seconds so it doesn't pop on load.
+  setTimeout(() => {
+    Notification.requestPermission().finally(() => {
+      localStorage.setItem('agenticmail.notif.asked', '1');
+    });
+  }, 2000);
+}
+function fireBrowserNotification(agent, event, isOpen) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  // Don't ping if the user is already looking at this inbox AND the
+  // tab is visible — they can see the flash themselves.
+  if (isOpen && document.visibilityState === 'visible') return;
+  const fromAddr = event.from?.address ?? event.from ?? 'unknown sender';
+  const subject = event.subject ?? '(no subject)';
+  const body = `${agent.name} — from ${fromAddr}`;
+  try {
+    const n = new Notification(subject, {
+      body,
+      icon: '/favicon.ico',
+      tag: `agenticmail-${agent.id}-${event.uid}`,
+      silent: false,
+    });
+    n.onclick = () => {
+      window.focus();
+      // Switch to that agent's inbox and open the message.
+      if (state.selectedAgent?.id !== agent.id) selectAgent(agent);
+      if (event.uid) openMessage(event.uid);
+      n.close();
+    };
+  } catch { /* notification failed — user still gets the in-app toast */ }
 }
 
 /* ─── Toast ──────────────────────────────────────────────────────── */
@@ -859,16 +1231,46 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/* ─── Keyboard shortcuts ─────────────────────────────────────────── */
+/* ─── Keyboard shortcuts (Gmail-style) ───────────────────────────── */
+//   r  refresh current inbox
+//   c  compose new
+//   /  focus the search box
+//   ?  show help (not implemented yet — reserved)
 document.addEventListener('keydown', e => {
   if (document.getElementById('compose-bg').style.display !== 'none') return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  if (e.key === 'r') { refresh(); }
-  if (e.key === 'c') { openCompose(); }
+  if (e.key === 'r') refresh();
+  if (e.key === 'c') openCompose();
+  if (e.key === '/') {
+    e.preventDefault();
+    document.getElementById('search-input').focus();
+  }
 });
 
 /* ─── Boot ───────────────────────────────────────────────────────── */
 (() => {
+  // 1. Auto-sign-in via `?key=...` URL parameter. The CLI's
+  //    `agenticmail web` command passes the master key on the URL so
+  //    the user lands signed in without a paste step. We accept it
+  //    once, persist to localStorage, then strip the param out of the
+  //    address bar via history.replaceState so it doesn't end up in
+  //    browser history, Referer headers, or accidental screen shares.
+  //    Safe because the URL is loopback-only and the key belongs to
+  //    the same user who's looking at the screen.
+  try {
+    const params = new URL(location.href).searchParams;
+    const urlKey = params.get('key');
+    if (urlKey) {
+      localStorage.setItem('agenticmail.masterKey', urlKey);
+      // Clean the URL without reloading.
+      const clean = location.pathname + location.hash;
+      history.replaceState({}, '', clean);
+    }
+  } catch { /* malformed URL — fall through to localStorage / auth gate */ }
+
+  // 2. Use whatever's now in localStorage (just-stored URL key, or
+  //    previous session's stored key). If neither, the auth gate
+  //    stays up and asks for manual entry.
   const saved = localStorage.getItem('agenticmail.masterKey');
   if (saved) {
     state.masterKey = saved;

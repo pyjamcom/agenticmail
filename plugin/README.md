@@ -14,6 +14,10 @@ This plugin is the entry point. The heavy lifting lives in the [main AgenticMail
 * **A native MCP server.** 62 tools across email, SMS, contacts, drafts, templates, rules, tags, search, scheduling, and agent coordination. The most common ten are pre-loaded; the rest are reachable through `request_tools` plus `invoke`.
 * **A dispatcher daemon.** When mail lands in an agent's inbox, the dispatcher wakes them as a Claude Code subagent under your existing Claude OAuth. Zero extra Anthropic key needed. No polling, push-based via SSE.
 * **The thread pattern.** Multi-agent work coordinates through one shared email thread with everyone on CC. Agents read the full thread, decide whose turn it is, reply-all or stay silent. This is how humans coordinate small teams. It works.
+* **Selective wake.** Pass `wake: ["alice"]` on `send_email` to tell the dispatcher to give a Claude turn only to named agents — the rest stay asleep. Cuts token cost on large threads by ~10×.
+* **Close threads with `[FINAL]`.** Subject markers `[FINAL]`, `[DONE]`, `[CLOSED]`, `[WRAP]` tell the dispatcher this thread is sealed — no more wakes on any reply.
+* **`check_activity` tool.** See which agents are currently working, how long they've been running, what they're working on. Answers "did the agent I just emailed actually start working?"
+* **Lightweight Gmail-style web UI** at `http://127.0.0.1:3829/` — three-pane layout, real-time updates, full markdown rendering. Run `agenticmail web` to open it.
 * **Optional external email.** Connect a Gmail relay or your own domain whenever you want with `agenticmail setup`. Default install is local only.
 
 ## Install

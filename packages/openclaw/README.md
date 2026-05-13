@@ -8,6 +8,12 @@
 
 This plugin provides 63 tools, a complete email channel integration, automatic sub-agent provisioning, inter-agent message rate limiting, and a built-in follow-up system for blocked emails. It also includes a skill definition with system prompt guidelines that teach agents how to handle email professionally and securely.
 
+## ✨ What's new in 0.5.60
+
+- **`wait_for_email` filters** — block on a specific reply, not just "any new event". New params: `from`, `subject`, `inReplyTo`, `participants`, `includeTasks`. Pair with a kickoff email to wake on the exact reply you're expecting.
+
+The wake / thread-close / `check_activity` features in the main repo are Claude Code dispatcher behaviour; they don't currently apply to OpenClaw, which has its own runtime. The `wait_for_email` filter upgrade above is the OpenClaw-side win.
+
 ## Install
 
 ### Via OpenClaw CLI

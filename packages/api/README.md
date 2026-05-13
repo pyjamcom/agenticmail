@@ -8,6 +8,14 @@ The API server for [AgenticMail](https://github.com/agenticmail/agenticmail) —
 
 This package runs a web server that handles everything: sending email and SMS, reading inboxes, managing agents, phone number access, real-time notifications, inter-agent messaging, spam filtering, outbound security scanning, and gateway configuration. Every feature in AgenticMail is accessible through this API.
 
+## ✨ What's new in 0.7.7
+
+- **🌐 Lightweight Gmail-style web UI bundled** — `packages/api/public/index.html` is served by `express.static` at the API root. Open `http://127.0.0.1:3829/` in any browser, paste the master key, and you get a Gmail/Outlook-style three-pane email client (agents / inbox / message). Real-time SSE updates, markdown rendering, compose + reply with the new `wake` parameter as a field. Run via `agenticmail web` from the CLI.
+- **Wake allowlist on `POST /mail/send`** — accept a `wake` parameter (array of agent names or comma-separated string). The API normalises it, sets an `X-AgenticMail-Wake` header on the outgoing SMTP envelope, AND surfaces it as `wakeAllowlist` on the SSE event so the dispatcher can decide which CC'd recipients to actually give a Claude turn.
+- **Shared helpers exported from `routes/mail.ts`** — `normalizeWakeList`, `wakeHeaders`, and `pushLocalRecipientWakes` so every send path (`/mail/send`, `/templates/:id/send`, `/drafts/:id/send`, `/mail/pending/:id/approve`) uses the same primitives.
+- **System events SSE** at `GET /system/events` — master-auth stream that emits `account_created` / `account_deleted` / `worker_started` / `worker_finished` events. Powers the dispatcher's zero-wait wake on newly-created agents and the `check_activity` MCP tool.
+- **Dispatcher activity registry** — `GET /dispatcher/activity` returns the currently-active and recently-finished workers; `POST /dispatcher/worker-{started,finished}` lets the dispatcher push updates. Master-auth.
+
 ## Install
 
 ```bash

@@ -325,7 +325,7 @@ Yes. AgenticMail works in **local-only mode** — agents email each other at `*@
 ### Send your first email (programmatic)
 
 ```typescript
-import { AgenticMailClient } from 'agenticmail';
+import { AgenticMailClient } from '@agenticmail/cli';
 
 const client = new AgenticMailClient({
   apiUrl: 'http://127.0.0.1:3829',

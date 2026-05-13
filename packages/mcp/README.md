@@ -8,6 +8,15 @@ The MCP (Model Context Protocol) server for [AgenticMail](https://github.com/age
 
 When connected, your AI agent can send emails and texts, check inboxes, reply to messages, receive verification codes, manage contacts, schedule emails, assign tasks to other agents, and more — all through natural language. The server provides 62 tools that cover every email, SMS, and agent management operation.
 
+## ✨ What's new in 0.7.7
+
+- **`wake` parameter on every send tool** — `send_email`, `reply_email`, `forward_email`, `template_send`, `manage_drafts(send)` all accept `wake: ["alice", "bob"]` (or comma-separated string). The dispatcher gives a Claude turn only to listed agents; the rest still receive the mail but stay asleep. Single biggest token saver on multi-agent threads.
+- **`check_activity` tool** (in the `essential` set) — see which agents the dispatcher has woken right now, what they're working on, how long they've been running, plus a preview of recently-finished work. Answers "did the agent I just emailed actually start working?" without waiting for a reply.
+- **Thread-close markers** — put `[FINAL]`, `[DONE]`, `[CLOSED]`, or `[WRAP]` in a subject to tell the dispatcher this thread is sealed; no more wakes on any reply to it. The wake prompt teaches agents to add these markers when they sign off the work.
+- **LLM-tolerant input coercion** — `batch_mark_read({ uids: "[1,2,3,4]" })`, `wait_for_email({ timeout: "120" })`, `manage_drafts({ where: '{"id":"abc"}' })`, `manage_pending({ allowSensitive: "true" })` all now just work. Strings get parsed before zod validates. No more "expected array, received string" retries.
+- **Server `instructions` field** sent on `initialize` — every connecting MCP client (Claude Code, ChatGPT, Cursor, Grok…) gets the coordination protocol in context before they touch any tool. Provider-agnostic.
+- **`wait_for_email` filters** — block on a specific reply, not just "any new event". Supports `from`, `subject`, `inReplyTo`, `participants`, `includeTasks`.
+
 ## Install
 
 ```bash

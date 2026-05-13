@@ -7,7 +7,7 @@
  *   npx tsx examples/multi-agent.ts
  */
 
-const API_URL = 'http://127.0.0.1:3100';
+const API_URL = 'http://127.0.0.1:3829';
 const MASTER_KEY = 'mk_your_master_key';
 
 // Create two agents

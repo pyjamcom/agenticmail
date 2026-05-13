@@ -1,6 +1,6 @@
 {
   "name": "@agenticmail/cli",
-  "version": "0.8.19",
+  "version": "0.8.21",
   "description": "Email and SMS infrastructure for AI agents — the first platform to give agents real email addresses and phone numbers",
   "type": "module",
   "main": "dist/index.js",
@@ -22,7 +22,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean --external @agenticmail/claudecode",
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean --external @agenticmail/claudecode && npm run copy-public",
+    "copy-public": "mkdir -p dist/public && cp -R ../packages/api/public/. dist/public/",
     "test": "vitest run --passWithNoTests",
     "preuninstall": "node scripts/uninstall.mjs",
     "prepublishOnly": "npm run build"

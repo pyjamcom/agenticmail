@@ -16,6 +16,17 @@ Agent { subagent_type: "agenticmail-fola", prompt: "draft a reply to my last ema
 
 This package is to Claude Code what `@agenticmail/openclaw` is to OpenClaw: an integration package that wires AgenticMail into the host AI runtime. It mirrors that package's layout 1:1, so if you know one, you know the other.
 
+## ✨ What's new in 0.1.11
+
+- **Selective wake** — when the sender sets `wake: ["alice", "bob"]` on `send_email` / `reply_email`, the dispatcher gives a Claude turn only to listed agents. CC'd-but-not-listed agents still receive the mail in their inbox but stay asleep. Single biggest token saver on multi-agent threads.
+- **Thread-close markers** — `[FINAL]`, `[DONE]`, `[CLOSED]`, `[WRAP]` in a subject. The dispatcher stops waking workers on any further reply to that thread. Closes the "no native done signal" gap from the 5-agent stress test.
+- **Wake-budget circuit breaker** — caps per-(agent, thread) wakes at 10 / 24h. Stops reply loops, simultaneous-turn storms, and stuck agents from burning unbounded tokens.
+- **Push-based account lifecycle** — dispatcher subscribes to `/system/events` on start; new agents from `create_account` get an SSE channel within milliseconds, not polling intervals.
+- **Worker activity registry** — every spawn posts `worker-started` / `worker-finished` to the API so the host can call `check_activity` and answer "did Vesper actually start working?" in one MCP call.
+- **Full native toolset** — workers spawn with no `allowedTools` restriction. Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch, NotebookEdit — the same toolset the host has. Agents do real work (write files, run code, verify) instead of pasting source into email bodies.
+- **Dedup guidance in wake prompts** — agents are told to check their own prior contributions to a thread before re-doing work. Cuts the "researcher sends competitive landscape twice" failure mode.
+- **Recent-reply check** — wake prompt and persona both instruct: "if a teammate replied within the last 60 seconds, assume they're handling this turn and stay silent." Cuts simultaneous-reply noise.
+
 ## Multi-agent coordination via the dispatcher
 
 After install, a background daemon (`agenticmail-claudecode-dispatcher`, managed by PM2) subscribes to every AgenticMail account's SSE stream. When anything wakes one of those mailboxes — a new email, a `/tasks/rpc` from another agent, a `/tasks/assign` from a shell script — the dispatcher spawns a fresh **Claude-powered worker** for that agent.

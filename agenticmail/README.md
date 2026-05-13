@@ -23,6 +23,19 @@ It bundles a setup wizard, API server launcher, and a full interactive shell wit
 >
 > Zero prompts, ~2 minutes, fully autonomous. Then tell the user to restart Claude Code. Full agent-facing runbook — including verification, common failures, and "what if Node < 22" — is at [`AGENTS.md`](https://github.com/agenticmail/agenticmail/blob/main/AGENTS.md) in the repo (the [agents.md](https://agents.md) convention).
 
+## ✨ What's new in 0.8.19
+
+- **🌐 Gmail-style web UI** — open every agent's inbox in your browser with `agenticmail web`. Three-pane layout, full markdown rendering, real-time SSE updates, compose + reply with the new `wake` parameter as a first-class field.
+- **`wake: ["alice", "bob"]`** on `send_email` / `reply_email` / `forward_email` / `template_send` / `manage_drafts(send)` tells the dispatcher to give a Claude turn only to named agents — the biggest token saver on large threads.
+- **`[FINAL]` / `[DONE]` / `[CLOSED]` / `[WRAP]` in a subject** closes a thread — the dispatcher stops waking workers on any further reply to it.
+- **`check_activity` MCP tool** — see which agents the dispatcher has woken right now and how long they've been running.
+- **Comprehensive markdown rendering** in the shell's email viewer — bold, italic, headings, lists, task lists, tables, fenced code, links, images, HTML entities, depth-colored quote stripes.
+- **LLM-tolerant inputs** — `batch_mark_read({ uids: "[1,2,3]" })` and other common stringification mistakes now just work.
+- **Wake-budget circuit breaker** — caps per-(agent, thread) wakes at 10/24h to stop reply loops and storms.
+- **Inbox refresh keybind** — press `r` in the shell inbox navigator to refresh without leaving.
+
+Full release notes in [CHANGELOG.md](https://github.com/agenticmail/agenticmail/blob/main/CHANGELOG.md).
+
 ## Install
 
 ```bash
@@ -107,6 +120,7 @@ All commands are available via `agenticmail <command>` or `npx @agenticmail/cli@
 | `agenticmail setup` | **Run the setup wizard.** Walks you through system checks, account creation, service startup, email connection, phone number setup, and OpenClaw integration. Safe to re-run anytime. |
 | `agenticmail start` | **Start the server and open the interactive shell.** Ensures Docker is running, Stalwart is up, and the API server is reachable. Automatically installs the auto-start service. |
 | `agenticmail shell` | **Drop into the interactive shell against the already-running server.** Use this when the server is already up (started by `agenticmail start`, `agenticmail bootstrap`, or the auto-start service) and you want to monitor every agent's inbox, send mail on their behalf, watch the dispatcher event feed, or run any of the 44+ shell commands. Exits cleanly with `/exit` — the server keeps running. |
+| `agenticmail web` | 🌐 **Open the lightweight Gmail-style web UI in your browser.** Three-pane layout (agents / inbox / message), real-time SSE updates, full markdown rendering, compose + reply with the `wake` parameter surfaced as a field. Same master key as the API. Available at `http://127.0.0.1:3829/` whenever the API is running. |
 | `agenticmail stop` | **Stop the server.** Kills the background API server process. If auto-start is enabled, it will restart on next boot. |
 | `agenticmail status` | **Show what's running.** Displays Docker, Stalwart, API server, email connection, and auto-start service status. |
 
@@ -523,7 +537,7 @@ import {
   type ParsedEmail,
   type Agent,
   type GatewayConfig,
-} from 'agenticmail';
+} from '@agenticmail/cli';
 ```
 
 See the [@agenticmail/core README](https://github.com/agenticmail/agenticmail/tree/main/packages/core) for complete SDK documentation.
@@ -610,11 +624,13 @@ Errors return JSON: `400` (missing `name`/`columns`), `409` (table already exist
 
 ### `agenticmail: command not found`
 
-If you installed locally with `npm install agenticmail`, use `npx agenticmail` instead. For a global install:
+If you installed locally with `npm install @agenticmail/cli`, use `npx agenticmail` instead. For a global install:
 
 ```bash
 npm install -g @agenticmail/cli
 ```
+
+> Note: the unscoped `agenticmail` package on npm is a zero-dependency redirect stub (since v0.8.20). The real CLI is `@agenticmail/cli`. If you accidentally installed `agenticmail` without the scope, run `npm uninstall -g agenticmail` and then `npm install -g @agenticmail/cli@latest`.
 
 ---
 

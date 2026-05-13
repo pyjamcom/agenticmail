@@ -16,7 +16,7 @@ Code examples showing how to use AgenticMail — the first platform to give AI a
 
 ```bash
 # Install and set up AgenticMail
-npm install -g agenticmail
+npm install -g @agenticmail/cli@latest
 agenticmail setup
 ```
 

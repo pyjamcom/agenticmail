@@ -4,10 +4,10 @@
  * Run:
  *   npx tsx examples/check-inbox.ts
  */
-import { AgenticMailClient } from 'agenticmail';
+import { AgenticMailClient } from '@agenticmail/cli';
 
 const client = new AgenticMailClient({
-  apiUrl: 'http://127.0.0.1:3100',
+  apiUrl: 'http://127.0.0.1:3829',
   apiKey: 'ak_your_agent_api_key',
 });
 

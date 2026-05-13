@@ -2,16 +2,16 @@
  * Send an email using AgenticMail.
  *
  * Prerequisites:
- *   npm install -g agenticmail
+ *   npm install -g @agenticmail/cli@latest
  *   agenticmail setup
  *
  * Run:
  *   npx tsx examples/send-email.ts
  */
-import { AgenticMailClient } from 'agenticmail';
+import { AgenticMailClient } from '@agenticmail/cli';
 
 const client = new AgenticMailClient({
-  apiUrl: 'http://127.0.0.1:3100',
+  apiUrl: 'http://127.0.0.1:3829',
   apiKey: 'ak_your_agent_api_key', // from agenticmail setup
 });
 

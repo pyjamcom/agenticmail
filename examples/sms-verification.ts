@@ -12,7 +12,7 @@
  *   npx tsx examples/sms-verification.ts
  */
 
-const API_URL = 'http://127.0.0.1:3100';
+const API_URL = 'http://127.0.0.1:3829';
 const API_KEY = 'ak_your_agent_api_key';
 
 // Check for new SMS messages

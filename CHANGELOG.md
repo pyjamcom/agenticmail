@@ -5,6 +5,122 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.21] - 2026-05-13
+
+### Fixed — `agenticmail web` now actually works on global install
+
+In 0.8.19 the web UI was packaged inside `@agenticmail/api/public/`,
+but the CLI's tsup build inlines `@agenticmail/api` into the bundle
+without copying the static asset. A global install of `@agenticmail/cli`
+had `dist/cli.js` but no `dist/public/index.html`, so visiting
+`http://127.0.0.1:3829/` returned 404.
+
+Fix: added a `copy-public` build step that copies
+`packages/api/public/` into `agenticmail/dist/public/` after tsup
+runs. The static-dir resolution in `routes/mail.ts` walks both
+the source and dist layouts, so dev and published installs both work.
+
+### Added — auto-sign-in for `agenticmail web`
+
+Running `agenticmail web` now opens the browser pre-authenticated.
+The CLI reads the master key from `~/.agenticmail/config.json` and
+passes it as `?key=…` on the URL; the web UI consumes it once,
+saves to `localStorage`, and strips it from the address bar via
+`history.replaceState` so it doesn't end up in browser history,
+Referer headers, or screenshares. Safe because the URL is loopback-
+only and the key belongs to the same user invoking the command.
+
+Users who didn't set up via the CLI (or who land on the URL
+directly) still see the manual paste flow.
+
+### Added — Gmail-style profile switcher (top-right dropdown)
+
+Dropped the left agents sidebar. The current agent now lives in a
+profile button in the top-right with the Gmail-style account-switcher
+behaviour:
+
+- **Avatar** — colored initial circle for sub-agents, Claude's orange
+  asterisk mark + verified-host badge for the bridge agent.
+- **Role badges** — every agent in the dropdown is labelled `Host`
+  or `Sub-agent` so the user knows which inbox is which.
+- **Selected check** — pink checkmark next to the currently-active
+  agent.
+- **Per-agent unread badges** — `N new` pill next to any agent with
+  unread mail that arrived since you last looked at their inbox.
+- **Overall unread cue** — small red dot on the profile button when
+  there's new mail in agents you haven't selected.
+
+The bridge agent is auto-selected on first load because it's the
+host's natural "main" inbox (every kickoff email gets CC'd to it).
+
+### Added — real-time SSE notifications in the web UI
+
+Three layers fire on every new-mail event:
+
+1. **Inbox list updates in place** — if the new mail's agent is the
+   one currently open, the inbox reloads and the top row flashes
+   green briefly.
+2. **Profile dropdown unread badges** — non-open agents get a `N new`
+   pill, so the user sees other inboxes' activity at a glance.
+3. **Browser notifications** — system notification with the subject
+   as title and `agent — from sender` as body. Clicking the
+   notification focuses the tab, switches to the right agent, and
+   opens the message. Permission is asked once (2s after sign-in) and
+   the answer is remembered.
+
+When the user is already looking at the inbox that just received
+mail, the in-app flash is enough; the OS notification suppresses.
+
+### Added — Gmail-style search
+
+The top-bar search now supports operators:
+
+- `from:vesper` — only mail FROM vesper
+- `subject:audit` — only mail with "audit" in the subject
+- `audit from:vesper` — both must match
+- `"build small game"` — exact phrase
+- Anything outside an operator is free-text matched against subject + body + sender
+
+Plus:
+
+- **Clear button** (×) appears once you start typing; `Esc` also clears.
+- **Match counter** in the right edge of the input (`5/42`) shows
+  matches out of total inbox size.
+- **Highlighted matches** — terms get a pink-soft `<mark>` background
+  in the subject, from, and preview cells.
+- **Debounced input** (80 ms) so typing fast doesn't re-render on every keystroke.
+- **Keyboard shortcut** — press `/` anywhere to focus the search box (Gmail convention).
+
+### Fixed — every reference to the deprecated unscoped `agenticmail` package
+
+The unscoped `agenticmail@0.5.56` on npm depended on `better-sqlite3`,
+which stopped building on Node 22+. Anyone who accidentally typed
+`npm install -g agenticmail` (no scope) hit a confusing node-gyp
+failure. Published `agenticmail@0.8.20` as a 1.6 KB zero-dependency
+stub that just prints a redirect to `@agenticmail/cli`. All references
+in the codebase to the unscoped name updated:
+
+- `cmdUpdate` (cli.ts) and the shell `/update` command both query
+  and install `@agenticmail/cli` now, with a fallback that detects
+  a legacy unscoped install and upgrades correctly.
+- README example code (`import { ... } from 'agenticmail'`) updated
+  to `'@agenticmail/cli'` in both the main and CLI READMEs.
+- `examples/send-email.ts` and `examples/check-inbox.ts` updated to
+  use `@agenticmail/cli` and the current port `3829`.
+- All other examples updated from the stale 3100 port to 3829.
+- `scripts/test-facade.mjs` updated to import from the scoped name.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.7.7 | 0.7.8 |
+| `@agenticmail/cli` | 0.8.19 | 0.8.21 |
+| `agenticmail` (deprecated stub) | 0.5.56 | 0.8.20 |
+
+Plugin manifest mirrored to 0.8.21. `core`, `mcp`, `claudecode`,
+`openclaw` unchanged.
+
 ## [0.8.19] - 2026-05-13
 
 ### Added — lightweight Gmail-style web UI
