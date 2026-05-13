@@ -2860,6 +2860,70 @@ async function isTunnelConfigured(): Promise<boolean> {
   }
 }
 
+/**
+ * `agenticmail web` — print the URL for the lightweight Gmail-style
+ * web UI bundled in @agenticmail/api/public/ and offer to open it.
+ *
+ * The UI lives at `/` (and `/ui` as an alias) on the running API
+ * server. The user signs in with their master key — which is the
+ * same `mk_...` string in `~/.agenticmail/config.json` — and from
+ * there can see every agent's inbox in a familiar three-pane layout,
+ * read full messages with proper markdown rendering, compose new
+ * mail, and reply (with the wake-allowlist parameter surfaced as a
+ * compose field so they can keep token cost down on large threads).
+ */
+async function cmdWeb() {
+  log('');
+  log(`  ${c.pinkBg(' 🎀 AgenticMail web UI ')}`);
+  log('');
+
+  const configPath = join(homedir(), '.agenticmail', 'config.json');
+  if (!existsSync(configPath)) {
+    log(`  ${c.red('✗')} AgenticMail isn't set up yet. Run ${c.green('agenticmail setup')} first.`);
+    log('');
+    return;
+  }
+  const { apiUrl: url } = readApiUrlFromConfig();
+
+  // Quick liveness check so we can give the user a clear yes/no on
+  // whether the server is actually accepting requests.
+  let alive = false;
+  try {
+    const resp = await fetch(`${url}/api/agenticmail/health`, { signal: AbortSignal.timeout(2_000) });
+    alive = resp.ok;
+  } catch { /* server is down */ }
+
+  if (!alive) {
+    log(`  ${c.red('✗')} API server not reachable at ${c.cyan(url)}.`);
+    log(`    Start it with ${c.green('agenticmail start')} (in another terminal) or ${c.green('agenticmail service install')}.`);
+    log('');
+    return;
+  }
+
+  log(`  ${c.green('✓')} API server is running at ${c.cyan(url)}`);
+  log('');
+  log(`  ${c.bold('Open the web UI in your browser:')}`);
+  log('');
+  log(`    ${c.green(url)}`);
+  log('');
+  log(`  ${c.dim('When prompted, paste your master key:')}`);
+  log(`    ${c.dim('cat ~/.agenticmail/config.json | grep masterKey')}`);
+  log('');
+
+  // Try to open the browser. macOS = open, Linux = xdg-open, Windows = start.
+  // Best-effort — print the URL regardless so the user can copy/paste.
+  const platform = process.platform;
+  const opener = platform === 'darwin' ? 'open'
+              : platform === 'win32'  ? 'start'
+              : 'xdg-open';
+  try {
+    const { spawn } = await import('node:child_process');
+    spawn(opener, [url], { stdio: 'ignore', detached: true }).unref();
+    log(`  ${c.dim(`Opening ${url} in your default browser…`)}`);
+    log('');
+  } catch { /* user can click the URL above */ }
+}
+
 async function cmdStatus() {
   log('');
   log(`  ${c.pinkBg(' 🎀 AgenticMail Status ')}`);
@@ -3347,6 +3411,10 @@ switch (command) {
   case 'update':
     cmdUpdate().catch(err => { console.error(err); process.exit(1); });
     break;
+  case 'web':
+  case 'ui':
+    cmdWeb().then(() => { process.exit(0); }).catch(err => { console.error(err); process.exit(1); });
+    break;
   case '--version':
   case '-v':
   case 'version': {
@@ -3379,6 +3447,8 @@ switch (command) {
     log(`    ${c.green('agenticmail start')}     Start the server`);
     log(`    ${c.green('agenticmail stop')}      Stop the server`);
     log(`    ${c.green('agenticmail status')}    See what's running`);
+    log(`    ${c.green('agenticmail shell')}     Drop into the interactive REPL (44 commands)`);
+    log(`    ${c.green('agenticmail web')}       Open the Gmail-style web UI in your browser`);
     log(`    ${c.green('agenticmail openclaw')}  Set up AgenticMail for OpenClaw`);
     log(`    ${c.green('agenticmail claudecode')} Set up AgenticMail for Claude Code`);
     log(`    ${c.green('agenticmail service')}   Manage auto-start (install/uninstall/status)`);

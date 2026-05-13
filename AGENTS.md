@@ -92,12 +92,14 @@ primitive for AgenticMail too:
 3. send_email({
      to:   "vesper@localhost",                          // primary owner of step 1
      cc:   "orion@localhost, claudecode@localhost",     // teammates + yourself
+     wake: ["vesper"],                                  // ★ only Vesper gets a Claude turn
      subject: "Build a small terminal game",
      text: [
        "Team —",
        "",
        "Vesper, please design a minimal terminal game (under ~80 LOC).",
-       "Reply-all with the design doc when ready.",
+       "Reply-all with the design doc when ready. When you hand off,",
+       "name Orion in your reply and set wake: [\"orion\"] so only he wakes.",
        "",
        "Orion, once Vesper signs off, implement it and reply-all with the code.",
        "",
@@ -106,18 +108,43 @@ primitive for AgenticMail too:
    })
 
 4. list_inbox / read_email on your bridge inbox to watch progress.
+   Or use check_activity() to see which agents the dispatcher has woken
+   right now — answers "did Vesper actually start working?" in one call.
    Step in by reply-all'ing into the same thread whenever needed.
+
+5. When the work is done, the last contributor (or you) sends a wrap-up
+   reply with [FINAL] in the subject. The dispatcher stops waking anyone
+   on further replies to that thread.
 ```
 
 What happens under the hood:
 - The mail server pushes an SSE wake-up to **every local recipient**
   the moment the email lands.
-- Each agent wakes, reads the **full thread**, sees who else is CC'd,
-  and decides if it's their turn. Vesper goes first because she was
-  named first in the body. Orion stays silent until Vesper hands off.
-  You (the host) see every reply in your bridge inbox.
-- Thread continues until someone says "done" or no agent has anything
-  to add. No RPC, no scheduler, no out-of-band protocol.
+- The **`wake` allowlist** gates which of them actually get a Claude
+  turn from the dispatcher. With `wake: ["vesper"]`, only Vesper
+  wakes; Orion still receives the mail in his inbox but stays asleep.
+  Without `wake`, every CC'd recipient wakes (the v0.8.x default).
+- Each woken agent reads the **full thread**, sees who else is CC'd,
+  and decides if it's their turn. The dispatcher also tells them to
+  check their own prior contributions before redoing work.
+- Thread continues until someone closes it with `[FINAL]` (etc.) in
+  the subject, or no agent has anything to add. No RPC, no scheduler,
+  no out-of-band protocol.
+
+### `wake` is the single biggest token saver on large threads
+
+Without it, every CC'd recipient gets a Claude turn on every reply.
+15 agents on a thread × every reply = 15 Claude turns per round.
+With `wake`, only the agents you name actually think; everyone else
+still receives the mail but stays asleep until you explicitly name
+them in a later wake list. Pass `wake: []` to deliver silently.
+Omit `wake` entirely to keep the default "wake everyone CC'd" behaviour.
+
+### Close threads when work is done
+
+A wrap-up reply with `[FINAL]`, `[DONE]`, `[CLOSED]`, or `[WRAP]` in
+the subject tells the dispatcher this thread is sealed — no more
+wakes on any reply to it. Add it once, the cascade stops.
 
 ### When to use `call_agent` instead
 
@@ -226,31 +253,46 @@ default — or whatever default agent the bootstrap created).
 
 ## 6. If the user wants to see what their agents have been doing
 
-Point them at the interactive shell:
+Two surfaces, depending on whether they want **browser** or **terminal**:
+
+### Browser — Gmail-style web UI
+
+```bash
+agenticmail web
+```
+
+Opens a three-pane Gmail-style UI at `http://127.0.0.1:3829/` —
+agents on the left, inbox in the middle, full message with markdown
+rendering on the right. Real-time SSE updates. Compose / reply with
+the `wake` allowlist surfaced as a field. Master-key auth, stored
+in the browser's localStorage. Best surface for non-technical users
+and anyone who prefers a visual inbox.
+
+### Terminal — interactive REPL
 
 ```bash
 agenticmail shell
 ```
 
-That's the right surface for **human, visual** oversight. From the shell
-the user can list every agent, read any inbox, send and reply on their
-behalf, inspect pending outbound mail (the outbound-guard approval
-queue), watch the dispatcher event feed live, prune stale agents, and
-run any of the 44+ shell commands.
+Same data, terminal interface. 44+ slash commands. Best for power
+users, scripting hand-offs, and AI assistants running on the user's
+behalf via the Bash tool.
 
-When to point the user here vs. doing it yourself via MCP:
+### When to point the user where
 
 | User said… | Right answer |
 |---|---|
-| "show me what my agents have been doing" | `agenticmail shell` |
-| "let me see Fola's inbox" | `agenticmail shell` (or run it for them via Bash) |
-| "check on the team" | `agenticmail shell` |
-| "audit the last hour" | `agenticmail shell` |
-| "have Fola reply to my last email from accounting" | MCP — do it via `mcp__agenticmail__call_agent` or `Agent { subagent_type: "agenticmail-fola" }` |
-| "coordinate Vesper and Orion on this build" | MCP — `send_email` with both on CC, then `wait_for_email` |
+| "show me what my agents have been doing" | `agenticmail web` (or shell — both work) |
+| "I want to read my emails" | `agenticmail web` |
+| "let me see Fola's inbox" | `agenticmail web` |
+| "check on the team" | `agenticmail web` |
+| "audit the last hour" | `agenticmail web` or `agenticmail shell` |
+| "I want a Gmail-like view" | `agenticmail web` |
+| "have Fola reply to my last email from accounting" | MCP — `call_agent` or `Agent { subagent_type: "agenticmail-fola" }` |
+| "coordinate Vesper and Orion on this build" | MCP — `send_email` with both on CC + `wake: ["vesper"]`, then `wait_for_email` |
 
-Rule of thumb: **shell for visual monitoring by a human, MCP for
-programmatic work driven by you.**
+Rule of thumb: **UI (web or shell) for monitoring by a human, MCP
+for programmatic work driven by you.**
 
 ---
 

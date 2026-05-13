@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.19] - 2026-05-13
+
+### Added — lightweight Gmail-style web UI
+
+A single-file HTML/CSS/JS application bundled in `@agenticmail/api`
+that serves a Gmail/Outlook-style three-pane email client at the API
+root. No framework, no build step — just a 35 KB `index.html` with
+embedded styles and vanilla JS.
+
+**Run it:**
+
+```bash
+agenticmail web
+```
+
+That checks the API is running, prints the URL, and opens your default
+browser. You can also just visit `http://127.0.0.1:3829/` whenever the
+API is up.
+
+**Features:**
+
+- **Three-pane layout** — agents sidebar / per-agent inbox / full
+  message view. Familiar Gmail / Outlook mental model.
+- **Master-key auth** — prompts on first load, stored in
+  `localStorage`. Every API call carries the bearer; nothing leaves
+  the local machine.
+- **Per-agent identity** — each inbox is fetched with that agent's
+  own API key (pulled once from `/accounts`) so the view is exactly
+  what each agent would see.
+- **Markdown rendering** — bold, italic, inline code, fenced code,
+  headings, lists, task lists, tables, blockquotes, horizontal
+  rules, links. Matches the terminal renderer's coverage.
+- **Real-time updates via SSE** — subscribes to every agent's event
+  stream; new mail bumps the unread badge and reloads the inbox in
+  place. No polling.
+- **Compose + reply** — full modal with From / To / Cc / Subject /
+  Body. The `wake` allowlist is surfaced as a first-class field so
+  users can scope dispatcher Claude turns to specific agents (or
+  pass empty for "deliver silently").
+- **Search across the open agent's inbox** — instant filter on
+  subject / sender / preview.
+- **Keyboard shortcuts** — `r` refresh, `c` compose.
+- **Dark mode** — automatic via `prefers-color-scheme`.
+- **Brand-consistent pink** — same `#ec4899` / xterm-205 hot pink
+  the CLI and shell use.
+
+**Architecture:**
+
+- Lives at `packages/api/public/index.html`, served by `express.static`
+  mounted at `/` before any auth middleware. The HTML loads without
+  auth; the embedded JS then prompts the user for the master key and
+  stores it locally. Every API call still flows through the same
+  auth middleware as the rest of the server — the static surface
+  adds no new auth bypass.
+- `agenticmail web` command does a health check on the API, prints
+  the URL, and uses the platform `open` / `xdg-open` / `start`
+  command to launch the browser.
+- Resolves the static dir from both dev (`packages/api/public/`) and
+  published (`@agenticmail/api/public/`) layouts.
+
+### Updated — READMEs and AGENTS.md
+
+- Main `README.md` gains a "What's new in 0.8.18+" section that
+  surfaces every recent feature (web UI, selective wake, thread-close
+  markers, `check_activity`, markdown rendering, LLM-tolerant inputs,
+  wake-budget circuit breaker, dedup guidance).
+- `agenticmail web` row added to the Core Commands tables.
+- `AGENTS.md` section 6 rewritten to point users at either the web
+  UI or shell depending on preference. Decision table expanded.
+- `AGENTS.md` coordination example now uses `wake: ["vesper"]` and
+  `[FINAL]` to demonstrate the selective-wake pattern.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.7.6 | 0.7.7 |
+| `@agenticmail/cli` | 0.8.18 | 0.8.19 |
+
+Plugin manifest mirrored to 0.8.19. Other packages unchanged.
+
 ## [0.8.18] - 2026-05-13
 
 ### Fixed — wake-list audit: every send path now wired

@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>🎀 AgenticMail</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🎀%3C/text%3E%3C/svg%3E" />
+<style>
+  /* ─── Brand & palette ───────────────────────────────────────────── */
+  :root {
+    --pink: #ec4899;
+    --pink-soft: #fdf2f8;
+    --pink-rule: #fbcfe8;
+    --ink: #111827;
+    --ink-soft: #374151;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --bg: #ffffff;
+    --bg-soft: #f9fafb;
+    --row-hover: #f3f4f6;
+    --row-selected: var(--pink-soft);
+    --accent-strong: #be185d;
+    --code-bg: #f3f4f6;
+    --code-fg: #b91c1c;
+    --unread-dot: var(--pink);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --pink-soft: #2a1726;
+      --pink-rule: #5b1d44;
+      --ink: #f3f4f6;
+      --ink-soft: #d1d5db;
+      --muted: #9ca3af;
+      --line: #2d2d33;
+      --bg: #0e0e10;
+      --bg-soft: #18181b;
+      --row-hover: #1f1f23;
+      --row-selected: #2a1726;
+      --accent-strong: #f9a8d4;
+      --code-bg: #1f1f23;
+      --code-fg: #fb7185;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink); background: var(--bg);
+    overflow: hidden;
+  }
+  button { font: inherit; cursor: pointer; }
+  a { color: var(--accent-strong); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  /* ─── App shell ─────────────────────────────────────────────────── */
+  .app { display: grid; grid-template-rows: 56px 1fr; height: 100vh; }
+  .topbar {
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--bg);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; }
+  .brand-bow { font-size: 22px; }
+  .brand-name { color: var(--pink); }
+  .search {
+    flex: 1; max-width: 720px;
+    position: relative;
+  }
+  .search input {
+    width: 100%; height: 38px; padding: 0 14px 0 38px;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg-soft); color: var(--ink); outline: none;
+    transition: border-color .15s;
+  }
+  .search input:focus { border-color: var(--pink); }
+  .search::before {
+    content: "🔍"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    font-size: 14px; opacity: .7;
+  }
+  .btn {
+    height: 36px; padding: 0 14px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg-soft); color: var(--ink);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { background: var(--row-hover); }
+  .btn-primary {
+    background: var(--pink); color: white; border-color: var(--pink);
+  }
+  .btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+  .btn-ghost { background: transparent; border-color: transparent; padding: 0 10px; }
+  .btn-ghost:hover { background: var(--row-hover); }
+
+  /* ─── Three-pane layout ─────────────────────────────────────────── */
+  .main { display: grid; grid-template-columns: 240px 380px 1fr; overflow: hidden; }
+  @media (max-width: 1100px) { .main { grid-template-columns: 200px 340px 1fr; } }
+  .pane { overflow-y: auto; border-right: 1px solid var(--line); }
+  .pane:last-child { border-right: none; }
+
+  /* ─── Agents sidebar ────────────────────────────────────────────── */
+  .pane-agents { background: var(--bg-soft); }
+  .pane-header {
+    padding: 12px 14px 6px; font-size: 11px; font-weight: 600;
+    color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
+  }
+  .agent-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; cursor: pointer; border-left: 3px solid transparent;
+    color: var(--ink-soft);
+  }
+  .agent-row:hover { background: var(--row-hover); }
+  .agent-row.selected { background: var(--row-selected); border-left-color: var(--pink); color: var(--ink); font-weight: 500; }
+  .agent-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .agent-row.selected .dot { background: var(--pink); }
+  .agent-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-row .count {
+    font-size: 11px; padding: 1px 6px; border-radius: 10px;
+    background: var(--pink); color: white; min-width: 18px; text-align: center;
+  }
+  .agent-row .count[data-zero] { display: none; }
+
+  /* ─── Inbox list ────────────────────────────────────────────────── */
+  .pane-inbox { background: var(--bg); }
+  .inbox-row {
+    padding: 12px 16px; cursor: pointer; border-bottom: 1px solid var(--line);
+    display: grid; grid-template-rows: auto auto auto; gap: 2px;
+  }
+  .inbox-row:hover { background: var(--row-hover); }
+  .inbox-row.selected { background: var(--row-selected); }
+  .inbox-row.unread .subject { font-weight: 600; color: var(--ink); }
+  .inbox-row.unread::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--unread-dot); position: absolute; margin-left: -12px; margin-top: 8px;
+  }
+  .inbox-row { position: relative; }
+  .inbox-from { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .inbox-from .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+  .inbox-from .date { font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .subject {
+    font-size: 14px; color: var(--ink-soft);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .preview {
+    font-size: 12px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .empty { padding: 24px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+
+  /* ─── Message detail ────────────────────────────────────────────── */
+  .pane-message { background: var(--bg); padding: 0; }
+  .msg-header {
+    padding: 20px 28px 12px;
+    border-bottom: 1px solid var(--pink-rule);
+    background: linear-gradient(to bottom, var(--pink-soft) 0%, transparent 100%);
+  }
+  .msg-subject { font-size: 20px; font-weight: 600; margin: 0 0 12px; color: var(--ink); }
+  .msg-meta { font-size: 13px; color: var(--ink-soft); display: grid; grid-template-columns: 60px 1fr; gap: 4px 12px; }
+  .msg-meta .label { color: var(--muted); }
+  .msg-meta .date { color: var(--accent-strong); font-variant-numeric: tabular-nums; }
+  .msg-actions { display: flex; gap: 8px; margin-top: 14px; }
+  .msg-body {
+    padding: 20px 28px;
+    font-size: 14px; line-height: 1.65; color: var(--ink);
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .msg-body h1, .msg-body h2, .msg-body h3 {
+    color: var(--pink); margin: 1.2em 0 .4em;
+  }
+  .msg-body h1 { font-size: 1.4em; }
+  .msg-body h2 { font-size: 1.2em; }
+  .msg-body h3 { font-size: 1.05em; }
+  .msg-body code {
+    background: var(--code-bg); color: var(--code-fg);
+    padding: 1px 5px; border-radius: 4px; font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .msg-body pre {
+    background: var(--code-bg); padding: 12px 14px; border-radius: 8px;
+    overflow-x: auto; font-size: 13px;
+  }
+  .msg-body pre code { background: transparent; padding: 0; color: var(--ink); }
+  .msg-body strong { color: var(--ink); }
+  .msg-body em { color: var(--ink-soft); }
+  .msg-body blockquote {
+    border-left: 3px solid var(--pink-rule);
+    margin: .8em 0; padding: .2em 0 .2em 12px;
+    color: var(--muted); white-space: pre-wrap;
+  }
+  .msg-body blockquote blockquote { border-left-color: #c084fc; }
+  .msg-body blockquote blockquote blockquote { border-left-color: #f59e0b; }
+  .msg-body table { border-collapse: collapse; margin: .5em 0; }
+  .msg-body th, .msg-body td { border: 1px solid var(--line); padding: 6px 10px; }
+  .msg-body th { background: var(--bg-soft); font-weight: 600; }
+  .msg-body ul, .msg-body ol { padding-left: 24px; }
+  .msg-body hr { border: none; border-top: 1px solid var(--line); margin: 1.2em 0; }
+  .msg-body a { color: var(--accent-strong); }
+  .msg-body input[type=checkbox] { margin-right: 6px; }
+  .msg-attachments {
+    padding: 12px 28px; border-top: 1px solid var(--line);
+    display: flex; flex-wrap: wrap; gap: 8px;
+  }
+  .msg-attachment {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+    font-size: 12px; color: var(--ink-soft);
+  }
+  .msg-empty { padding: 80px 28px; text-align: center; color: var(--muted); }
+  .msg-empty .big { font-size: 48px; margin-bottom: 12px; opacity: .4; }
+
+  /* ─── Auth gate ─────────────────────────────────────────────────── */
+  .auth {
+    position: fixed; inset: 0; background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 10;
+  }
+  .auth-card {
+    width: 380px; padding: 28px;
+    border: 1px solid var(--line); border-radius: 14px;
+    background: var(--bg-soft);
+  }
+  .auth-card h1 { margin: 0 0 6px; font-size: 22px; color: var(--pink); }
+  .auth-card p { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+  .auth-card input {
+    width: 100%; height: 40px; padding: 0 12px; margin-bottom: 12px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); outline: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .auth-card input:focus { border-color: var(--pink); }
+  .auth-card .btn-primary { width: 100%; height: 40px; justify-content: center; }
+  .auth-err { color: #dc2626; font-size: 12px; margin-bottom: 12px; }
+
+  /* ─── Compose modal ─────────────────────────────────────────────── */
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 20;
+  }
+  .modal {
+    width: 640px; max-height: 80vh; overflow: hidden;
+    background: var(--bg); border-radius: 14px;
+    border: 1px solid var(--line);
+    display: grid; grid-template-rows: auto 1fr auto;
+  }
+  .modal-head {
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+    font-weight: 600; color: var(--pink);
+  }
+  .modal-body { padding: 14px 18px; overflow-y: auto; }
+  .modal-foot { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; }
+  .field { display: grid; grid-template-columns: 80px 1fr; gap: 8px; margin-bottom: 10px; align-items: center; }
+  .field label { color: var(--muted); font-size: 12px; }
+  .field input, .field textarea {
+    width: 100%; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--ink); outline: none;
+    font: inherit;
+  }
+  .field textarea { resize: vertical; min-height: 200px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .field input:focus, .field textarea:focus { border-color: var(--pink); }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  /* ─── Toast / status ────────────────────────────────────────────── */
+  .toast {
+    position: fixed; bottom: 20px; right: 20px; z-index: 30;
+    padding: 10px 16px; border-radius: 8px;
+    background: var(--ink); color: white; font-size: 13px;
+    opacity: 0; transform: translateY(8px); transition: all .2s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.error { background: #dc2626; }
+</style>
+</head>
+<body>
+
+<!-- ─── Auth gate (shown until master key is entered) ────────────── -->
+<div id="auth" class="auth">
+  <div class="auth-card">
+    <h1>🎀 AgenticMail</h1>
+    <p>Enter your master key to sign in. The key is stored locally in your browser; we never send it anywhere except to <span class="mono" id="auth-api-url"></span>.</p>
+    <div id="auth-err" class="auth-err" style="display:none"></div>
+    <input id="auth-key" type="password" placeholder="mk_…" autocomplete="off" autofocus />
+    <button class="btn btn-primary" onclick="signIn()">Sign in</button>
+    <p class="hint" style="margin-top:14px">Don't have the master key? Run <code class="mono">cat ~/.agenticmail/config.json</code> in your terminal.</p>
+  </div>
+</div>
+
+<!-- ─── App shell ─────────────────────────────────────────────────── -->
+<div class="app" id="app" style="display:none">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-bow">🎀</span>
+      <span>AgenticMail</span>
+    </div>
+    <div class="search">
+      <input id="search-input" placeholder="Search this inbox — subject, sender, or text" />
+    </div>
+    <button class="btn btn-ghost" onclick="refresh()" title="Refresh">⟳</button>
+    <button class="btn btn-primary" onclick="openCompose()">Compose</button>
+    <button class="btn btn-ghost" onclick="signOut()" title="Sign out">⎋</button>
+  </header>
+
+  <div class="main">
+    <aside class="pane pane-agents">
+      <div class="pane-header">Agents</div>
+      <div id="agent-list"></div>
+    </aside>
+
+    <section class="pane pane-inbox">
+      <div class="pane-header"><span id="inbox-title">Inbox</span></div>
+      <div id="inbox-list"><div class="empty">Pick an agent on the left.</div></div>
+    </section>
+
+    <article class="pane pane-message">
+      <div id="message-view">
+        <div class="msg-empty">
+          <div class="big">🎀</div>
+          <div>Select an email to read it here.</div>
+        </div>
+      </div>
+    </article>
+  </div>
+</div>
+
+<!-- ─── Compose modal ────────────────────────────────────────────── -->
+<div id="compose-bg" class="modal-bg" style="display:none" onclick="if(event.target===this) closeCompose()">
+  <div class="modal">
+    <div class="modal-head">
+      <span id="compose-title">New message</span>
+      <button class="btn btn-ghost" onclick="closeCompose()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field"><label>From</label><select id="compose-from"></select></div>
+      <div class="field"><label>To</label><input id="compose-to" placeholder="alice@localhost, bob@localhost" /></div>
+      <div class="field"><label>Cc</label><input id="compose-cc" placeholder="(optional, comma-separated)" /></div>
+      <div class="field"><label>Wake</label><input id="compose-wake" placeholder="(optional) names to actually wake — e.g. alice, bob" /></div>
+      <div class="field"><label>Subject</label><input id="compose-subject" /></div>
+      <div class="field"><label>Body</label><textarea id="compose-body" placeholder="Markdown supported: **bold**, *italic*, `code`, ```fenced```, ## headings, lists, tables…"></textarea></div>
+      <div class="hint">Tip: pass <code class="mono">wake</code> to limit which CC'd agents get a Claude turn from the dispatcher. Leave blank to wake everyone CC'd (default). Add <code class="mono">[FINAL]</code> to the subject to close the thread.</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeCompose()">Cancel</button>
+      <button class="btn btn-primary" onclick="sendCompose()">Send</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+/* ─── State ──────────────────────────────────────────────────────── */
+const state = {
+  masterKey: null,
+  agents: [],
+  selectedAgent: null,
+  inboxMessages: [],
+  selectedUid: null,
+  currentMessage: null,
+  composeReplyContext: null,   // { uid, agent } when replying
+  searchQuery: '',
+  sseControllers: [],
+};
+
+const API_URL = window.location.origin;   // same origin as the API server
+document.getElementById('auth-api-url').textContent = API_URL;
+
+/* ─── Auth ───────────────────────────────────────────────────────── */
+async function signIn() {
+  const key = document.getElementById('auth-key').value.trim();
+  if (!key) return showAuthErr('Master key is required.');
+  // Verify by hitting /accounts (master-key gated).
+  try {
+    const resp = await fetch(`${API_URL}/api/agenticmail/accounts`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    localStorage.setItem('agenticmail.masterKey', key);
+    state.masterKey = key;
+    document.getElementById('auth').style.display = 'none';
+    document.getElementById('app').style.display = 'grid';
+    await bootstrap();
+  } catch (err) {
+    showAuthErr(`Sign-in failed: ${err.message}. Check the key and that the API is running on ${API_URL}.`);
+  }
+}
+function showAuthErr(msg) {
+  const e = document.getElementById('auth-err');
+  e.textContent = msg; e.style.display = 'block';
+}
+function signOut() {
+  localStorage.removeItem('agenticmail.masterKey');
+  location.reload();
+}
+document.getElementById('auth-key').addEventListener('keydown', e => {
+  if (e.key === 'Enter') signIn();
+});
+
+/* ─── API helpers ────────────────────────────────────────────────── */
+async function apiGet(path, opts = {}) {
+  const r = await fetch(`${API_URL}/api/agenticmail${path}`, {
+    headers: { Authorization: `Bearer ${opts.agentKey ?? state.masterKey}` },
+  });
+  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  return await r.json();
+}
+async function apiPost(path, body, opts = {}) {
+  const r = await fetch(`${API_URL}/api/agenticmail${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${opts.agentKey ?? state.masterKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  return await r.json();
+}
+
+/* ─── Bootstrap ──────────────────────────────────────────────────── */
+async function bootstrap() {
+  try {
+    const data = await apiGet('/accounts');
+    state.agents = (data.agents ?? data ?? []).sort((a, b) => a.name.localeCompare(b.name));
+    renderAgents();
+    // Auto-select first agent on load.
+    if (state.agents.length > 0) selectAgent(state.agents[0]);
+    populateComposeFrom();
+    subscribeToAllAgents();
+  } catch (err) {
+    toast(`Failed to load agents: ${err.message}`, true);
+  }
+}
+
+/* ─── Agents sidebar ─────────────────────────────────────────────── */
+function renderAgents() {
+  const root = document.getElementById('agent-list');
+  if (state.agents.length === 0) {
+    root.innerHTML = '<div class="empty">No agents yet. Create one with <code class="mono">agenticmail shell</code>.</div>';
+    return;
+  }
+  root.innerHTML = state.agents.map(a => `
+    <div class="agent-row ${state.selectedAgent?.id === a.id ? 'selected' : ''}" data-id="${a.id}">
+      <span class="dot"></span>
+      <span class="name">${escapeHtml(a.name)}</span>
+      <span class="count" data-id="${a.id}" data-zero>0</span>
+    </div>
+  `).join('');
+  root.querySelectorAll('.agent-row').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.id;
+      const agent = state.agents.find(a => a.id === id);
+      if (agent) selectAgent(agent);
+    });
+  });
+}
+async function selectAgent(agent) {
+  state.selectedAgent = agent;
+  state.selectedUid = null;
+  state.currentMessage = null;
+  document.getElementById('inbox-title').textContent = `Inbox — ${agent.name}`;
+  document.querySelector('.pane-message #message-view').innerHTML = `
+    <div class="msg-empty"><div class="big">🎀</div><div>Select an email to read it here.</div></div>
+  `;
+  renderAgents();
+  await loadInbox(agent);
+  // Clear unread count badge on open.
+  setAgentUnread(agent.id, 0);
+}
+
+/* ─── Inbox list ─────────────────────────────────────────────────── */
+async function loadInbox(agent) {
+  document.getElementById('inbox-list').innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const data = await apiGet('/mail/inbox?limit=50&offset=0', { agentKey: agent.apiKey });
+    state.inboxMessages = data.messages ?? [];
+    renderInbox();
+  } catch (err) {
+    document.getElementById('inbox-list').innerHTML = `<div class="empty">Failed to load: ${escapeHtml(err.message)}</div>`;
+  }
+}
+function renderInbox() {
+  const root = document.getElementById('inbox-list');
+  const q = state.searchQuery.toLowerCase();
+  const filtered = q
+    ? state.inboxMessages.filter(m =>
+        (m.subject ?? '').toLowerCase().includes(q) ||
+        (m.from?.[0]?.address ?? '').toLowerCase().includes(q) ||
+        (m.from?.[0]?.name ?? '').toLowerCase().includes(q) ||
+        (m.preview ?? '').toLowerCase().includes(q))
+    : state.inboxMessages;
+  if (filtered.length === 0) {
+    root.innerHTML = '<div class="empty">Inbox is empty.</div>';
+    return;
+  }
+  root.innerHTML = filtered.map(m => {
+    const unread = !(m.flags ?? []).includes('\\Seen');
+    const fromAddr = m.from?.[0]?.address ?? '?';
+    const fromName = m.from?.[0]?.name || fromAddr;
+    const subject = m.subject ?? '(no subject)';
+    const date = formatDate(m.date);
+    return `
+      <div class="inbox-row ${unread ? 'unread' : ''} ${state.selectedUid === m.uid ? 'selected' : ''}" data-uid="${m.uid}">
+        <div class="inbox-from">
+          <span class="name">${escapeHtml(fromName)}</span>
+          <span class="date">${escapeHtml(date)}</span>
+        </div>
+        <div class="subject">${escapeHtml(subject)}</div>
+        <div class="preview">${escapeHtml((m.preview ?? '').slice(0, 120))}</div>
+      </div>
+    `;
+  }).join('');
+  root.querySelectorAll('.inbox-row').forEach(el => {
+    el.addEventListener('click', () => openMessage(Number(el.dataset.uid)));
+  });
+}
+
+/* ─── Message view ───────────────────────────────────────────────── */
+async function openMessage(uid) {
+  if (!state.selectedAgent) return;
+  state.selectedUid = uid;
+  renderInbox();
+  document.querySelector('.pane-message #message-view').innerHTML = '<div class="msg-empty">Loading…</div>';
+  try {
+    const msg = await apiGet(`/mail/messages/${uid}`, { agentKey: state.selectedAgent.apiKey });
+    state.currentMessage = msg;
+    renderMessage(msg);
+  } catch (err) {
+    document.querySelector('.pane-message #message-view').innerHTML =
+      `<div class="msg-empty"><div>Failed to load: ${escapeHtml(err.message)}</div></div>`;
+  }
+}
+function renderMessage(msg) {
+  const view = document.querySelector('.pane-message #message-view');
+  const fromStr = (msg.from ?? []).map(a => a.name ? `${a.name} <${a.address}>` : a.address).join(', ') || '?';
+  const toStr = (msg.to ?? []).map(a => a.name ? `${a.name} <${a.address}>` : a.address).join(', ') || '?';
+  const ccStr = (msg.cc ?? []).map(a => a.address).join(', ');
+  const attachmentsHtml = (msg.attachments ?? []).length > 0
+    ? `<div class="msg-attachments">${msg.attachments.map(a =>
+        `<span class="msg-attachment">📎 ${escapeHtml(a.filename ?? '(unnamed)')} ${a.size ? `(${Math.round(a.size/1024)}KB)` : ''}</span>`
+      ).join('')}</div>`
+    : '';
+  const bodyText = msg.text ?? stripHtml(msg.html ?? '');
+  view.innerHTML = `
+    <div class="msg-header">
+      <h2 class="msg-subject">${escapeHtml(msg.subject ?? '(no subject)')}</h2>
+      <div class="msg-meta">
+        <span class="label">From</span><span>${escapeHtml(fromStr)}</span>
+        <span class="label">To</span><span>${escapeHtml(toStr)}</span>
+        ${ccStr ? `<span class="label">Cc</span><span>${escapeHtml(ccStr)}</span>` : ''}
+        <span class="label">Date</span><span class="date">${escapeHtml(formatDateFull(msg.date))}</span>
+      </div>
+      <div class="msg-actions">
+        <button class="btn" onclick="reply(false)">↩ Reply</button>
+        <button class="btn" onclick="reply(true)">↩↩ Reply all</button>
+        <button class="btn btn-ghost" onclick="markUnread()">Mark unread</button>
+      </div>
+    </div>
+    <div class="msg-body">${renderMarkdown(bodyText)}</div>
+    ${attachmentsHtml}
+  `;
+}
+
+/* ─── Markdown rendering (small, sufficient for agent emails) ────── */
+function renderMarkdown(src) {
+  if (!src) return '<div class="empty">(no body)</div>';
+  // Convert quoted-reply chains to blockquotes BEFORE escaping so HTML
+  // tagging survives. Each quote level wraps in <blockquote>.
+  const lines = src.split('\n');
+  let out = '';
+  let codeFence = false;
+  let codeBuf = [];
+  let codeLang = '';
+  let listBuf = null;   // { type: 'ul'|'ol', items: [...] }
+  let blockquoteDepth = 0;
+  function flushList() {
+    if (!listBuf) return;
+    out += `<${listBuf.type}>${listBuf.items.map(i => `<li>${i}</li>`).join('')}</${listBuf.type}>`;
+    listBuf = null;
+  }
+  function setBlockquote(depth) {
+    while (blockquoteDepth < depth) { out += '<blockquote>'; blockquoteDepth++; }
+    while (blockquoteDepth > depth) { out += '</blockquote>'; blockquoteDepth--; }
+  }
+  for (const rawLine of lines) {
+    // Fenced code block toggle.
+    const fence = rawLine.match(/^\s*```([\w+-]*)\s*$/);
+    if (fence) {
+      if (codeFence) {
+        out += `<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`;
+        codeBuf = []; codeFence = false; codeLang = '';
+      } else {
+        flushList();
+        codeFence = true; codeLang = fence[1];
+      }
+      continue;
+    }
+    if (codeFence) { codeBuf.push(rawLine); continue; }
+    // Quote depth.
+    let line = rawLine, depth = 0;
+    while (/^>/.test(line)) { depth++; line = line.replace(/^>\s?/, ''); }
+    if (depth !== blockquoteDepth) { flushList(); setBlockquote(depth); }
+    // Headings.
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      flushList();
+      const level = heading[1].length;
+      out += `<h${Math.min(level, 6)}>${inlineMd(heading[2])}</h${Math.min(level, 6)}>`;
+      continue;
+    }
+    // Horizontal rule.
+    if (/^\s*(?:-{3,}|_{3,}|\*{3,})\s*$/.test(line)) { flushList(); out += '<hr>'; continue; }
+    // Task list.
+    const task = line.match(/^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)$/);
+    if (task) {
+      const checked = task[3] !== ' ';
+      const item = `<input type="checkbox" disabled ${checked ? 'checked' : ''}> ${inlineMd(task[4])}`;
+      if (!listBuf || listBuf.type !== 'ul') { flushList(); listBuf = { type: 'ul', items: [] }; }
+      listBuf.items.push(item);
+      continue;
+    }
+    // Bullet list.
+    const bullet = line.match(/^(\s*)([-*+])\s+(.*)$/);
+    if (bullet) {
+      if (!listBuf || listBuf.type !== 'ul') { flushList(); listBuf = { type: 'ul', items: [] }; }
+      listBuf.items.push(inlineMd(bullet[3]));
+      continue;
+    }
+    // Numbered list.
+    const numbered = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/);
+    if (numbered) {
+      if (!listBuf || listBuf.type !== 'ol') { flushList(); listBuf = { type: 'ol', items: [] }; }
+      listBuf.items.push(inlineMd(numbered[3]));
+      continue;
+    }
+    // Table (light support: pipe-bounded rows + separator).
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      flushList();
+      const cells = line.trim().slice(1, -1).split('|').map(c => inlineMd(c.trim()));
+      // Heuristic: separator row marks header → use <th>.
+      if (/^\s*\|?(\s*:?-{3,}:?\s*\|)+/.test(line)) {
+        // Skip the separator line.
+        continue;
+      }
+      out += `<table><tr>${cells.map(c => `<td>${c}</td>`).join('')}</tr></table>`;
+      continue;
+    }
+    // Blank line.
+    if (line.trim() === '') { flushList(); out += '<br>'; continue; }
+    // Paragraph (with inline markdown).
+    flushList();
+    out += `<div>${inlineMd(line)}</div>`;
+  }
+  flushList();
+  setBlockquote(0);
+  return out;
+}
+function inlineMd(text) {
+  // Escape first, then re-introduce safe HTML for markdown shapes.
+  let s = escapeHtml(text);
+  // Inline code.
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`);
+  // Bold+italic, bold, italic.
+  s = s.replace(/\*\*\*([^*\n]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/___([^_\n]+)___/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>');
+  s = s.replace(/(^|[^\w_])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>');
+  // Strikethrough.
+  s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+  // Links + auto-links.
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/&lt;(https?:\/\/[^&\s]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  return s;
+}
+function stripHtml(s) { return (s ?? '').replace(/<[^>]*>/g, ''); }
+
+/* ─── Date formatting ────────────────────────────────────────────── */
+function formatDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso); if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const days = Math.round((now - d) / (24 * 3600 * 1000));
+  if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'short' });
+  if (d.getFullYear() === now.getFullYear()) return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function formatDateFull(iso) {
+  if (!iso) return '';
+  const d = new Date(iso); if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const deltaMs = now - d;
+  let rel = '';
+  if (deltaMs < 45_000) rel = 'just now';
+  else if (deltaMs < 60 * 60 * 1000) rel = `${Math.round(deltaMs / 60_000)} minutes ago`;
+  else if (deltaMs < 24 * 60 * 60 * 1000) rel = `${Math.round(deltaMs / 3_600_000)} hours ago`;
+  const abs = d.toLocaleString(undefined, {
+    weekday: 'short', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+    ...(d.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}),
+  });
+  return rel ? `${rel} — ${abs}` : abs;
+}
+
+/* ─── Compose ────────────────────────────────────────────────────── */
+function populateComposeFrom() {
+  const sel = document.getElementById('compose-from');
+  sel.innerHTML = state.agents.map(a => `<option value="${a.id}">${escapeHtml(a.name)} &lt;${escapeHtml(a.email)}&gt;</option>`).join('');
+}
+function openCompose() {
+  state.composeReplyContext = null;
+  document.getElementById('compose-title').textContent = 'New message';
+  if (state.selectedAgent) document.getElementById('compose-from').value = state.selectedAgent.id;
+  ['compose-to', 'compose-cc', 'compose-wake', 'compose-subject', 'compose-body'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('compose-bg').style.display = 'flex';
+  setTimeout(() => document.getElementById('compose-to').focus(), 50);
+}
+function closeCompose() { document.getElementById('compose-bg').style.display = 'none'; }
+function reply(replyAll) {
+  if (!state.currentMessage) return;
+  const msg = state.currentMessage;
+  state.composeReplyContext = { uid: msg.uid, agent: state.selectedAgent, replyAll };
+  document.getElementById('compose-title').textContent = `Reply${replyAll ? ' all' : ''} to: ${msg.subject ?? '(no subject)'}`;
+  document.getElementById('compose-from').value = state.selectedAgent.id;
+  const fromAddr = msg.from?.[0]?.address ?? '';
+  let toAddr = fromAddr;
+  if (replyAll) {
+    const all = [fromAddr, ...(msg.to ?? []).map(a => a.address), ...(msg.cc ?? []).map(a => a.address)]
+      .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i)
+      .filter(addr => addr !== state.selectedAgent.email);
+    toAddr = all.join(', ');
+  }
+  document.getElementById('compose-to').value = toAddr;
+  document.getElementById('compose-cc').value = '';
+  document.getElementById('compose-wake').value = '';
+  document.getElementById('compose-subject').value =
+    (msg.subject ?? '').startsWith('Re:') ? msg.subject : `Re: ${msg.subject ?? ''}`;
+  const quoted = (msg.text ?? '').split('\n').map(l => `> ${l}`).join('\n');
+  const stub = `\n\nOn ${msg.date}, ${fromAddr} wrote:\n${quoted}`;
+  document.getElementById('compose-body').value = stub;
+  document.getElementById('compose-bg').style.display = 'flex';
+  setTimeout(() => document.getElementById('compose-body').focus(), 50);
+}
+async function sendCompose() {
+  const agentId = document.getElementById('compose-from').value;
+  const agent = state.agents.find(a => a.id === agentId);
+  if (!agent) return toast('Pick an agent to send from.', true);
+  const to = document.getElementById('compose-to').value.trim();
+  const subject = document.getElementById('compose-subject').value.trim();
+  const text = document.getElementById('compose-body').value;
+  const cc = document.getElementById('compose-cc').value.trim();
+  const wakeRaw = document.getElementById('compose-wake').value.trim();
+  if (!to || !subject) return toast('To and Subject are required.', true);
+  const body = { to, subject, text };
+  if (cc) body.cc = cc;
+  if (wakeRaw) body.wake = wakeRaw.split(',').map(s => s.trim()).filter(Boolean);
+  try {
+    await apiPost('/mail/send', body, { agentKey: agent.apiKey });
+    closeCompose();
+    toast('Sent.');
+    if (state.selectedAgent?.id === agent.id) await loadInbox(agent);
+  } catch (err) {
+    toast(`Send failed: ${err.message}`, true);
+  }
+}
+
+/* ─── Mark unread ────────────────────────────────────────────────── */
+async function markUnread() {
+  if (!state.currentMessage || !state.selectedAgent) return;
+  try {
+    await apiPost(`/mail/messages/${state.currentMessage.uid}/unseen`, {}, { agentKey: state.selectedAgent.apiKey });
+    toast('Marked unread.');
+    await loadInbox(state.selectedAgent);
+  } catch (err) { toast(`Failed: ${err.message}`, true); }
+}
+
+/* ─── Refresh ────────────────────────────────────────────────────── */
+async function refresh() {
+  if (state.selectedAgent) {
+    await loadInbox(state.selectedAgent);
+    toast('Refreshed.');
+  }
+}
+
+/* ─── Search ─────────────────────────────────────────────────────── */
+document.getElementById('search-input').addEventListener('input', e => {
+  state.searchQuery = e.target.value;
+  renderInbox();
+});
+
+/* ─── Real-time SSE (per-agent) ─────────────────────────────────── */
+function subscribeToAllAgents() {
+  // Tear down any previous controllers.
+  for (const c of state.sseControllers) { try { c.abort(); } catch {} }
+  state.sseControllers = [];
+  for (const agent of state.agents) {
+    const ctrl = new AbortController();
+    state.sseControllers.push(ctrl);
+    fetch(`${API_URL}/api/agenticmail/events`, {
+      headers: { Authorization: `Bearer ${agent.apiKey}`, Accept: 'text/event-stream' },
+      signal: ctrl.signal,
+    }).then(async res => {
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (!ctrl.signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+          for (const line of frame.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            try { handleSseEvent(agent, JSON.parse(line.slice(6))); } catch {}
+          }
+        }
+      }
+    }).catch(() => { /* connection dropped */ });
+  }
+}
+function handleSseEvent(agent, event) {
+  if (event.type !== 'new') return;
+  // Bump unread badge on the agent row.
+  const el = document.querySelector(`.count[data-id="${agent.id}"]`);
+  if (el) {
+    const n = parseInt(el.textContent || '0', 10) + 1;
+    el.textContent = String(n);
+    el.removeAttribute('data-zero');
+  }
+  // If this agent's inbox is open, reload it.
+  if (state.selectedAgent?.id === agent.id) loadInbox(agent);
+}
+function setAgentUnread(agentId, n) {
+  const el = document.querySelector(`.count[data-id="${agentId}"]`);
+  if (!el) return;
+  el.textContent = String(n);
+  if (n === 0) el.setAttribute('data-zero', ''); else el.removeAttribute('data-zero');
+}
+
+/* ─── Toast ──────────────────────────────────────────────────────── */
+function toast(msg, error = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.toggle('error', error);
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+/* ─── Utils ──────────────────────────────────────────────────────── */
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* ─── Keyboard shortcuts ─────────────────────────────────────────── */
+document.addEventListener('keydown', e => {
+  if (document.getElementById('compose-bg').style.display !== 'none') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'r') { refresh(); }
+  if (e.key === 'c') { openCompose(); }
+});
+
+/* ─── Boot ───────────────────────────────────────────────────────── */
+(() => {
+  const saved = localStorage.getItem('agenticmail.masterKey');
+  if (saved) {
+    state.masterKey = saved;
+    document.getElementById('auth').style.display = 'none';
+    document.getElementById('app').style.display = 'grid';
+    bootstrap();
+  }
+})();
+</script>
+</body>
+</html>

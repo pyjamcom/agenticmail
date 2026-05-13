@@ -1,6 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import {
   resolveConfig,
   getDatabase,
@@ -148,6 +151,34 @@ export function createApp(configOverrides?: Partial<AgenticMailConfig>): {
       message: { error: 'Too many requests, please try again later' },
     }),
   );
+
+  // ─── Static web UI ──────────────────────────────────────────────
+  //
+  // The lightweight Gmail-style web UI lives in `packages/api/public/`
+  // (or `dist/public/` in published builds — tsup copies it). Served
+  // BEFORE auth so the HTML loads without a key; the JS inside then
+  // prompts the user for the master key and stores it locally. Every
+  // API call still passes through the auth middleware below, so the
+  // static surface adds no new auth bypass.
+  //
+  // The resolveStaticDir() walk handles both layouts:
+  //   - dev:       <repo>/packages/api/src/app.ts → ../public
+  //   - published: <node_modules>/@agenticmail/api/dist/app.js → ../public
+  const staticDir = (() => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, '..', 'public'),
+      join(here, 'public'),
+    ];
+    for (const c of candidates) if (existsSync(c)) return c;
+    return null;
+  })();
+  if (staticDir) {
+    app.use('/', express.static(staticDir, { index: 'index.html', extensions: ['html'] }));
+    // Friendly alias so `agenticmail web` users can land on a stable URL
+    // regardless of any future routing experiments.
+    app.get('/ui', (_req, res) => res.sendFile(join(staticDir, 'index.html')));
+  }
 
   // Health route (no auth required)
   app.use('/api/agenticmail', createHealthRoutes(stalwart));
