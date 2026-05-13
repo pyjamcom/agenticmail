@@ -82,21 +82,22 @@ a { color: var(--accent-strong); }
   padding: 0 8px; min-width: 200px;
 }
 .brand-bow { font-size: 28px; line-height: 1; }
+/* The brand bow PNG ships with transparent background — no rounded
+   crop, no fill. Sits flush against the topbar. */
 .brand-logo {
-  width: 32px; height: 32px;
-  border-radius: 8px;
+  width: 36px; height: 36px;
   flex-shrink: 0;
   display: block;
+  object-fit: contain;
 }
 .brand-name {
   font: 500 22px/1 'Google Sans', sans-serif;
   color: var(--pink);
 }
-/* Slightly bigger logo in the auth card. */
 .auth-card .brand-logo {
-  width: 28px; height: 28px;
-  border-radius: 6px;
+  width: 32px; height: 32px;
   vertical-align: middle;
+  display: inline-block;
 }
 
 .search-container {

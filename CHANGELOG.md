@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.26] - 2026-05-13
+
+### Fixed — Correct AgenticMail logo (pink bow, not `@` mark)
+
+0.8.25 bundled the wrong PNG from `branding/` as the AgenticMail
+logo — the `@`-in-rounded-square mark, which is a different
+asset. Swapped in the actual brand identity (pink satin bow,
+which is what the 🎀 emoji has been standing in for since 0.8.x)
+and removed the `@` mark from the codebase.
+
+Asset locations:
+
+- `branding/logo-source.png` (1254×1254 original)
+- `branding/logo-400.png` (downscaled for non-web surfaces)
+- `packages/api/public/branding/agenticmail-logo.png` (256×256
+  for the web UI — topbar brand, auth-card heading, favicon)
+
+CSS also dropped the rounded-square crop on `.brand-logo` since
+the bow ships with transparent background.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.7.11 | 0.7.12 |
+| `@agenticmail/cli` | 0.8.25 | 0.8.26 |
+
+Plugin manifest mirrored to 0.8.26. mcp / claudecode / core /
+openclaw unchanged.
+
 ## [0.8.25] - 2026-05-13
 
 Six-headline release: dispatcher visibility for hour-long workers,
