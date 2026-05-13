@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-05-13
+
+### Fixed
+
+- **`list_inbox` could return "Inbox is empty" while `inbox_digest`
+  saw the message** — same agent, same INBOX, called seconds apart.
+
+  Root cause: pooled IMAP receivers in `packages/api/src/routes/mail.ts`
+  don't run IDLE (that's the separate `InboxWatcher`'s job). So
+  `client.mailbox.exists` was the cached count from the last SELECT
+  and lagged behind reality whenever a new internal message landed
+  between two `getReceiver()` calls. `listEnvelopes()` then
+  early-returned `[]` on the stale `total === 0`, even though the
+  next-line SEARCH would have surfaced the message just fine.
+
+  Fix (`packages/core/src/mail/receiver.ts`):
+  - `getMailboxInfo`: issue an IMAP `NOOP` after `getMailboxLock` so
+    the server flushes any pending untagged `EXISTS` / `RECENT` /
+    `EXPUNGE` responses before we read `client.mailbox`.
+  - `listEnvelopes`: drop the stale-state early returns
+    (`if (total === 0)` and `if (offset >= total)`) and let the
+    authoritative `SEARCH` decide. SEARCH walks the mailbox at command
+    time, so it sees newly-delivered messages without any IDLE/NOOP
+    dance.
+
+  Net effect: `list_inbox` is now consistent with `inbox_digest` and
+  with the actual mailbox state immediately after `send_email`.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/core` | 0.7.1 | 0.7.2 |
+| `@agenticmail/api`  | 0.7.1 | 0.7.2 |
+| `@agenticmail/cli`  | 0.8.4 | 0.8.5 |
+
+(`@agenticmail/mcp` and `@agenticmail/claudecode` only call the HTTP
+API, so they don't need a rebuild — the fix reaches them through the
+API process they talk to.)
+
 ## [0.8.4] - 2026-05-12
 
 ### Added

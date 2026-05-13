@@ -53,6 +53,12 @@ export class MailReceiver {
   async getMailboxInfo(mailbox = 'INBOX'): Promise<MailboxInfo> {
     const lock = await this.client.getMailboxLock(mailbox);
     try {
+      // NOOP forces the server to flush any pending untagged responses
+      // (EXISTS, RECENT, EXPUNGE). Without this, `client.mailbox.exists` can
+      // be stale for pooled receivers that don't run IDLE — e.g. a message
+      // delivered between `getReceiver()` calls won't be visible until the
+      // next SELECT. See receiver pool in packages/api/src/routes/mail.ts.
+      try { await this.client.noop(); } catch { /* mailbox state best-effort */ }
       const status = this.client.mailbox;
       if (!status) {
         return { name: mailbox, exists: 0, recent: 0, unseen: 0 };
@@ -72,19 +78,18 @@ export class MailReceiver {
     const lock = await this.client.getMailboxLock(mailbox);
     try {
       const envelopes: EmailEnvelope[] = [];
-      const mb = this.client.mailbox;
-      const total = mb ? (mb.exists ?? 0) : 0;
-      if (total === 0) return envelopes;
-
       const limit = Math.min(Math.max(options?.limit ?? 20, 1), 1000);
       const offset = Math.max(options?.offset ?? 0, 0);
 
-      // Early return if offset is beyond available messages
-      if (offset >= total) return envelopes;
-
       // Use UID-based search + sort for stable pagination that isn't
       // affected by message deletions between pages.
-      // Fetch ALL UIDs, sort descending (newest first), then slice for the page.
+      //
+      // NOTE: We deliberately do NOT early-return based on
+      // `client.mailbox.exists`. That value is the cached count from the
+      // last SELECT / EXISTS push, and for pooled receivers (no IDLE) it
+      // can lag behind reality — causing `list_inbox` to return empty
+      // immediately after `send_email` even though the message is in the
+      // mailbox. SEARCH is authoritative; let it run.
       const allUids = await this.client.search({ all: true }, { uid: true });
       if (!allUids || allUids.length === 0) return envelopes;
 
