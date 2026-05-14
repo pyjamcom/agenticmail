@@ -221,6 +221,27 @@ describe('Dispatcher.handleEvent — wake-budget circuit breaker', () => {
     }
   });
 
+  it('lone leading-edge wake: timer fires with empty queue → no second spawn, no crash', async () => {
+    // Regression for 0.9.6: a fresh thread with exactly ONE event used
+    // to crash the dispatcher when the debounce timer expired with the
+    // sentinel queue entry still in place but `events: []`. fireCoalescedWake
+    // would fall through to newMailPromptForBatch(account, []) and throw
+    // TypeError: Cannot read properties of undefined (reading 'uid').
+    vi.useFakeTimers();
+    try {
+      const { d, sdk } = makeDispatcher({}, { wakeCoalesceMs: 200 });
+      await d.handleEvent(FOLA, { type: 'new', uid: 77, from: 'orion', subject: 'Lone reply' });
+      expect(sdk.calls).toHaveLength(1);  // leading-edge fired
+      // Cross the debounce window with NO follow-up events. The timer
+      // must clean up the sentinel without spawning a second worker
+      // and without throwing.
+      await vi.advanceTimersByTimeAsync(250);
+      expect(sdk.calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('drops queued wakes for UIDs the worker already read during its turn', async () => {
     vi.useFakeTimers();
     try {

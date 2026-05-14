@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-05-14
+
+### Fixed — `TypeError: Cannot read properties of undefined (reading 'uid')` on lone leading-edge wakes
+
+After 0.9.6 booted cleanly, the dispatcher started throwing on EVERY solo wake to a fresh thread:
+
+```
+TypeError: Cannot read properties of undefined (reading 'uid')
+    at newMailPromptForBatch (dispatcher.ts:680)
+    at Dispatcher.fireCoalescedWake (dispatcher.ts:1534)
+    at Timeout._onTimeout
+```
+
+The `uncaughtException` guard (shipped in 0.9.4) kept the process alive, so no crash-loop — but the post-leading-edge coalesced-wake timer fired a second wake-build attempt that immediately threw, and the worker never spawned.
+
+**Root cause:** the leading-edge coalesce path (0.9.3) installs a **sentinel queue entry with `events: []`** the moment the first event for an (agent, thread) arrives — the leading-edge spawn fires immediately, and the sentinel just exists so the debounce window knows there's an in-flight burst. If no follow-up events arrive inside the window, the timer fires `fireCoalescedWake` against the empty sentinel:
+
+```ts
+const prompt = entry.events.length === 1
+  ? newMailPrompt(entry.account, lastEvent)
+  : newMailPromptForBatch(entry.account, entry.events);  // length === 0 → here
+// newMailPromptForBatch reads events[events.length - 1].uid → undefined.uid → throw
+```
+
+**Fix:** `fireCoalescedWake` now short-circuits when `entry.events.length === 0` — the sentinel gets cleaned up, no prompt is built, no wake-budget is charged, no worker spawn attempted. The leading-edge fire already did all the useful work.
+
+```ts
+if (entry.events.length === 0) return;  // sentinel cleanup only
+```
+
+### Tests
+
+114 claudecode tests pass (was 113, +1 regression test):
+
+- `lone leading-edge wake: timer fires with empty queue → no second spawn, no crash` — landed in `packages/claudecode/src/__tests__/dispatcher.test.ts`. Fires one event into a dispatcher with a 200 ms coalesce window, advances fake time past the window, asserts only one spawn happened and the timer callback did not throw.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/claudecode` | 0.2.5 | 0.2.6 |
+| `@agenticmail/cli` | 0.9.6 | 0.9.7 |
+
+Plugin manifest mirrored to 0.9.7. core / mcp / api unchanged.
+
+### Operator upgrade
+
+```
+npm install -g @agenticmail/cli@latest
+pm2 restart agenticmail-claudecode-dispatcher
+pm2 logs agenticmail-claudecode-dispatcher --lines 30
+```
+
 ## [0.9.6] - 2026-05-14
 
 ### Fixed — Dispatcher crashed on startup with `Dynamic require of "events" is not supported`

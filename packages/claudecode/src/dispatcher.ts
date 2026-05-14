@@ -1523,6 +1523,13 @@ export class Dispatcher {
     if (!entry) return;
     this.wakeCoalesce.delete(key);
     if (this.stopped) return;
+    // Sentinel-only case: the leading-edge wake already fired for this
+    // (agent, thread) and no follow-up events arrived inside the debounce
+    // window. The timer is just here to clean up the sentinel; there is
+    // nothing to coalesce. Bail out before charging wake budget or
+    // building a prompt — otherwise newMailPromptForBatch would dereference
+    // events[-1] and throw. See scheduleCoalescedWake() leading-edge path.
+    if (entry.events.length === 0) return;
     const verdict = this.chargeWake(entry.account.id, entry.threadId);
     if (!verdict.ok) {
       this.log('warn', `[dispatcher] wake-budget exhausted for "${entry.account.name}" on thread "${entry.threadId}" — dropped batch of ${entry.events.length}`);
