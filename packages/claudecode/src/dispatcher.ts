@@ -45,6 +45,7 @@ import { loadPersonaForAgent } from './persona-loader.js';
 import { mkdirSync, createWriteStream, rmSync, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { ThreadCache, AgentMemoryStore, threadIdFor, normalizeSubject } from '@agenticmail/core';
 
 /** Event shape we accept off the SSE stream. */
 interface SSEEvent {
@@ -167,6 +168,18 @@ export interface DispatcherOptions extends ResolveConfigOptions {
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
   /** Override Date.now() — tests use this to advance the budget clock. */
   nowMs?: () => number;
+  /** Debounce window for wake-coalescing per (agent, thread).
+   *  Default 30 s — covers a typical "burst of back-to-back
+   *  replies in 5–15 s" pattern without making single replies
+   *  feel sluggish. Set to 0 to disable coalescing entirely
+   *  (one Claude turn per event, pre-0.9.0 behaviour). */
+  wakeCoalesceMs?: number;
+  /** Override the ThreadCache disk root. Tests use a tmpdir;
+   *  production runs against ~/.agenticmail/thread-cache/. */
+  threadCacheDir?: string;
+  /** Override the AgentMemoryStore disk root. Same rationale as
+   *  threadCacheDir — only tests should set this. */
+  agentMemoryDir?: string;
 }
 
 /** Minimal Claude Agent SDK query signature we use. */
@@ -350,6 +363,14 @@ interface WakeBudgetEntry {
 
 const DEFAULT_MAX_WAKES_PER_THREAD = 10;
 const DEFAULT_WAKE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+/**
+ * Default debounce window for wake-coalescing. 30 seconds is the
+ * sweet spot: long enough to collapse a burst of replies a human
+ * (or AI agent) types in a 5–15 s window, short enough that
+ * single-reply latency still feels real-time. Override via
+ * DispatcherOptions.wakeCoalesceMs (0 to disable).
+ */
+const DEFAULT_WAKE_COALESCE_MS = 30_000;
 
 /**
  * Per-worker observation channel. `runWorker` calls `onMessage` for every
@@ -591,6 +612,48 @@ function wrapSignal(signal: AbortSignal): AbortController {
 }
 
 /** Build the wake prompt for a new-mail trigger. */
+/**
+ * Wake prompt for a coalesced BATCH of events on the same thread.
+ *
+ * Single-event wakes use `newMailPrompt`. When the dispatcher
+ * coalesces a burst of replies (designer sends 3 quick replies
+ * in 10 s, all CC the same agent), one wake fires for the batch
+ * and the agent sees this prompt instead: a leading "You have
+ * N new messages" header, a list of (UID, sender, subject) for
+ * each, then the standard coordination protocol body unchanged.
+ *
+ * Crucially this REPLACES per-event re-reading: the agent reads
+ * the batch list, picks the latest message to drive the reply,
+ * and acknowledges all of them in one turn. The thread cache +
+ * memory blocks (added by composeWakePromptWithContext) cover
+ * older context.
+ */
+function newMailPromptForBatch(agent: AgenticMailAccount, events: SSEEvent[]): string {
+  const lines: string[] = [];
+  const count = events.length;
+  lines.push(`You have ${count} new messages on this thread (coalesced — they arrived in a burst and you are seeing them in one turn).`);
+  lines.push('');
+  lines.push('### Burst details');
+  for (const ev of events) {
+    const f = extractFrom(ev) ?? 'unknown';
+    const s = extractSubject(ev) ?? '(no subject)';
+    lines.push(`- UID ${ev.uid ?? '?'} · ${f} · "${s}"`);
+  }
+  lines.push('');
+  lines.push(`The LATEST message in the burst is UID ${events[events.length - 1].uid ?? '?'}.`);
+  lines.push('Read it first (and any others on the thread you have not yet seen). Then decide:');
+  lines.push('- If the burst is multiple replies converging on one ask, respond ONCE on the thread.');
+  lines.push('- If the burst is genuinely N independent asks addressed to you, handle them in one reply where possible.');
+  lines.push('- If your prior work already addressed the burst, do NOT repeat yourself — stay silent for this wake.');
+  lines.push('');
+  lines.push('Reuse the standard thread-aware coordination protocol below; the only difference is the batch shape.');
+  lines.push('');
+  // Reuse the single-event protocol body verbatim with the latest event as anchor.
+  const latest = events[events.length - 1];
+  lines.push(newMailPrompt(agent, latest));
+  return lines.join('\n');
+}
+
 function newMailPrompt(agent: AgenticMailAccount, event: SSEEvent): string {
   const from = extractFrom(event) ?? 'unknown sender';
   const subject = extractSubject(event) ?? '(no subject)';
@@ -748,6 +811,41 @@ export class Dispatcher {
   private wakeWindowMs: number;
   private now: () => number;
 
+  /**
+   * Layered wake-context system. ThreadCache holds the last K
+   * envelopes per thread (built passively on every SSE new-mail
+   * event, even when no agent wakes). AgentMemoryStore holds
+   * per-(agent, thread) markdown that workers write at end-of-
+   * wake via the save_thread_memory MCP tool. Both are read on
+   * worker spawn and injected into the wake prompt — see
+   * spawnWorker for the rendering.
+   */
+  private threadCache: ThreadCache;
+  private agentMemory: AgentMemoryStore;
+
+  /**
+   * Coalesced wake queue. Keyed by `${accountId}::${threadId}`,
+   * each entry holds the pending events + the timer that will
+   * fire the spawn. A new event arriving while the entry exists
+   * EXTENDS the timer (debounce, not throttle) and appends to
+   * the event list. When the timer fires, a single Claude turn
+   * sees the union of new messages and replies once.
+   *
+   * Why debounce + not throttle: bursts of replies from one
+   * sender are typically a single logical handoff, not N
+   * separate actions. Throttling would still produce a stale
+   * wake after the burst settles; debouncing collapses the
+   * whole burst into one wake at the trailing edge.
+   */
+  private wakeCoalesce = new Map<string, {
+    timer: ReturnType<typeof setTimeout>;
+    events: SSEEvent[];
+    account: AgenticMailAccount;
+    threadId: string;
+    firstScheduledAt: number;
+  }>();
+  private wakeCoalesceMs: number;
+
   constructor(opts: DispatcherOptions = {}) {
     this.cfg = resolveConfig(opts);
     this.maxConcurrent = opts.maxConcurrentWorkers ?? DEFAULT_MAX_CONCURRENT;
@@ -760,6 +858,9 @@ export class Dispatcher {
     this.maxWakesPerThread = opts.maxWakesPerThread ?? DEFAULT_MAX_WAKES_PER_THREAD;
     this.wakeWindowMs = opts.wakeWindowMs ?? DEFAULT_WAKE_WINDOW_MS;
     this.now = opts.nowMs ?? Date.now;
+    this.threadCache = new ThreadCache({ cacheDir: opts.threadCacheDir });
+    this.agentMemory = new AgentMemoryStore({ memoryDir: opts.agentMemoryDir });
+    this.wakeCoalesceMs = opts.wakeCoalesceMs ?? DEFAULT_WAKE_COALESCE_MS;
 
     if (!this.cfg.masterKey) {
       throw new Error('Dispatcher requires AgenticMail master key. Run `agenticmail setup` first.');
@@ -845,6 +946,10 @@ export class Dispatcher {
       ch.controller?.abort();
     }
     this.channels.clear();
+    // Drop pending coalesced wakes — we never fired them, and on
+    // restart the cache + memory have already absorbed the events.
+    for (const entry of this.wakeCoalesce.values()) clearTimeout(entry.timer);
+    this.wakeCoalesce.clear();
     this.log('info', '[dispatcher] stopped');
   }
 
@@ -855,6 +960,36 @@ export class Dispatcher {
       const ch = this.channels.get(account.id);
       if (ch?.seenUids.has(event.uid)) return;
       const subject = extractSubject(event);
+
+      // Update the ThreadCache BEFORE any wake-skip checks. Cache
+      // is built forward-only and reflects every message we see,
+      // regardless of whether THIS account will wake on it. Other
+      // agents on the same thread share the cache. See
+      // packages/core/src/threading/thread-cache.ts for the
+      // design rationale.
+      const cacheThreadId = threadIdFor({ subject });
+      try {
+        const fromAddr = extractFrom(event) ?? '(unknown)';
+        const previewSource = (event as { preview?: string }).preview
+          ?? (event.message as { preview?: string } | undefined)?.preview
+          ?? '';
+        this.threadCache.pushMessage(cacheThreadId, {
+          uid: event.uid,
+          from: fromAddr,
+          fromAddr,
+          subject: subject ?? '(no subject)',
+          preview: typeof previewSource === 'string' ? previewSource : '',
+          date: new Date().toISOString(),
+        }, {
+          subject: normalizeSubject(subject),
+          rootFromAddr: fromAddr,
+        });
+      } catch (err) {
+        // Cache writes are best-effort — a corrupt entry or
+        // read-only fs shouldn't break the wake path.
+        this.log('warn', `[dispatcher] thread-cache push failed for "${account.name}" uid=${event.uid}: ${(err as Error).message}`);
+      }
+
       // Cross-type dedup: if the master API just pushed a task event for
       // us (within the suppression window) AND this incoming mail looks
       // like the matching `[RPC] / [Task]` notification, drop it. Without
@@ -878,6 +1013,13 @@ export class Dispatcher {
       // circuit breaker below.
       if (isThreadClosedSubject(subject)) {
         this.log('info', `[dispatcher] thread closed (subject="${subject ?? ''}") — skipping wake for "${account.name}" uid=${event.uid}`);
+        // Drop the per-thread cache + this agent's memory for the
+        // closed thread. Other CC'd agents' memories survive — they
+        // will fade naturally on their next wake (no cache to load
+        // means just an empty context block; their own memory still
+        // helps them decide "no more action needed on this thread").
+        try { this.threadCache.delete(cacheThreadId); } catch { /* ignore */ }
+        try { this.agentMemory.delete(account.id, cacheThreadId); } catch { /* ignore */ }
         return;
       }
 
@@ -894,26 +1036,23 @@ export class Dispatcher {
         return;
       }
 
-      // Wake-budget circuit breaker. Caps per-(agent, thread) wakes so a
-      // runaway thread (reply loop, simultaneous-turn storm, stuck
-      // agent) can't burn unbounded Claude turns. See WakeBudgetEntry
-      // and chargeWake for the full design rationale.
+      // Compute the thread id once; it threads through both the
+      // wake-budget check (inside fireCoalescedWake / fireWakeImmediately)
+      // and the wake coalescing queue key.
       const threadId = threadIdFromSubject(subject);
-      const verdict = this.chargeWake(account.id, threadId);
-      if (!verdict.ok) {
-        const minutesUntil = verdict.mutedUntilMs
-          ? Math.max(0, Math.round((verdict.mutedUntilMs - this.now()) / 60_000))
-          : 0;
-        this.log('warn', `[dispatcher] wake-budget exhausted for "${account.name}" on thread "${threadId}" (count=${verdict.count}, cap=${this.maxWakesPerThread}); muted for ~${minutesUntil}min. uid=${event.uid}, subject="${subject ?? ''}"`);
-        return;
-      }
 
-      await this.spawnWorker(account, newMailPrompt(account, event), {
-        kind: 'new-mail',
-        uid: event.uid,
-        subject: extractSubject(event),
-        from: extractFrom(event),
-      });
+      // Wake coalescing — debounce per (account, thread) so a burst
+      // of back-to-back replies on the same thread collapses into
+      // ONE Claude turn. See `scheduleCoalescedWake` for the design
+      // rationale; the feedback that motivated this is documented
+      // in CHANGELOG 0.9.0 (wake-thrash on multi-CC threads).
+      //
+      // We `await` so that when coalescing is disabled
+      // (wakeCoalesceMs === 0, the test-mode default) the spawn
+      // resolves before handleEvent returns. With coalescing on,
+      // schedule returns immediately and the worker fires later
+      // via the debounce timer.
+      await this.scheduleCoalescedWake(account, event, threadId);
       return;
     }
     if (event.type === 'task' && typeof event.taskId === 'string') {
@@ -1178,6 +1317,182 @@ export class Dispatcher {
     }
   }
 
+  /**
+   * Enqueue (or extend) a wake for `(account, thread)`. First
+   * event creates the entry + starts the debounce timer; every
+   * subsequent event within the window APPENDS to the event
+   * list and EXTENDS the timer to `now + wakeCoalesceMs`.
+   *
+   * When the timer fires, `fireCoalescedWake` synthesises a
+   * single wake prompt covering every event that arrived in
+   * the burst and spawns one worker. The wake-budget is
+   * charged ONCE for the batch (a burst of 4 replies is one
+   * logical handoff, not four).
+   *
+   * When `wakeCoalesceMs` is 0 (test mode / opt-out), we skip
+   * the queue and spawn immediately to keep the pre-0.9.0
+   * one-event-per-wake semantics.
+   */
+  private async scheduleCoalescedWake(account: AgenticMailAccount, event: SSEEvent, threadId: string): Promise<void> {
+    if (this.wakeCoalesceMs <= 0) {
+      await this.fireWakeImmediately(account, event, threadId);
+      return;
+    }
+    const key = `${account.id}::${threadId}`;
+    const existing = this.wakeCoalesce.get(key);
+    if (existing) {
+      clearTimeout(existing.timer);
+      existing.events.push(event);
+      existing.timer = setTimeout(() => this.fireCoalescedWake(key), this.wakeCoalesceMs);
+      // Hard cap on debounce extension: a continuous reply stream
+      // could otherwise hold a single coalesced batch open forever.
+      // After 5× the debounce window from the FIRST event, force
+      // the timer to fire even if new events keep arriving. This
+      // is a safety valve; in normal use bursts settle in 1–2
+      // window-widths.
+      const elapsedFromFirst = this.now() - existing.firstScheduledAt;
+      if (elapsedFromFirst > this.wakeCoalesceMs * 5) {
+        clearTimeout(existing.timer);
+        this.fireCoalescedWake(key);
+      }
+      // Don't keep the process alive just for a debounce timer.
+      (existing.timer as unknown as { unref?: () => void }).unref?.();
+      return;
+    }
+    const entry = {
+      events: [event],
+      account,
+      threadId,
+      firstScheduledAt: this.now(),
+      timer: setTimeout(() => this.fireCoalescedWake(key), this.wakeCoalesceMs),
+    };
+    (entry.timer as unknown as { unref?: () => void }).unref?.();
+    this.wakeCoalesce.set(key, entry);
+  }
+
+  /**
+   * Pre-0.9.0 fast path used when coalescing is disabled. Same
+   * spawn that scheduleCoalescedWake/fireCoalescedWake would do
+   * for a single-event batch.
+   */
+  private async fireWakeImmediately(account: AgenticMailAccount, event: SSEEvent, threadId: string): Promise<void> {
+    const verdict = this.chargeWake(account.id, threadId);
+    if (!verdict.ok) {
+      this.log('warn', `[dispatcher] wake-budget exhausted for "${account.name}" on thread "${threadId}" — dropped uid=${event.uid}`);
+      return;
+    }
+    await this.spawnWorker(account, newMailPrompt(account, event), {
+      kind: 'new-mail',
+      uid: event.uid,
+      subject: extractSubject(event),
+      from: extractFrom(event),
+    });
+  }
+
+  /**
+   * Timer callback for the coalesced wake. Builds a single wake
+   * prompt that summarises every event in the batch and fires
+   * one worker. Wake budget is charged once for the batch.
+   */
+  private fireCoalescedWake(key: string): void {
+    const entry = this.wakeCoalesce.get(key);
+    if (!entry) return;
+    this.wakeCoalesce.delete(key);
+    if (this.stopped) return;
+    const verdict = this.chargeWake(entry.account.id, entry.threadId);
+    if (!verdict.ok) {
+      this.log('warn', `[dispatcher] wake-budget exhausted for "${entry.account.name}" on thread "${entry.threadId}" — dropped batch of ${entry.events.length}`);
+      return;
+    }
+    const lastEvent = entry.events[entry.events.length - 1];
+    const prompt = entry.events.length === 1
+      ? newMailPrompt(entry.account, lastEvent)
+      : newMailPromptForBatch(entry.account, entry.events);
+    if (entry.events.length > 1) {
+      this.log('info', `[dispatcher] coalesced ${entry.events.length} wakes into one Claude turn for "${entry.account.name}" on thread "${entry.threadId}"`);
+    }
+    void this.spawnWorker(entry.account, prompt, {
+      kind: 'new-mail',
+      uid: lastEvent.uid,
+      subject: extractSubject(lastEvent),
+      from: extractFrom(lastEvent),
+    });
+  }
+
+  /**
+   * Prepend the thread-context block (cache + memory) to the
+   * wake prompt for a given account. Returns the prompt
+   * unchanged when neither layer has content — the very first
+   * wake on a brand-new thread shouldn't show the agent an
+   * empty "Thread context" section that screams "you've seen
+   * this before" when there's nothing to see.
+   *
+   * Exposed as a separate method so tests can drive it
+   * directly without invoking the SDK.
+   */
+  composeWakePromptWithContext(
+    account: AgenticMailAccount,
+    ctx: { kind: string; subject?: string; uid?: number },
+    prompt: string,
+  ): string {
+    if (ctx.kind !== 'new-mail' && ctx.kind !== 'task') return prompt;
+    const t = threadIdFor({ subject: ctx.subject });
+    let cacheBlock = '';
+    let memoryBlock = '';
+    try {
+      const entry = this.threadCache.read(t);
+      // Exclude the current message from the cache view — the agent
+      // sees it explicitly in the "NEW event" section below, no
+      // point repeating it under "Facts". The thread cache push
+      // happens BEFORE wake decisions are made (so other CC'd
+      // agents benefit even when we skip), which means by the time
+      // we render the prompt, the current message is already in
+      // the cache.
+      if (entry) {
+        const filtered = ctx.uid
+          ? { ...entry, messages: entry.messages.filter(m => m.uid !== ctx.uid) }
+          : entry;
+        cacheBlock = filtered.messages.length > 0
+          ? this.threadCache.renderForPrompt(filtered)
+          : '';
+      }
+    } catch { /* tolerate corrupt cache */ }
+    try {
+      memoryBlock = this.agentMemory.renderForPrompt(this.agentMemory.read(account.id, t));
+    } catch { /* tolerate missing memory */ }
+    if (!cacheBlock && !memoryBlock) return prompt;
+    const sections: string[] = [
+      '## Thread context',
+      '',
+      'You have seen this thread before. The two blocks below are',
+      "your shortcut to context — DO NOT re-read every prior message",
+      'on this thread. Read only the NEW event at the bottom of this',
+      'prompt and decide based on these blocks plus that event.',
+      '',
+    ];
+    if (cacheBlock) {
+      sections.push('### Facts (last messages on this thread, newest first)');
+      sections.push(cacheBlock);
+      sections.push('');
+    }
+    if (memoryBlock) {
+      sections.push('### Your own memory of this thread');
+      sections.push(memoryBlock);
+      sections.push('');
+    }
+    sections.push('## NEW event');
+    sections.push('');
+    sections.push(prompt);
+    sections.push('');
+    sections.push('---');
+    sections.push('At end of turn, call `save_thread_memory` with `threadId`,');
+    sections.push('a one-paragraph `summary` of where the thread stands, your');
+    sections.push('current `commitments`, any `openQuestions`, your `lastAction`,');
+    sections.push('and the newest `lastUid` you have digested. Future wakes on');
+    sections.push('this thread will load that memory into context for you.');
+    return sections.join('\n');
+  }
+
   /** Acquire a concurrency slot, run a worker, release the slot. */
   private async spawnWorker(account: AgenticMailAccount, prompt: string, ctx: { kind: string; uid?: number; taskId?: string; subject?: string; from?: string }): Promise<void> {
     await this.acquireSlot();
@@ -1254,10 +1569,18 @@ export class Dispatcher {
       });
       this.log('info', `[dispatcher] waking "${account.name}" — ${ctx.kind}${ctx.taskId ? ' ' + ctx.taskId : ctx.uid ? ' uid=' + ctx.uid : ''}`);
       const mcpEnv = await this.buildMcpEnv();
+      // Prepend Layer 1 (thread cache) + Layer 2 (per-agent memory)
+      // context blocks to the wake prompt so the worker doesn't have
+      // to re-derive thread history from scratch on every wake. See
+      // packages/core/src/threading/ for the layered design. The
+      // composer is null-safe — when both layers are empty (cold-
+      // start, first wake on a brand-new thread), the prompt falls
+      // through unchanged.
+      const composedPrompt = this.composeWakePromptWithContext(account, ctx, prompt);
       workerResult = await runWorkerWithCompaction(
         this.query,
         body,
-        prompt,
+        composedPrompt,
         account,
         this.cfg.mcpServerName,
         this.cfg.mcpCommand,

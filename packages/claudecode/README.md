@@ -16,7 +16,15 @@ Agent { subagent_type: "agenticmail-fola", prompt: "draft a reply to my last ema
 
 This package is to Claude Code what `@agenticmail/openclaw` is to OpenClaw: an integration package that wires AgenticMail into the host AI runtime. It mirrors that package's layout 1:1, so if you know one, you know the other.
 
-## ✨ What's new in 0.1.17
+## ✨ What's new in 0.2.0
+
+The wake-context release for the dispatcher.
+
+- **🧠 `## Thread context` block prepended to every wake prompt.** Two layers compose: **ThreadCache** (`@agenticmail/core`) — the dispatcher's per-thread ring buffer of the last K envelopes + previews, built passively on every SSE new-mail event regardless of whether anyone actually wakes — and **AgentMemoryStore** (`@agenticmail/core`) — per-`(agent, thread)` markdown files agents write at end-of-wake via `save_thread_memory`. The dispatcher reads both before spawning a worker and injects them as a "you've seen this thread before, here's what you know" header. Cuts rehydration cost from linear-in-thread-length to roughly flat.
+- **⏱ Wake coalescing (30 s debounce per agent + thread).** A burst of back-to-back replies on the same thread now collapses into ONE Claude turn that sees the union of new messages in a `newMailPromptForBatch` shape. Wake-budget charges once for the batch. Configurable via `wakeCoalesceMs` (set to 0 to disable). Safety valve at 5× the window prevents indefinite extension on a continuous reply stream.
+- **`[FINAL]` cleanup widened.** Thread-close markers now drop both the ThreadCache entry AND this agent's memory for the closed thread.
+
+## ✨ Earlier — 0.1.17
 
 - **⏱ Compact-and-continue (0.1.17)** — workers can now run across multiple SDK turns when one isn't enough to finish a task. `runWorker` is wrapped by `runWorkerWithCompaction`, which on a context-overflow error (`prompt is too long`, `context_length_exceeded`, etc.) synthesises a breadcrumb checkpoint from the captured tool-call log + last assistant text, builds a continuation prompt prefixed with "Resuming after context reset / do NOT redo these steps", and loops. Capped at 4 iterations by default so cost is bounded; on cap exhaustion the worker exits with `compaction budget exhausted` so the host sees what happened.
 - **🪝 Mail-hook resolves with absolute path (0.1.16)** — the hook command registered in `~/.claude/settings.json` is now `node "<abs-path>/mail-hook.js"` instead of the bare bin name. `import.meta.url` + a 3-step filesystem probe (`dist/` sibling → `dist/` alongside `src/` → `../dist/`) handle both published builds and dev checkouts (`tsx`-loaded `src/install.ts` no longer points at a non-existent `src/mail-hook.js`). The `command not found` and `MODULE_NOT_FOUND` errors are gone. Existing installs auto-heal on the next `agenticmail claudecode` run because the upserter rewrites the command with the freshly-resolved path.

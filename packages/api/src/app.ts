@@ -28,6 +28,7 @@ import { createSmsRoutes } from './routes/sms.js';
 import { createStorageRoutes } from './routes/storage.js';
 import { createSystemEventRoutes } from './routes/system-events.js';
 import { createDispatcherActivityRoutes } from './routes/dispatcher-activity.js';
+import { createAgentMemoryRoutes } from './routes/agent-memory.js';
 
 /**
  * Pre-resolve the Claude Code integration routes at module-load time.
@@ -221,6 +222,10 @@ export function createApp(configOverrides?: Partial<AgenticMailConfig>): {
   app.use('/api/agenticmail', createStorageRoutes(db as any, accountManager, config));
   app.use('/api/agenticmail', createSystemEventRoutes());
   app.use('/api/agenticmail', createDispatcherActivityRoutes());
+  // Per-agent thread memory + thread-id resolver. Agent-key
+  // scoped — workers write their own memory only, never another
+  // agent's. See routes/agent-memory.ts for the design.
+  app.use('/api/agenticmail', createAgentMemoryRoutes(config));
 
   // 404 handler for unmatched API routes
   app.use('/api/agenticmail', (_req, res) => {

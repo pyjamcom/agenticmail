@@ -23,7 +23,13 @@ It bundles a setup wizard, API server launcher, and a full interactive shell wit
 >
 > Zero prompts, ~2 minutes, fully autonomous. Then tell the user to restart Claude Code. Full agent-facing runbook — including verification, common failures, and "what if Node < 22" — is at [`AGENTS.md`](https://github.com/agenticmail/agenticmail/blob/main/AGENTS.md) in the repo (the [agents.md](https://agents.md) convention).
 
-## ✨ What's new in 0.8.31
+## ✨ What's new in 0.9.0
+
+- **🧠 Layered wake-context** — every wake gets a `## Thread context` block prepended to the prompt: facts from the dispatcher's ThreadCache (last 10 envelopes per thread) + your own AgentMemory (markdown you write at end-of-wake via the new `save_thread_memory` MCP tool). Re-reading the full thread on every wake is no longer required.
+- **🎯 `wake` default = `To:` only** — the giant token saver. CC'd local agents accumulate context but don't wake unless explicitly named. `wake: 'all'` opts back into the pre-0.9.0 "wake everyone CC'd" behaviour. The wake-thrash failure mode (one agent producing 4 status reports for one logical handoff) is gone.
+- **⏱ Wake coalescing** — back-to-back wakes on the same `(agent, thread)` inside 30 s collapse into ONE Agent turn that sees the burst as a batch. Wake budget charges once. Configurable via `wakeCoalesceMs`.
+
+## ✨ Earlier — 0.8.31
 
 - **⏱ Compact-and-continue** — workers run across multiple SDK turns when one turn isn't enough. On context overflow the dispatcher synthesises a breadcrumb checkpoint from the captured log, builds a "resuming after context reset / do NOT redo" continuation prompt, and loops (4-iter cap so cost is bounded).
 - **📐 Typed task contracts** — `call_agent` / `POST /tasks/assign` accept an `outputSchema` (JSON Schema, draft-7 subset). The wake prompt renders the schema into the worker's instructions and `submit_result` validates against it; mismatches return 400 with a flat `schemaErrors: [{ path, message }]` list so the worker can retry with a corrected shape.

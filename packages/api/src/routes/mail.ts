@@ -80,7 +80,7 @@ function getSender(authUser: string, fromEmail: string, password: string, config
   return sender;
 }
 
-async function getReceiver(authUser: string, password: string, config: AgenticMailConfig): Promise<MailReceiver> {
+export async function getReceiver(authUser: string, password: string, config: AgenticMailConfig): Promise<MailReceiver> {
   if (draining) throw new Error('Server is shutting down');
 
   // Check cache for usable connection
@@ -290,12 +290,54 @@ function normalizeMessageId(id: string | undefined): string {
  * Exported so the templates route and the pending-approve route can
  * apply the same normalisation as POST /mail/send.
  */
+/**
+ * Sentinel `wake` value the sender can pass to opt back into the
+ * pre-0.9.0 behaviour ("wake every CC'd recipient"). Useful for
+ * notification-style broadcasts where every recipient really
+ * should get a Claude turn (rare).
+ */
+export const WAKE_ALL_SENTINEL = '__wake_all__';
+
 export function normalizeWakeList(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
+  if (value === 'all' || value === WAKE_ALL_SENTINEL) return undefined; // opt-out: no allowlist filtering
   const strip = (s: string) => s.trim().replace(/@localhost$/i, '').toLowerCase();
   if (Array.isArray(value)) return value.map(v => strip(String(v))).filter(Boolean);
   if (typeof value === 'string') return value.split(',').map(strip).filter(Boolean);
   return undefined;
+}
+
+/**
+ * Default wake list derived from the `to` field — local
+ * @localhost recipients only. CC'd local agents do NOT
+ * appear in the default wake list, mirroring the email
+ * convention that To is for action and CC is for awareness.
+ *
+ * Behaviour:
+ *   - sender passes explicit `wake: [...]` → use that
+ *   - sender passes `wake: 'all'`           → no allowlist (every CC wakes)
+ *   - sender omits `wake` entirely          → derive from To (this fn)
+ *
+ * Returns undefined when `to` doesn't contain any local
+ * recipients; the caller treats that as "no allowlist"
+ * (the wake decision falls through to the default-from-
+ * scratch path, which for external `to` addresses means
+ * no local wakes anyway).
+ */
+export function deriveDefaultWakeList(toField: string | string[] | undefined): string[] | undefined {
+  if (!toField) return undefined;
+  const arr = Array.isArray(toField) ? toField : String(toField).split(',');
+  const localNames: string[] = [];
+  for (const raw of arr) {
+    const addr = String(raw).trim().toLowerCase();
+    if (!addr.endsWith('@localhost')) continue;
+    // Strip display name if present: "Foo <foo@localhost>" → "foo"
+    const m = addr.match(/<([^>]+)>/);
+    const bare = m ? m[1].trim() : addr;
+    const name = bare.replace(/@localhost$/i, '');
+    if (name) localNames.push(name);
+  }
+  return localNames.length > 0 ? localNames : undefined;
 }
 
 /**
@@ -499,7 +541,12 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
           // otherwise an outbound-guard-blocked mail loses its wake list
           // when the owner later approves it, and every CC'd recipient
           // gets a Claude turn even though the sender wanted just one.
-          const wakeListForPersist = normalizeWakeList(wake);
+          // Same 0.9.0 default-from-To derivation as the unguarded
+           // send path. When the sender omitted `wake`, persist the
+           // implicit To-only allowlist so an approved outbound
+           // matches what the unguarded path would have sent.
+          const explicitWakeForPersist = normalizeWakeList(wake);
+          const wakeListForPersist = wake === undefined ? deriveDefaultWakeList(to) : explicitWakeForPersist;
           const mailOptions: Record<string, unknown> = {
             to, subject, text, html, cc, bcc, replyTo, inReplyTo, references, attachments, fromName,
             ...(wakeListForPersist !== undefined ? { wakeList: wakeListForPersist } : {}),
@@ -589,7 +636,17 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
 
       // Normalise the wake list and build the outgoing header in one
       // place — every send path uses the same primitives.
-      const wakeList = normalizeWakeList(wake);
+      //
+      // 0.9.0 default: if the sender omitted `wake`, derive an
+      // implicit allowlist from local `To:` recipients only. CC'd
+      // local agents receive the mail in their inbox but do NOT
+      // get a Claude wake unless the sender explicitly names them.
+      // This matches the email convention "To is for action; CC is
+      // for awareness" and stops the wake-thrash failure mode on
+      // multi-CC threads. Sender can opt back to "wake everyone"
+      // with `wake: 'all'`.
+      const explicitWake = normalizeWakeList(wake);
+      const wakeList = wake === undefined ? deriveDefaultWakeList(to) : explicitWake;
       const customHeaders = wakeHeaders(wakeList);
 
       const mailOpts = {

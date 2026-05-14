@@ -8,7 +8,12 @@ The MCP (Model Context Protocol) server for [AgenticMail](https://github.com/age
 
 When connected, your AI agent can send emails and texts, check inboxes, reply to messages, receive verification codes, manage contacts, schedule emails, assign tasks to other agents, and more — all through natural language. The server provides 62 tools that cover every email, SMS, and agent management operation.
 
-## ✨ What's new in 0.7.9
+## ✨ What's new in 0.9.0
+
+- **🧠 `get_thread_id` + `save_thread_memory`** — two new tools in the `multi_agent_extras` tier. Workers call `get_thread_id({uid})` once after reading a new message, then `save_thread_memory({threadId, summary, commitments?, openQuestions?, lastAction?, lastUid?})` at end-of-wake. The dispatcher reads the memory back into the next wake's prompt automatically. Pairs with the dispatcher-side ThreadCache to flatten wake cost — agents no longer have to re-read 10 prior messages every time.
+- **🎯 `send_email` / `reply_email` / `forward_email` / `template_send` docs updated** for the new `wake` defaults. CC'd local agents no longer wake by default; `wake: 'all'` opts back into the pre-0.9.0 behaviour.
+
+## ✨ Earlier — 0.7.9
 
 - **📐 `call_agent` accepts `outputSchema`** — pass a JSON Schema (draft-7 subset) describing the deliverable shape and the API validates `submit_result` against it; mismatches come back as validator errors so the worker can retry with a correct shape instead of returning free-form prose. The schema is rendered into the worker's wake prompt up-front. Example:
   ```js

@@ -95,3 +95,14 @@ export { debug, debugWarn } from './debug.js';
 
 // Setup & Dependencies
 export { SetupManager, DependencyChecker, DependencyInstaller, ServiceManager, type ServiceStatus, type DependencyStatus, type InstallProgress, type SetupConfig, type SetupResult } from './setup/index.js';
+
+// Layered wake-context system (thread cache + agent memory).
+// See packages/core/src/threading/* for the design.
+export {
+  threadIdFor, normalizeSubject, normalizeAddress,
+  ThreadCache, AgentMemoryStore,
+} from './threading/index.js';
+export type {
+  ThreadIdInput, ThreadCacheEntry, CachedMessage, ThreadCacheOptions,
+  AgentMemoryFields, AgentMemoryRead, AgentMemoryOptions,
+} from './threading/index.js';

@@ -8,7 +8,14 @@ The API server for [AgenticMail](https://github.com/agenticmail/agenticmail) —
 
 This package runs a web server that handles everything: sending email and SMS, reading inboxes, managing agents, phone number access, real-time notifications, inter-agent messaging, spam filtering, outbound security scanning, and gateway configuration. Every feature in AgenticMail is accessible through this API.
 
-## ✨ What's new in 0.7.16
+## ✨ What's new in 0.9.0
+
+- **🧠 Agent-thread memory + thread-id resolver endpoints.** Agents persist their own per-thread judgment so the dispatcher can pre-load it into the next wake's prompt:
+  - `GET / POST / DELETE /agents/me/memory/threads/:t` — agent-key scoped; each agent only ever touches its own memory file.
+  - `GET /agents/me/thread-id?uid=42&folder=INBOX` — resolves the stable subject-only thread id for a message UID, looking up the canonical root via the dispatcher's ThreadCache when available.
+- **🎯 `wake` default flipped to "To: only".** `POST /mail/send`, `POST /drafts/:id/send`, `POST /templates/:id/send`, and the pending-outbound persistence path all derive the implicit allowlist from local recipients on the `To:` field when `wake` is omitted. CC'd local agents receive the mail without waking. New helper `deriveDefaultWakeList(to)` exported from `routes/mail.ts`. Opt back into the old behaviour with `wake: 'all'`.
+
+## ✨ Earlier — 0.7.16
 
 - **📐 Typed task contracts** — `POST /tasks/assign` and the long-poll `POST /tasks/rpc` accept an optional `outputSchema` field (JSON Schema, draft-7 subset). The schema is persisted on the task row via migration `014_task_output_schema.sql` and is rendered into the worker's wake prompt. `POST /tasks/:id/result` validates against the schema before accepting; mismatches return **400** with a flat `schemaErrors: [{ path, message }]` list. Validator lives at `src/lib/schema-validator.ts` (hand-rolled, no `ajv` dep) and supports `type`, `required`, `properties`, `items`, `enum`, `additionalProperties: false`, `minLength`/`maxLength`, `minimum`/`maximum`. Tasks without a schema keep the v0.8.x behaviour — fully back-compat.
 - **⭐ Star endpoint** — `POST /mail/messages/:uid/star` with `{ starred: boolean, folder?: string }`. Maps to IMAP's `\Flagged` flag — same on-disk bit Gmail's star uses.

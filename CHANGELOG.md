@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-05-14
+
+The wake-context release. Three substantial changes that take a real bite out of multi-agent thread cost:
+
+### Added — Layered wake-context system (thread cache + per-agent memory)
+
+Every wake used to re-read the entire thread from scratch via `read_email + search_emails`. On a 12-message thread that's ~12 KB of token spend just to rehydrate, scaling linearly with thread length and wake count. Two new layers fix it:
+
+**Layer 1 — ThreadCache** (`@agenticmail/core`). Dispatcher-owned ring buffer per thread. Holds the last 10 message envelopes + ~240-char preview each. Built passively on every SSE new-mail event (even when no agent wakes — selective-wake skips, circuit-breaker mutes, `[FINAL]` markers, none of them prevent the cache from being populated). Shared across all CC'd agents on the thread. LRU-bounded at 5000 threads on disk (~25 MB).
+
+**Layer 2 — AgentMemoryStore** (`@agenticmail/core`). Per-`(agent, thread)` markdown file the AGENT writes at end-of-wake. Captures judgment: what THIS agent committed to, open questions, last action. The cache stores facts; memory stores judgment. Per-agent (your memory is invisible to other agents on the same thread).
+
+On every wake, the dispatcher reads both layers and prepends them as a `## Thread context` block to the wake prompt. Agents see facts + their own prior decisions + the new event, and don't have to `read_email` prior history. Token cost goes from linear-in-thread-length to roughly flat.
+
+New MCP tools:
+
+- **`get_thread_id({uid, folder?})`** — resolve the stable thread id for a UID. Pass to `save_thread_memory`.
+- **`save_thread_memory({threadId, summary, commitments?, openQuestions?, lastAction?, lastUid?})`** — persist this agent's narrative. Wake prompt now instructs agents to call this at end-of-turn so the loop is self-perpetuating.
+
+New API surface (agent-key scoped):
+
+- `GET /agents/me/memory/threads/:t` — read own memory
+- `POST /agents/me/memory/threads/:t` — write own memory
+- `DELETE /agents/me/memory/threads/:t` — clear (also fired by the dispatcher on `[FINAL]` markers)
+- `GET /agents/me/thread-id?uid=42&folder=INBOX` — resolve stable thread id
+
+Disk layout (no schema migrations — files only):
+
+```
+~/.agenticmail/thread-cache/<t>.json
+~/.agenticmail/agent-memory/<agentId>/<t>.md
+```
+
+23 new unit tests for thread-id normalization, ThreadCache push/read/dedup/cap/delete, AgentMemoryStore round-trip + per-agent isolation. Dispatcher integration test verifies the wake prompt picks up both blocks on the second wake of the same thread.
+
+### Changed — `wake` default is now "To: only" (not "everyone CC'd")
+
+Long-standing feedback (filed as `agenticmail-feedback-wake-thrash.md`): designers fire 2–4 quick replies on a thread, every CC'd agent wakes once per reply, the same agent produces 4 near-identical status reports. Logged as ~50 wasted Claude turns on a single 9-slice build.
+
+Root cause: the API's `/mail/send` defaulted to "wake every local @localhost recipient" when sender omitted `wake`. CC'd local agents (typically passive observers) were getting Claude turns on every message.
+
+Fix: when sender omits `wake`, derive an implicit allowlist from local recipients on the **`To:` field only**. CC'd local agents receive the mail in their inbox (it shows up in `list_inbox`, the cache, etc.) but **don't get a Claude turn**. Mirrors the email convention "To is for action, CC is for awareness."
+
+Backwards-compat opt-outs:
+
+- `wake: ['alice', 'bob']` — explicit list, wakes exactly those (overrides default-from-To).
+- `wake: 'all'` — opt back into pre-0.9.0 "wake everyone on To + CC" behaviour.
+- `wake: []` — deliver silently, no wakes.
+- Omit `wake` entirely — new default, To-only.
+
+Applies to every send path: `POST /mail/send`, `/drafts/:id/send`, `/templates/:id/send`, and the pending-outbound approval flow. MCP `send_email` / `reply_email` / `forward_email` / `template_send` docs updated.
+
+### Added — Wake coalescing (30s debounce per agent + thread)
+
+Even with the new wake default, an explicit `wake: ['alice']` on three back-to-back replies still wakes Alice three times. The dispatcher now debounces: within a 30 s window for the same `(agent, thread)`, multiple wake events collapse into ONE Claude turn that sees the union of new messages.
+
+Implementation in `@agenticmail/claudecode`:
+
+- New `wakeCoalesce` map keyed by `${agentId}::${threadId}`. First event creates the entry + starts the debounce timer; each subsequent event APPENDS to the event list and EXTENDS the timer (debounce, not throttle).
+- Safety valve: after 5× the debounce window from the first event, the timer force-fires even if new events keep arriving (prevents indefinite extension on a continuous reply stream).
+- Wake-budget charges ONCE for the coalesced batch — a burst of 4 replies is one logical handoff.
+- The wake prompt gets a `newMailPromptForBatch` variant when N > 1: "You have N new messages on this thread (coalesced — they arrived in a burst, you are seeing them in one turn)" + a list of `(UID, sender, subject)` for each. Agent reads the latest, decides once, replies once.
+- `wakeCoalesceMs` is configurable (default 30 000 ms); set to 0 to disable coalescing entirely (one Claude turn per event, pre-0.9.0 behaviour).
+
+Test coverage: `coalesces a burst of wakes on the same thread into one Claude turn` uses fake timers to assert three burst events fire exactly one spawn with all UIDs visible in the batch prompt.
+
+### Migration / breaking changes
+
+- **`wake` default changed.** Existing senders that relied on "every CC'd agent wakes" must pass `wake: 'all'` to keep that behaviour. Most multi-agent flows want the new default — re-test your wake patterns before upgrading production.
+- **Worker prompts now include a `## Thread context` block on subsequent wakes.** Personas that pre-instruct agents to "read every prior message" should be updated to "use the thread-context block; only `read_email` if you need a specific body."
+- **Agents are instructed to call `save_thread_memory` at end-of-wake.** Custom personas should not contradict this — let the wake-prompt postscript do its job.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/core` | 0.7.6 | **0.9.0** |
+| `@agenticmail/api` | 0.7.21 | **0.9.0** |
+| `@agenticmail/mcp` | 0.7.9 | **0.9.0** |
+| `@agenticmail/claudecode` | 0.1.17 | **0.2.0** |
+| `@agenticmail/cli` | 0.8.36 | **0.9.0** |
+
+Plugin manifest mirrored to 0.9.0. openclaw unchanged.
+
+### Tests
+
+- 111 claudecode tests pass (was 109, +2: thread-context injection + wake coalescing).
+- 23 new core tests for the threading libs.
+- All 339+ existing core tests still pass.
+
 ## [0.8.36] - 2026-05-14
 
 ### Added — Archive folder, archive button, bulk-action toolbar

@@ -10,7 +10,16 @@ This is the foundation layer that everything else builds on. If the API server, 
 
 Every other AgenticMail package depends on this one.
 
-## ✨ What's new in 0.7.4
+## ✨ What's new in 0.9.0
+
+- **🧠 New `threading/` module.** Three exported primitives for the dispatcher's wake-context layer:
+  - **`threadIdFor({subject})`** — stable, subject-only thread id (replies collapse into the same thread regardless of sender). SHA-256 base64url truncated to 16 chars. Strips chained `Re:`/`Fwd:` prefixes + `[FINAL]/[DONE]/[CLOSED]/[WRAP]` markers + collapses whitespace + lower-cases.
+  - **`ThreadCache`** — per-thread ring buffer of the last K message envelopes + previews on disk at `~/.agenticmail/thread-cache/<t>.json`. Configurable K, LRU-bounded directory eviction (default cap 5000 threads ≈ 25 MB). Atomic writes via rename.
+  - **`AgentMemoryStore`** — per-`(agent, thread)` markdown files at `~/.agenticmail/agent-memory/<agentId>/<t>.md`. Agent writes structured fields (summary, commitments, openQuestions, lastAction, lastUid) at end-of-wake; on the next wake the dispatcher reads the raw markdown back into the prompt. Per-agent isolation — one agent's memory is invisible to another sharing the same thread.
+
+23 new unit tests covering normalization, hash stability, push/dedup/cap/delete, write/read round-trip, and per-agent isolation.
+
+## ✨ Earlier — 0.7.4
 
 - **⭐ `MailReceiver.setStarred(uid, starred, mailbox?)`** — toggles IMAP's `\Flagged` flag via `messageFlagsAdd` / `messageFlagsRemove`. Same on-disk bit Gmail's star uses. Underpins the new `POST /mail/messages/:uid/star` route in `@agenticmail/api`.
 - **📐 Task `output_schema` column** — migration `014_task_output_schema.sql` adds an optional `output_schema TEXT` column to `agent_tasks`. Stores the assigner-supplied JSON Schema for typed task contracts. `NULL` means "no schema, accept anything", fully back-compat with the v0.8.x task model.

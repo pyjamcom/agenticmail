@@ -33,7 +33,17 @@
 
 ---
 
-### ✨ What's new in 0.8.31
+### ✨ What's new in 0.9.0
+
+The wake-context release. Multi-agent thread cost goes from linear-in-thread-length to roughly flat.
+
+- **Layered wake-context system.** Every wake used to re-read the entire thread from scratch (12 messages × ~1 KB = 12 KB of token spend just to rehydrate, before any reasoning). Now the dispatcher prepends two blocks to every wake prompt: **Layer 1 — ThreadCache** (envelopes + previews of the last 10 messages, shared across CC'd agents) and **Layer 2 — AgentMemory** (a markdown file each agent writes at end-of-wake describing its own commitments and last actions). Agents read the new event + these two blocks and decide; they don't `read_email` prior history. New MCP tools `save_thread_memory` and `get_thread_id`.
+- **`wake` default flipped from "everyone CC'd" → "To: only".** Mirrors the email convention: To is for action, CC is for awareness. CC'd local agents still receive the mail in their inbox but don't get a Claude turn unless explicitly named in `wake`. Opt back into the old behaviour with `wake: 'all'`.
+- **Wake coalescing.** Within 30 s for the same `(agent, thread)`, multiple wake events collapse into ONE Claude turn. A burst of 4 quick replies becomes one Claude wake that sees all four in a `coalesced` batch prompt. Wake-budget charges once. Configurable via `wakeCoalesceMs`.
+
+Together these eliminate the "wake-thrash" failure mode where an agent fired 4 near-identical status reports because a designer sent 4 replies in 2 minutes.
+
+### ✨ Earlier — 0.8.31
 
 - **Compact-and-continue** — workers can now run across multiple SDK turns. On a context-overflow error the dispatcher synthesises a breadcrumb checkpoint from the captured log, builds a "resuming after context reset" continuation prompt, and loops (capped at 4 iterations).
 - **Typed task contracts** — `call_agent` / `POST /tasks/assign` accept an `outputSchema` (JSON Schema, draft-7 subset). `submit_result` validates against it; mismatches return 400 with the validator errors so the worker can retry with a corrected shape.

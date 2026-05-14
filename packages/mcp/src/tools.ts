@@ -179,7 +179,7 @@ async function apiRequest<T extends ApiResponse = ApiJsonObject>(method: string,
 export const toolDefinitions = [
   {
     name: 'send_email',
-    description: 'Send an email from the agent\'s mailbox. Supports multiple recipients on To and CC (comma-separated). This is the PRIMARY primitive for multi-agent coordination: kick off a thread with all participants on CC, and every local recipient is woken automatically — UNLESS you set `wake` to limit the wake-up to specific agents. Use `wake` aggressively on large threads: 15 agents on CC × every reply burns 15 Claude turns per round if every recipient wakes. Naming the single next actor cuts that to one. External emails are scanned for sensitive content; HIGH severity detections are BLOCKED for owner approval. You CANNOT bypass the outbound guard.',
+    description: 'Send an email from the agent\'s mailbox. Supports multiple recipients on To and CC (comma-separated). The PRIMARY primitive for multi-agent coordination. WAKE SEMANTICS (changed in 0.9.0): by default only local @localhost recipients on `To:` get a Claude wake; CC\'d local agents receive the mail but don\'t wake — they see it on their next natural wake (replies addressed to them, or a future inbox check). This mirrors the email convention "To is for action, CC is for awareness" and prevents wake-thrash on multi-CC threads. To override: pass `wake: ["alice","bob"]` to wake specific agents regardless of To/CC position, or `wake: "all"` to opt back into the pre-0.9.0 "wake every CC\'d recipient" behaviour. Pass `wake: []` to deliver silently with no wakes at all. External emails are scanned for sensitive content; HIGH severity detections are BLOCKED for owner approval.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -187,11 +187,9 @@ export const toolDefinitions = [
         subject: { type: 'string', description: 'Email subject line' },
         text: { type: 'string', description: 'Plain text body' },
         html: { type: 'string', description: 'HTML body (optional)' },
-        cc: { type: 'string', description: 'CC recipients — the team. Comma-separated, e.g. "vesper@localhost, orion@localhost". Every local @localhost recipient is auto-woken when this email lands UNLESS you also pass `wake` to restrict.' },
+        cc: { type: 'string', description: 'CC recipients — the team. Comma-separated, e.g. "vesper@localhost, orion@localhost". CC\'d local recipients receive the mail but DO NOT wake by default (0.9.0+). Put the actor on `to`; CC the rest for awareness.' },
         wake: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Optional. Names (or @localhost addresses) of the agents the dispatcher should give a Claude turn to when this mail lands. CC\'d agents NOT in this list still receive the email but get no Claude turn — they will see it the next time someone explicitly wakes them or they check their inbox. Use this to scope cost on large threads: send to 15 agents but wake only the 1 or 2 who need to act next. Pass an empty array `[]` for "deliver silently — wake nobody". Omit entirely to keep the default "wake everyone CC\'d" behaviour.',
+          description: 'Optional wake-control. Accepts: (1) an array of agent names — `["alice","bob"]` — to wake exactly those agents (overrides default To-only behaviour); (2) the string `"all"` to wake every local recipient on To and CC (pre-0.9.0 behaviour); (3) an empty array `[]` to deliver silently with no wakes; (4) omit entirely to use the default — wake local recipients on `To:` only. CC\'d recipients NOT in the wake list still receive the mail in their inbox and will see it when they next wake naturally.',
         },
         inReplyTo: { type: 'string', description: 'Message-ID to reply to (optional)' },
         references: {
@@ -820,6 +818,34 @@ export const toolDefinitions = [
         persistent: { type: 'boolean', description: 'Set persistent flag (for set_persistent)' },
       },
       required: ['action'],
+    },
+  },
+  {
+    name: 'save_thread_memory',
+    description: 'Persist a one-paragraph memory of where THIS agent stands on the given thread. Called at the end of every wake — Claude Code reads it back into the next wake\'s prompt so the agent doesn\'t re-derive context from scratch by re-reading 10 prior messages. Pass `threadId` from `get_thread_id`. Fields are a snapshot: summary (where the thread stands), commitments (what you committed to), openQuestions (what you are blocked on), lastAction (what you just did), lastUid (newest UID you have digested). The file overwrites; you do not need to merge with the previous version — the dispatcher reads only the most recent write.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        threadId: { type: 'string', description: 'Stable thread id from get_thread_id. Required.' },
+        summary: { type: 'string', description: 'One-paragraph narrative of where the thread stands.' },
+        commitments: { type: 'array', items: { type: 'string' }, description: 'Things you have committed to doing on this thread.' },
+        openQuestions: { type: 'array', items: { type: 'string' }, description: 'Things you are waiting on / open questions.' },
+        lastAction: { type: 'string', description: 'The last action you took on the thread (e.g. "replied UID 41 asking for raw counts").' },
+        lastUid: { type: 'number', description: 'Newest message UID you have digested into this memory.' },
+      },
+      required: ['threadId'],
+    },
+  },
+  {
+    name: 'get_thread_id',
+    description: 'Resolve the stable thread id for a message UID. Use this BEFORE calling save_thread_memory or when you want to inspect the cache for a thread. Pass the UID of any message on the thread (root or reply) — the API normalises the subject, resolves the canonical root sender, and returns the same id every time. `folder` defaults to INBOX.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        uid: { type: 'number', description: 'Message UID.' },
+        folder: { type: 'string', description: 'IMAP folder where the UID lives. Defaults to INBOX.' },
+      },
+      required: ['uid'],
     },
   },
   {
@@ -2300,6 +2326,26 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
         return `Agent ${args.agentId} persistent flag set to ${args.persistent !== false}`;
       }
       throw new Error('Invalid action. Use: list_inactive, cleanup, or set_persistent');
+    }
+
+    case 'save_thread_memory': {
+      if (!args.threadId) throw new Error('threadId is required (call get_thread_id first)');
+      const body: Record<string, unknown> = { };
+      if (typeof args.summary === 'string') body.summary = args.summary;
+      if (Array.isArray(args.commitments)) body.commitments = args.commitments;
+      if (Array.isArray(args.openQuestions)) body.openQuestions = args.openQuestions;
+      if (typeof args.lastAction === 'string') body.lastAction = args.lastAction;
+      if (typeof args.lastUid === 'number') body.lastUid = args.lastUid;
+      await apiRequest('POST', `/agents/me/memory/threads/${encodeURIComponent(String(args.threadId))}`, body);
+      return `Memory saved for thread ${args.threadId}.`;
+    }
+
+    case 'get_thread_id': {
+      if (typeof args.uid !== 'number' || args.uid < 1) throw new Error('uid (number, ≥1) is required');
+      const folder = typeof args.folder === 'string' ? args.folder : 'INBOX';
+      const r = await apiRequest('GET', `/agents/me/thread-id?uid=${args.uid}&folder=${encodeURIComponent(folder)}`);
+      if (!r?.threadId) throw new Error('Failed to resolve thread id');
+      return `Thread ${r.threadId} (subject "${r.subject}", root from ${r.rootFromAddr}).`;
     }
 
     case 'tail_worker': {

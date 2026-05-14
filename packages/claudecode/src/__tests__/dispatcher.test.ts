@@ -14,6 +14,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Dispatcher, type QueryFn } from '../dispatcher.js';
 import type { AgenticMailAccount } from '../types.js';
 
@@ -47,6 +50,11 @@ function makeMockSdk() {
 
 function makeDispatcher(opts: Partial<Parameters<typeof Dispatcher.prototype.handleEvent>[0]> = {}, extra?: Record<string, unknown>) {
   const sdk = makeMockSdk();
+  // Each Dispatcher instance gets its own tmpdir for cache + memory
+  // so tests can't bleed into the real ~/.agenticmail/ paths and
+  // can't bleed into each other.
+  const threadCacheDir = mkdtempSync(join(tmpdir(), 'am-disp-cache-'));
+  const agentMemoryDir = mkdtempSync(join(tmpdir(), 'am-disp-mem-'));
   const d = new Dispatcher({
     masterKey: 'mk_test',
     apiUrl: 'http://127.0.0.1:3200',
@@ -54,6 +62,13 @@ function makeDispatcher(opts: Partial<Parameters<typeof Dispatcher.prototype.han
     querySdk: sdk.query,
     fetchImpl: vi.fn() as unknown as typeof fetch,
     log: () => {}, // silence
+    threadCacheDir,
+    agentMemoryDir,
+    // Default-off coalescing for the existing test suite — every
+    // pre-0.9.0 test asserts "one event = one spawn". Tests that
+    // need to exercise coalescing pass `wakeCoalesceMs: 30000`
+    // (or use fake timers) explicitly.
+    wakeCoalesceMs: 0,
     ...extra,
   });
   return { d, sdk };
@@ -134,6 +149,7 @@ describe('Dispatcher.handleEvent — new-mail routing', () => {
       querySdk: query,
       fetchImpl: vi.fn() as unknown as typeof fetch,
       log: () => {},
+      wakeCoalesceMs: 0,  // synchronous spawn for the assertion below
     });
     await d.handleEvent(FOLA, { type: 'new', uid: 7, from: 'a', subject: 'big task' });
     expect(calls).toHaveLength(2);
@@ -170,6 +186,52 @@ describe('Dispatcher.handleEvent — wake-budget circuit breaker', () => {
     }
     // Exactly 3 spawns — the 4th through 10th are budget-rejected.
     expect(sdk.calls).toHaveLength(3);
+  });
+
+  it('coalesces a burst of wakes on the same thread into one Claude turn', async () => {
+    vi.useFakeTimers();
+    try {
+      // 200ms debounce window so we can advance through it without
+      // waiting in wall-clock time.
+      const { d, sdk } = makeDispatcher({}, { wakeCoalesceMs: 200 });
+      // Three replies on the same thread within ~50 ms (burst).
+      await d.handleEvent(FOLA, { type: 'new', uid: 50, from: 'orion', subject: 'Audit plan' });
+      vi.advanceTimersByTime(20);
+      await d.handleEvent(FOLA, { type: 'new', uid: 51, from: 'orion', subject: 'Re: Audit plan' });
+      vi.advanceTimersByTime(20);
+      await d.handleEvent(FOLA, { type: 'new', uid: 52, from: 'orion', subject: 'Re: Audit plan' });
+      // Nothing has fired yet — still inside the debounce window.
+      expect(sdk.calls).toHaveLength(0);
+      // Crossing the window triggers exactly one coalesced spawn.
+      await vi.advanceTimersByTimeAsync(250);
+      expect(sdk.calls).toHaveLength(1);
+      // The wake prompt should reference all three UIDs (batch view).
+      expect(sdk.calls[0].prompt).toContain('UID 50');
+      expect(sdk.calls[0].prompt).toContain('UID 51');
+      expect(sdk.calls[0].prompt).toContain('UID 52');
+      expect(sdk.calls[0].prompt).toContain('coalesced');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('injects a "Thread context" block on the second wake of the same thread', async () => {
+    // First wake on a new thread → cache is empty, no context
+    // block prepended (clean prompt). Second wake → cache now
+    // has the first event in it, the wake prompt MUST include
+    // a "Thread context" section with the first message visible
+    // and the canonical end-of-turn save_thread_memory reminder.
+    const { d, sdk } = makeDispatcher();
+    await d.handleEvent(FOLA, { type: 'new', uid: 10, from: 'orion', subject: 'Audit plan' });
+    await d.handleEvent(FOLA, { type: 'new', uid: 11, from: 'orion', subject: 'Re: Audit plan' });
+    expect(sdk.calls).toHaveLength(2);
+    // First call has no thread-context block (cold thread).
+    expect(sdk.calls[0].prompt).not.toContain('## Thread context');
+    // Second call shows facts about the prior UID + the save-memory reminder.
+    expect(sdk.calls[1].prompt).toContain('## Thread context');
+    expect(sdk.calls[1].prompt).toContain('### Facts');
+    expect(sdk.calls[1].prompt).toContain('UID 10');
+    expect(sdk.calls[1].prompt).toContain('save_thread_memory');
   });
 
   it('treats Re: prefixes as the same thread (subject normalisation)', async () => {
@@ -559,6 +621,7 @@ describe('Dispatcher concurrency', () => {
       querySdk: slowQuery,
       maxConcurrentWorkers: 3,
       log: () => {},
+      wakeCoalesceMs: 0,  // synchronous spawn so the semaphore is observable
     });
     const events = Array.from({ length: 10 }, (_, i) =>
       d.handleEvent(FOLA, { type: 'new', uid: 1000 + i, from: 'x', subject: 'y' })

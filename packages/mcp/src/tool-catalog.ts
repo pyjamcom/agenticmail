@@ -70,6 +70,13 @@ export const TOOL_SETS = {
     // the running log of what it actually did — every tool call, every
     // result. Paired with check_activity so they ship in the same tier.
     'tail_worker',
+    // Wake-context memory tools. Agents call get_thread_id once when
+    // they read a message to find the stable thread id, then
+    // save_thread_memory at end-of-wake to persist their judgment.
+    // The dispatcher reads both back into the next wake's prompt so
+    // the agent doesn't re-read prior messages from scratch.
+    'get_thread_id',
+    'save_thread_memory',
     'check_tasks',
   ],
 

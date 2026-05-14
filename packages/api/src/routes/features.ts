@@ -8,7 +8,7 @@ import {
   type GatewayManager,
 } from '@agenticmail/core';
 import { requireAgent } from '../middleware/auth.js';
-import { getAgentPassword, normalizeWakeList, wakeHeaders, pushLocalRecipientWakes } from './mail.js';
+import { getAgentPassword, normalizeWakeList, wakeHeaders, pushLocalRecipientWakes, deriveDefaultWakeList } from './mail.js';
 
 /**
  * Parse a schedule time string. Supports:
@@ -309,7 +309,11 @@ export function createFeatureRoutes(
       // Drafts don't persist a wake list (the schema predates the
       // feature) so the caller can pass `wake` at send time on the
       // POST body. Same normalisation + header plumbing as elsewhere.
-      const wakeList = normalizeWakeList(req.body?.wake);
+      // 0.9.0 default: derive from To: when sender omits `wake`. See
+      // mail.ts:deriveDefaultWakeList for the rationale (CC is for
+      // awareness, not action; flipping this stops wake-thrash).
+      const explicitWake = normalizeWakeList(req.body?.wake);
+      const wakeList = req.body?.wake === undefined ? deriveDefaultWakeList(draft.to_addr) : explicitWake;
       const customHeaders = wakeHeaders(wakeList);
 
       // Materialise persisted attachments into the nodemailer
@@ -574,8 +578,9 @@ export function createFeatureRoutes(
 
       // Normalise wake the same way POST /mail/send does so template-
       // sent mail behaves identically to a direct send for dispatcher
-      // wake gating.
-      const wakeList = normalizeWakeList(wake);
+      // wake gating. 0.9.0: default-from-To applies here too.
+      const explicitWake = normalizeWakeList(wake);
+      const wakeList = wake === undefined ? deriveDefaultWakeList(to) : explicitWake;
       const customHeaders = wakeHeaders(wakeList);
 
       const vars: Record<string, string> = variables && typeof variables === 'object' ? variables : {};
