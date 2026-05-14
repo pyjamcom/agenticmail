@@ -83,7 +83,9 @@ async function bootstrap() {
     populateComposeFrom();
     subscribeToAllAgents();
     maybeRequestNotificationPermission();
-    if (!location.hash) location.hash = '#/inbox';
+    // Initial route: if the URL already has a hash (e.g. a refresh
+    // on /#/folder/sent), respect it; otherwise default to inbox.
+    if (!location.hash) location.hash = '#/folder/inbox';
     else route();
   } catch (err) {
     toast(`Failed to load agents: ${err.message}`, true);
@@ -100,24 +102,39 @@ async function selectAgent(agent) {
 }
 
 function onFolderSelect(folder) {
-  state.selectedFolder = folder;
-  renderSidebar(onFolderSelect);
-  location.hash = '#/inbox';   // any folder uses the list route
-  if (state.selectedAgent) loadList(state.selectedAgent, folder);
+  // URL drives state — set the hash and let the router do the work.
+  // This is what makes browser back / forward / shareable URLs work,
+  // and it stops the previous bug where every folder click stayed on
+  // #/inbox in the address bar.
+  location.hash = `#/folder/${folder}`;
   // On mobile (the only viewport where the sidebar is over-canvas),
   // close it after a folder pick so the user sees the list.
   document.getElementById('main')?.classList.remove('sidebar-open');
 }
 
 // ─── Hash router ─────────────────────────────────────────────────────
+// Routes:
+//   #/inbox            → inbox (back-compat shortcut for #/folder/inbox)
+//   #/folder/<id>      → folder list view (sent, drafts, starred, …)
+//   #/m/<uid>          → single-message detail
+//
+// Folder switches go through here too so the URL is the source of truth
+// for "what's on screen". If you bookmark or copy-paste a URL like
+// http://127.0.0.1:3829/#/folder/sent, opening it lands you on Sent.
 function route() {
   const hash = location.hash || '#/inbox';
   const msgMatch = hash.match(/^#\/m\/(\d+)$/);
   if (msgMatch) {
     openMessage(Number(msgMatch[1]));
-  } else if (state.selectedAgent) {
-    loadList(state.selectedAgent, state.selectedFolder);
+    return;
   }
+  const folderMatch = hash.match(/^#\/folder\/([a-z]+)$/);
+  const folder = folderMatch ? folderMatch[1] : 'inbox';
+  if (state.selectedFolder !== folder) {
+    state.selectedFolder = folder;
+    renderSidebar(onFolderSelect);
+  }
+  if (state.selectedAgent) loadList(state.selectedAgent, folder);
 }
 window.addEventListener('hashchange', route);
 

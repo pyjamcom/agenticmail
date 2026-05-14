@@ -27,24 +27,57 @@ function flagsHas(flags, name) {
   return false;
 }
 
-// Map sidebar folder ids to the actual IMAP folder names the API
-// expects on `/mail/folders/:folder`. `inbox` is special — the API
-// has a dedicated `/mail/inbox` endpoint with extra enrichment, so
-// we use that. Other folders go through the generic listing.
-//
-// Stalwart uses the standard IMAP names: INBOX, Sent, Drafts, Junk
-// Mail (a.k.a. "Spam"), Trash. We use the canonical IMAP capitalisation.
-const FOLDER_TO_IMAP = {
-  inbox:   { endpoint: '/mail/inbox' },
-  sent:    { endpoint: '/mail/folders/Sent' },
-  drafts:  { endpoint: '/mail/folders/Drafts' },
-  spam:    { endpoint: '/mail/folders/Junk%20Mail' },
-  trash:   { endpoint: '/mail/folders/Trash' },
-  all:     { endpoint: '/mail/folders/All%20Mail' },
-  // Starred is not a folder — it's the IMAP \Flagged flag, surfaced
-  // by client-side filtering over the inbox listing (Gmail-style).
-  starred: { endpoint: '/mail/inbox', clientFilter: 'flagged' },
+// Patterns we look for when matching a real IMAP folder name to one
+// of our sidebar folder ids. Different mail servers use different
+// names: Stalwart's defaults are "Sent Items", "Drafts", "Junk Mail",
+// "Trash"; Gmail uses "[Gmail]/Sent Mail"; Outlook uses "Sent Items"
+// + "Deleted Items"; macOS Mail uses "Sent Messages". Auto-discovery
+// makes the sidebar work on all of them.
+const FOLDER_MATCHERS = {
+  sent:    /^sent\b|sent items|sent mail|sent messages|\[gmail\]\/sent/i,
+  drafts:  /^drafts?\b|\[gmail\]\/drafts/i,
+  spam:    /^junk\b|junk mail|^spam\b|\[gmail\]\/spam/i,
+  trash:   /^trash\b|deleted items|deleted messages|\[gmail\]\/trash|\[gmail\]\/bin/i,
+  all:     /^all mail\b|\[gmail\]\/all/i,
 };
+
+/**
+ * Look up the real IMAP folder name for a sidebar id, using the
+ * per-agent folder cache populated by ensureFolderCache().
+ * Returns undefined if no match — callers should treat that as
+ * "folder doesn't exist on this server" and render an empty state.
+ */
+function imapNameFor(folderId) {
+  return state.folderNames?.[folderId];
+}
+
+/**
+ * Discover real IMAP folder names for the active agent and cache
+ * them in state. Called once on agent switch / first folder click.
+ * Falls back to canonical names if the discovery endpoint fails so
+ * the UI keeps working in degraded mode.
+ */
+export async function ensureFolderCache(agent) {
+  if (state.folderNames && Object.keys(state.folderNames).length > 0) return;
+  state.folderNames = { inbox: 'INBOX' };  // INBOX is universal
+  try {
+    const data = await apiGet('/mail/folders', { agentKey: agent.apiKey });
+    const folders = (data.folders ?? []).map(f =>
+      typeof f === 'string' ? f : (f.name ?? f.path ?? ''),
+    ).filter(Boolean);
+    for (const [id, pattern] of Object.entries(FOLDER_MATCHERS)) {
+      const match = folders.find(f => pattern.test(f));
+      if (match) state.folderNames[id] = match;
+    }
+  } catch {
+    // Discovery failed — fall back to the most common defaults so
+    // at least Inbox + Sent work for vanilla Stalwart.
+    state.folderNames.sent   = 'Sent Items';
+    state.folderNames.drafts = 'Drafts';
+    state.folderNames.spam   = 'Junk Mail';
+    state.folderNames.trash  = 'Trash';
+  }
+}
 
 export async function loadList(agent, folder) {
   const root = document.getElementById('content');
@@ -55,15 +88,30 @@ export async function loadList(agent, folder) {
     </div>
     <div class="list-rows" id="list-rows"><div class="empty">Loading…</div></div>
   `;
-  const route = FOLDER_TO_IMAP[folder] ?? FOLDER_TO_IMAP.inbox;
+  await ensureFolderCache(agent);
+
+  // Resolve the real IMAP folder. Starred reuses INBOX + a client-
+  // side flag filter (Gmail convention); other folders need a real
+  // mailbox name from the discovery cache.
+  const isStarred = folder === 'starred';
+  const imap = isStarred ? 'INBOX' : imapNameFor(folder);
+  if (!imap) {
+    document.getElementById('list-rows').innerHTML =
+      `<div class="empty"><div class="big">📭</div>No ${escapeHtml(folderTitle(folder))} folder on this server.</div>`;
+    return;
+  }
+
   try {
-    const sep = route.endpoint.includes('?') ? '&' : '?';
-    const data = await apiGet(`${route.endpoint}${sep}limit=50&offset=0`, { agentKey: agent.apiKey });
+    // `/mail/digest` returns envelopes WITH body preview in one call —
+    // exactly what the list row needs to render a 2-line preview.
+    // Previously we used `/mail/inbox` (no preview) and `/mail/
+    // folders/:folder` (no preview, wrong folder names), which left
+    // every row stuck on subject + sender alone.
+    const url = `/mail/digest?folder=${encodeURIComponent(imap)}&limit=50&offset=0&previewLength=240`;
+    const data = await apiGet(url, { agentKey: agent.apiKey });
     state.messages = data.messages ?? [];
     renderList();
   } catch (err) {
-    // Empty folder is a normal state; "no such folder" lands here
-    // too. Show a friendly empty message rather than a raw HTTP error.
     const msg = String(err.message ?? err);
     document.getElementById('list-rows').innerHTML = msg.includes('404')
       ? `<div class="empty">${escapeHtml(folderTitle(folder))} is empty.</div>`
@@ -119,6 +167,14 @@ export function renderList() {
     const subject = m.subject ?? '(no subject)';
     const date = formatDate(m.date);
     const starIcon = icon(starred ? 'starFilled' : 'starOutline', { size: 18 });
+    // Compact the preview body for the row: collapse whitespace,
+    // strip quoted-reply chevrons, cap at a comfortable two-line
+    // length. CSS handles the actual line clamp.
+    const cleanPreview = (m.preview ?? '')
+      .replace(/^>+ ?/gm, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 280);
     return `
       <div class="list-row ${unread ? 'unread' : ''}" data-uid="${m.uid}">
         <span class="star ${starred ? 'starred' : ''}" data-action="star">${starIcon}</span>
@@ -126,7 +182,7 @@ export function renderList() {
         <span class="from">${highlightTerm(fromName, hlTerm)}</span>
         <span class="subject-cell">
           <span class="subject">${highlightTerm(subject, hlTerm)}</span>
-          <span class="preview">${highlightTerm((m.preview ?? '').slice(0, 160), hlTerm)}</span>
+          <span class="preview">${highlightTerm(cleanPreview, hlTerm)}</span>
         </span>
         <span class="date">${escapeHtml(date)}</span>
       </div>

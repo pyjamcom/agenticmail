@@ -116,7 +116,19 @@ const CURSOR_PATH = join(AGENTICMAIL_DIR, 'claudecode-hook-cursor.json');
 const HOOK_VERSION = '1';
 
 /** HTTP timeout. The whole hook should finish in well under this. */
-const HTTP_TIMEOUT_MS = 2000;
+const HTTP_TIMEOUT_MS = 800;
+
+/**
+ * Absolute upper bound on hook wall time. Belt-and-suspenders for the
+ * per-fetch HTTP_TIMEOUT_MS — if the underlying socket or DNS path stalls
+ * past AbortSignal.timeout (we have seen this in practice), the hook
+ * still exits within this budget instead of blocking the harness on
+ * the 10-minute default hook timeout.
+ *
+ * NEVER raise this above ~1500ms: users feel >500ms latency on every
+ * prompt submit, and the whole point of the hook is to be invisible.
+ */
+const GLOBAL_TIMEOUT_MS = 1500;
 
 /**
  * Minimum gap between API checks when we're firing on `Stop`. Stop
@@ -140,14 +152,32 @@ async function readStdinJson(): Promise<{ hook_event_name?: string } | null> {
   if (process.stdin.isTTY) return null;
   return new Promise(resolve => {
     let buf = '';
-    process.stdin.setEncoding('utf-8');
-    process.stdin.on('data', chunk => { buf += chunk; });
-    process.stdin.on('end', () => {
-      if (!buf.trim()) { resolve(null); return; }
-      try { resolve(JSON.parse(buf)); } catch { resolve(null); }
+    let settled = false;
+    const onData = (chunk: string) => { buf += chunk; };
+    const onEnd = () => finish(() => {
+      if (!buf.trim()) return null;
+      try { return JSON.parse(buf); } catch { return null; }
     });
-    process.stdin.on('error', () => resolve(null));
-    setTimeout(() => resolve(null), 200).unref();
+    const onError = () => finish(() => null);
+    // Detach all listeners + unref stdin once we have an answer. Without
+    // this the listeners stay registered for the rest of the process
+    // lifetime and the readable side of stdin keeps the event loop alive,
+    // which is the root cause of "hook completed its work in 20ms but the
+    // node process sat alive for 10 minutes" observed in 0.8.x.
+    const finish = (compute: () => { hook_event_name?: string } | null) => {
+      if (settled) return;
+      settled = true;
+      process.stdin.removeListener('data', onData);
+      process.stdin.removeListener('end', onEnd);
+      process.stdin.removeListener('error', onError);
+      try { process.stdin.unref(); } catch { /* not all streams support unref */ }
+      resolve(compute());
+    };
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', onData);
+    process.stdin.on('end', onEnd);
+    process.stdin.on('error', onError);
+    setTimeout(() => finish(() => null), 200).unref();
   });
 }
 
@@ -250,25 +280,27 @@ async function main(): Promise<void> {
   //    Claude can `read_email` for full details on anything that
   //    looks actionable.
   newOnes.sort((a, b) => new Date(b.date!).getTime() - new Date(a.date!).getTime());
+  // Output is shown verbatim to the user when injected at Stop
+  // (Claude Code prints the block reason in the transcript) AND
+  // consumed silently by the model at UserPromptSubmit. So phrasing
+  // is audience-neutral: just facts + the canonical follow-up tool
+  // names. No "you should…" / "do not ping the user" — that read as
+  // instruction-leakage when the user saw it in the Stop output.
   const lines: string[] = [];
-  lines.push(`[AgenticMail bridge inbox] You have ${newOnes.length} new email${newOnes.length === 1 ? '' : 's'} since your last turn:`);
+  const count = newOnes.length;
+  lines.push(`🎀 New AgenticMail (bridge inbox) — ${count} message${count === 1 ? '' : 's'} since the last check:`);
+  lines.push('');
   for (const m of newOnes) {
     const fromAddr = m.from?.[0]?.address ?? 'unknown';
     const fromName = m.from?.[0]?.name ?? '';
     const fromDisp = fromName && fromName !== fromAddr ? `${fromName} <${fromAddr}>` : fromAddr;
     const subj = m.subject ?? '(no subject)';
-    const preview = (m.preview ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    const tail = preview ? ` — ${preview}${preview.length === 120 ? '…' : ''}` : '';
-    lines.push(`- UID ${m.uid} | from ${fromDisp} | "${subj}"${tail}`);
+    const preview = (m.preview ?? '').replace(/\s+/g, ' ').trim().slice(0, 180);
+    lines.push(`  · UID ${m.uid} — ${fromDisp} · ${subj}`);
+    if (preview) lines.push(`    > ${preview}${preview.length === 180 ? '…' : ''}`);
+    lines.push('');
   }
-  lines.push('');
-  lines.push(
-    'These are real replies from sub-agents (or mid-task questions). ' +
-    'If any of them are addressed to you (Claude Code, the host), surface them to the user ' +
-    'and act on whichever they direct you to. Use mcp__agenticmail__read_email for the full body, ' +
-    'mcp__agenticmail__reply_email (with replyAll: true) to respond on the thread. ' +
-    'You do NOT need to ping the user — just be aware these landed.',
-  );
+  lines.push('Full body: mcp__agenticmail__read_email. Reply: mcp__agenticmail__reply_email (replyAll: true).');
 
   // 7. Persist the cursor. Use the newest timestamp we saw so the
   //    next invocation only surfaces strictly-newer mail.
@@ -312,9 +344,25 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(() => {
-  // Hard requirement: NEVER block a user prompt because of a hook
-  // failure. Any uncaught error → silent exit, Claude Code proceeds
-  // without the AgenticMail context.
-  process.exit(0);
+// Hard requirement: NEVER block a user prompt because of a hook failure.
+//
+// The harness's default hook timeout is 10 minutes (TOOL_HOOK_EXECUTION_TIMEOUT_MS
+// in Claude Code's utils/hooks.ts). That is FAR too long to ever wait on a
+// best-effort notification hook. We enforce our own global ceiling here:
+// whichever resolves first (main or the timeout) wins, and the process
+// always exits explicitly so dangling stdin listeners / AbortSignal timers
+// can't keep node alive past the work we care about.
+//
+// Two failure modes this guards against, both observed in practice:
+//   1. AgenticMail's API server (port 3829) accepts the TCP connection
+//      but never responds — AbortSignal.timeout SHOULD fire, but on some
+//      Node + libuv combinations the fetch sits in a syscall longer than
+//      its own deadline.
+//   2. main() resolves but the readStdinJson() promise left 'data'/'end'
+//      listeners on process.stdin keeping the event loop alive.
+const globalTimeout = new Promise<void>(resolve => {
+  setTimeout(() => resolve(), GLOBAL_TIMEOUT_MS).unref();
 });
+Promise.race([main(), globalTimeout])
+  .catch(() => {})
+  .finally(() => process.exit(0));

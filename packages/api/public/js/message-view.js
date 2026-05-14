@@ -23,7 +23,7 @@ export async function openMessage(uid) {
     </div>
     <div class="message-view"><div class="empty">Loading…</div></div>
   `;
-  document.getElementById('msg-back').addEventListener('click', () => { location.hash = '#/inbox'; });
+  document.getElementById('msg-back').addEventListener('click', () => { location.hash = `#/folder/${state.selectedFolder ?? 'inbox'}`; });
   document.getElementById('msg-reply').addEventListener('click', () => openReply(false));
   document.getElementById('msg-reply-all').addEventListener('click', () => openReply(true));
   document.getElementById('msg-unread').addEventListener('click', () => markUnread());
@@ -79,7 +79,7 @@ async function markUnread() {
   try {
     await apiPost(`/mail/messages/${state.currentMessage.uid}/unseen`, {}, { agentKey: state.selectedAgent.apiKey });
     toast('Marked unread.');
-    location.hash = '#/inbox';
+    location.hash = `#/folder/${state.selectedFolder ?? 'inbox'}`;
     await loadList(state.selectedAgent, state.selectedFolder);
   } catch (err) {
     toast(`Failed: ${err.message}`, true);

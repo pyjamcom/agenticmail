@@ -33,7 +33,14 @@
 
 ---
 
-### ✨ What's new in 0.8.25
+### ✨ What's new in 0.8.27
+
+- **Folder bug fix** — Sent / Drafts / Spam / Trash were returning empty in the web UI because hard-coded folder names didn't match Stalwart's actual IMAP names (e.g. `Sent Items` not `Sent`). Now auto-discovered per agent and matched against every common server convention (Stalwart, Gmail, Outlook, macOS Mail).
+- **Two-line preview** on every list row — web UI uses `/mail/digest?folder=…` everywhere instead of `/mail/inbox` (no preview) + `/mail/folders/:folder` (no preview).
+- **URL reflects current folder** — hash router now uses `#/folder/<id>` (sent, drafts, spam, …). Back/forward works, URLs are shareable, refresh stays put.
+- **Stop hook output rewritten** — terser, audience-neutral, includes body preview. Drops the instruction-leakage from 0.8.25/26.
+
+### ✨ Earlier — 0.8.25
 
 - **Workers can now run for hours** — dropped the 30-min hard timeout. Each worker writes a per-turn log at `~/.agenticmail/worker-logs/<id>.log`, posts heartbeats every 30 s, and runs in its own isolated cwd so parallel agents don't clobber each other's output. New MCP tool **`tail_worker`** to read a running worker's log live; `check_activity` now shows last tool used, turn count, and a `stale` flag (no auto-eviction).
 - **Autonomous-mode awareness** — the mail hook now registers on the **Stop** event too. Long headless Claude Code runs (no user prompts firing for hours) finally see teammate replies — the hook returns `decision: 'block'` at turn boundaries when the bridge inbox has new mail, forcing Claude to continue with the new-mail summary in context. Closes the follow-up that 0.8.23 filed.

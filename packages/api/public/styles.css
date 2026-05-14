@@ -389,14 +389,18 @@ a { color: var(--accent-strong); }
 }
 .list-row {
   display: grid;
-  grid-template-columns: 24px 24px 240px 1fr 100px;
-  align-items: center; gap: 0;
-  padding: 0 16px; height: 40px;
+  grid-template-columns: 24px 24px 200px 1fr 100px;
+  /* Top-align so a two-line preview can grow downward without
+     pushing the star + date out of alignment with the subject. */
+  align-items: flex-start; gap: 0;
+  padding: 10px 16px; min-height: 64px;
   cursor: pointer;
   border-bottom: 1px solid var(--bg-soft);
   position: relative;
 }
-@media (max-width: 1000px) { .list-row { grid-template-columns: 24px 24px 180px 1fr 80px; } }
+@media (max-width: 1000px) { .list-row { grid-template-columns: 24px 24px 160px 1fr 80px; } }
+/* Pull star + dot + date back into the visual midline of the subject. */
+.list-row .star, .list-row .dot, .list-row .date { padding-top: 2px; }
 .list-row:hover {
   background: var(--bg-row-hover);
   box-shadow: inset 0 0 0 1px rgba(0,0,0,.05);
@@ -423,21 +427,26 @@ a { color: var(--accent-strong); }
   padding-right: 8px;
 }
 .list-row .subject-cell {
-  display: flex; gap: 8px; align-items: baseline;
+  /* Stacked: subject on top, two-line preview underneath. */
+  display: flex; flex-direction: column; gap: 2px;
   overflow: hidden;
   min-width: 0;
 }
 .list-row .subject {
-  font-size: 14px; flex-shrink: 0;
-  max-width: 50%;
+  font-size: 14px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .list-row .preview {
-  font-size: 14px; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  flex: 1; min-width: 0;
+  font-size: 13px; color: var(--muted); line-height: 1.35;
+  /* 2-line clamp via -webkit-box (works in every shipping browser
+     including Firefox/Safari). The break-word stops one long URL
+     from blowing out the layout. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
 }
-.list-row .preview::before { content: '— '; opacity: .5; }
 .list-row .date {
   font-size: 12px; color: var(--muted); font-weight: 500;
   text-align: right; padding-right: 4px;

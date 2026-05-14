@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.27] - 2026-05-13
+
+### Fixed — Sent/Drafts/Spam/Trash returned empty in the web UI
+
+Hard-coded folder names (`Sent`, `Drafts`, `Junk Mail`, `Trash`)
+didn't match the real IMAP names on Stalwart installs that use
+`Sent Items` (the default). The web UI now auto-discovers folder
+names per-agent via `GET /mail/folders` and matches them to
+sidebar ids with regex patterns covering every common server
+convention: Stalwart (`Sent Items`, `Junk Mail`, `Trash`), Gmail
+(`[Gmail]/Sent Mail`, `[Gmail]/Spam`), Outlook (`Sent Items`,
+`Deleted Items`), macOS Mail (`Sent Messages`).
+
+Falls back to vanilla defaults if discovery fails so degraded
+mode still works.
+
+### Fixed — Two-line preview on every list row
+
+Previously `/mail/inbox` and `/mail/folders/:folder` returned raw
+envelopes with no body preview, so list rows showed only
+sender + subject. The web UI now uses `/mail/digest?folder=…`
+universally, which returns envelopes WITH a body preview in one
+call. List rows render the subject on top, two lines of preview
+underneath (CSS `-webkit-line-clamp: 2`), and the dates / stars
+top-align so the layout stays clean.
+
+### Fixed — Browser URL now reflects current folder
+
+Folder switches updated state but kept `#/inbox` in the address
+bar. Hash router now uses `#/folder/<id>` (sent / drafts / spam /
+trash / starred / all / inbox), so browser back / forward works,
+URLs are shareable, and a refresh keeps you on the same folder.
+
+### Changed — Stop hook output rewritten
+
+The Stop hook's `reason` field is printed to the user in the
+Claude Code transcript ("Continuing because: …"). The 0.8.25
+text was written assuming only the model would see it — phrases
+like "you do not need to ping the user" and "surface them to the
+user" read as awkward instruction-leakage when the user saw it.
+
+Rewritten to be audience-neutral: facts + canonical tool names,
+no policy. Body is identical for UserPromptSubmit and Stop. New
+shape:
+
+```
+🎀 New AgenticMail (bridge inbox) — 2 messages since the last check:
+
+  · UID 2 — vesper <vesper@localhost> · Re: Audit assignment…
+    > <preview body up to 180 chars>
+
+  · UID 1 — orion <orion@localhost> · Re: Audit assignment…
+    > <preview body up to 180 chars>
+
+Full body: mcp__agenticmail__read_email. Reply: mcp__agenticmail__reply_email (replyAll: true).
+```
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.7.12 | 0.7.13 |
+| `@agenticmail/claudecode` | 0.1.14 | 0.1.15 |
+| `@agenticmail/cli` | 0.8.26 | 0.8.27 |
+
+Plugin manifest mirrored to 0.8.27. mcp / core / openclaw unchanged.
+
 ## [0.8.26] - 2026-05-13
 
 ### Fixed — Correct AgenticMail logo (pink bow, not `@` mark)

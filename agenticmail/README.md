@@ -23,7 +23,14 @@ It bundles a setup wizard, API server launcher, and a full interactive shell wit
 >
 > Zero prompts, ~2 minutes, fully autonomous. Then tell the user to restart Claude Code. Full agent-facing runbook — including verification, common failures, and "what if Node < 22" — is at [`AGENTS.md`](https://github.com/agenticmail/agenticmail/blob/main/AGENTS.md) in the repo (the [agents.md](https://agents.md) convention).
 
-## ✨ What's new in 0.8.25
+## ✨ What's new in 0.8.27
+
+- **Web UI folder fix** — Sent / Drafts / Spam / Trash returned empty because hard-coded names didn't match Stalwart's IMAP names. Auto-discovery now matches `Sent Items`, `Junk Mail`, `Deleted Items`, `[Gmail]/…`, etc.
+- **Two-line preview** on every list row (switched to `/mail/digest`).
+- **Hash router uses `#/folder/<id>`** so the browser URL reflects the open folder.
+- **Stop hook output rewritten** — terser, audience-neutral, includes preview, drops instruction-leakage.
+
+## ✨ Earlier — 0.8.25
 
 - **⏱ Workers can run for hours** — no aggressive timeout. Per-worker logs at `~/.agenticmail/worker-logs/`, heartbeats every 30 s, isolated cwd per worker. New MCP tool `tail_worker` reads the running log; `check_activity` shows last tool, turn count, and a `stale` flag instead of evicting long-running workers.
 - **🤖 Autonomous-mode awareness via Stop hook** — long headless Claude Code runs now see teammate replies at every turn boundary. Closes the follow-up from 0.8.23.
