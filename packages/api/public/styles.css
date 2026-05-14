@@ -482,6 +482,27 @@ a { color: var(--accent-strong); }
 }
 .list-row.unread .date { color: var(--unread-bold); font-weight: 700; }
 
+/* ─── Drafts folder list ───────────────────────────────────────────
+   In the Drafts list, the leading column reads as the recipient
+   ("To: alice@…") since the user is always the sender; we tag it
+   with a small red "Draft" pill so the row is unmistakable.
+   Stars don't apply to drafts — the star slot is left empty. */
+.list-row.draft-row .drafts-tag {
+  display: inline-block;
+  background: #ea4335;
+  color: white;
+  font-size: 11px; font-weight: 600;
+  padding: 1px 6px; border-radius: 4px;
+  margin-right: 6px;
+  letter-spacing: .02em;
+}
+.list-row.draft-row .drafts-recipient .drafts-tag + * { vertical-align: middle; }
+.list-row.draft-row .drafts-star-placeholder {
+  /* Reserve grid space but render nothing — keeps every row's
+     subject column aligned with non-draft folder rows. */
+  width: 32px; height: 32px;
+}
+
 mark.search-hl {
   background: #fff475; color: inherit;
   padding: 0 1px;

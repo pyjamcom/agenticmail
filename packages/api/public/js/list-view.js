@@ -97,15 +97,18 @@ export async function loadList(agent, folder) {
     <div class="list-rows" id="list-rows"><div class="empty">Loading…</div></div>
   `;
   document.getElementById('list-refresh-btn')?.addEventListener('click', () => loadList(agent, folder));
-  // Select-all toggles every visible row checkbox. We don't currently
-  // expose a bulk-action toolbar (delete/archive/move) yet, so this
-  // is purely a visual selection state for now — but wiring it
-  // means it works the moment a bulk-action surface lands.
   document.getElementById('list-select-all-input')?.addEventListener('change', (e) => {
     const checked = e.target.checked;
     document.querySelectorAll('#list-rows .row-check input[type=checkbox]')
       .forEach(cb => { cb.checked = checked; });
   });
+
+  // Drafts are a SQL-backed app primitive, not an IMAP mailbox.
+  // The autosave path writes to /drafts (sqlite) and the agent
+  // MCP tools operate on the same table — so the list must come
+  // from there, not from /mail/digest?folder=Drafts (which would
+  // miss everything autosaved by the web UI).
+  if (folder === 'drafts') return loadDraftsList(agent);
   await ensureFolderCache(agent);
 
   // Resolve the real IMAP folder. Starred reuses INBOX + a client-
@@ -140,6 +143,51 @@ export async function loadList(agent, folder) {
 function folderTitle(folder) {
   const f = FOLDERS.find(x => x.id === folder);
   return f ? f.label : 'Inbox';
+}
+
+/**
+ * Drafts list — sourced from the SQL drafts table via `/drafts`,
+ * not from the IMAP Drafts mailbox.
+ *
+ * The autosave path (compose.js) writes here, and the MCP
+ * `manage_drafts` tool operates on the same rows, so this is
+ * the single source of truth for app-level drafts.
+ *
+ * We normalise each row into the same envelope shape `renderList`
+ * expects (uid → draft id, subject, from = agent itself, date =
+ * updated_at, preview = first 240 chars of text_body) so the
+ * row markup stays identical across folders. Click handling
+ * branches on `state.selectedFolder === 'drafts'` to open the
+ * compose modal pre-populated instead of the read-only message
+ * view.
+ */
+async function loadDraftsList(agent) {
+  try {
+    const data = await apiGet('/drafts', { agentKey: agent.apiKey });
+    const rows = Array.isArray(data?.drafts) ? data.drafts : [];
+    state.messages = rows.map(r => ({
+      // We store the draft id under `uid` so renderList +
+      // click handlers can use the same field. Drafts also
+      // get a `__draftId` marker so the click handler can
+      // route differently.
+      uid: r.id,
+      __draftId: r.id,
+      subject: r.subject || '(no subject)',
+      from: [{ name: agent.name, address: agent.email }],
+      // SQLite returns updated_at as a UTC string without an
+      // explicit Z. Date() parses it as local; force UTC
+      // interpretation by appending Z so the formatter shows
+      // the actual save time.
+      date: r.updated_at ? `${r.updated_at}Z`.replace('ZZ', 'Z') : null,
+      preview: (r.text_body || '').slice(0, 240),
+      flags: [],
+      __recipient: r.to_addr || '(no recipient)',
+    }));
+    renderList();
+  } catch (err) {
+    document.getElementById('list-rows').innerHTML =
+      `<div class="empty">Failed to load drafts: ${escapeHtml(err.message ?? err)}</div>`;
+  }
 }
 
 export function renderList() {
@@ -183,6 +231,7 @@ export function renderList() {
   // ellipsis so longer preview lines never wrap. Identical markup
   // for every folder so Sent / Drafts / Spam etc render the same
   // way Inbox does.
+  const isDrafts = state.selectedFolder === 'drafts';
   root.innerHTML = filtered.map(m => {
     const unread = !flagsHas(m.flags, '\\Seen');
     const starred = flagsHas(m.flags, '\\Flagged');
@@ -195,11 +244,22 @@ export function renderList() {
       .replace(/^>+ ?/gm, '')
       .replace(/\s+/g, ' ')
       .trim();
+    // In Drafts the "from" column reads naturally as the recipient
+    // ("To: alice@…") since the user is always the sender. Add a
+    // small "Draft" tag in red so the row is unmistakeable.
+    const leadingCell = isDrafts
+      ? `<span class="from drafts-recipient" title="${escapeHtml(m.__recipient ?? '')}"><span class="drafts-tag">Draft</span> ${escapeHtml(m.__recipient ?? '(no recipient)')}</span>`
+      : `<span class="from" title="${escapeHtml(fromAddr)}">${highlightTerm(fromName, hlTerm)}</span>`;
+    // Drafts can't be starred; suppress the star icon to keep the
+    // row visually quiet for the user.
+    const starCell = isDrafts
+      ? `<span class="star drafts-star-placeholder"></span>`
+      : `<span class="star ${starred ? 'starred' : ''}" data-action="star" data-uid="${m.uid}">${starIcon}</span>`;
     return `
-      <div class="list-row ${unread ? 'unread' : ''}" data-uid="${m.uid}">
+      <div class="list-row ${unread ? 'unread' : ''}${isDrafts ? ' draft-row' : ''}" data-uid="${m.uid}">
         <label class="row-check" data-action="select"><input type="checkbox" /></label>
-        <span class="star ${starred ? 'starred' : ''}" data-action="star" data-uid="${m.uid}">${starIcon}</span>
-        <span class="from" title="${escapeHtml(fromAddr)}">${highlightTerm(fromName, hlTerm)}</span>
+        ${starCell}
+        ${leadingCell}
         <span class="subject-cell">
           <span class="subject">${highlightTerm(subject, hlTerm)}</span>
           ${cleanPreview ? `<span class="preview-sep"> — </span><span class="preview">${highlightTerm(cleanPreview, hlTerm)}</span>` : ''}
@@ -222,6 +282,14 @@ export function renderList() {
       // Checkbox click — swallow so we don't navigate.
       if (e.target.closest('[data-action="select"]')) {
         e.stopPropagation();
+        return;
+      }
+      // Drafts open the compose modal pre-populated with the
+      // saved draft, NOT the read-only message view. The UID
+      // we put on the row is actually a draft UUID; route as
+      // #/d/<id> so the router knows to call openDraft().
+      if (isDrafts) {
+        location.hash = `#/d/${el.dataset.uid}`;
         return;
       }
       const uid = Number(el.dataset.uid);

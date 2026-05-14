@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.34] - 2026-05-14
+
+### Fixed — Drafts sidebar showed nothing
+
+The autosave path (compose.js) writes to the SQL-backed `drafts`
+table via `POST /drafts`, and so does the MCP `manage_drafts`
+tool. But the sidebar's Drafts entry was loading the IMAP
+`Drafts` mailbox via `/mail/digest?folder=Drafts`, which is a
+separate world. Drafts you typed in the web UI weren't there.
+
+Fixed by making the Drafts folder a special-case in the web UI:
+
+- `loadList(folder === 'drafts')` now branches to a new
+  `loadDraftsList()` that pulls from `/drafts` and normalises
+  the rows into the same envelope shape `renderList` expects.
+- Each row's "from" column reads as the **recipient** (since
+  the user is always the sender on a draft) with a small red
+  **"Draft"** tag.
+- Stars don't apply to drafts; the star slot is reserved but
+  left empty so subject columns stay aligned with non-draft
+  folders.
+
+### Added — Click a draft → resume editing in compose
+
+New route `#/d/<draftId>` opens the compose modal pre-populated
+with the saved draft (to / cc / subject / body) and arms
+`composeDraftId` so subsequent autosaves PUT to the same row
+instead of creating a duplicate. Resume right where you left
+off.
+
+### Added — "Discard" actually discards
+
+The compose modal's **Discard** button used to just close the
+modal — the autosaved draft survived in Drafts. Now it deletes
+the draft via `DELETE /drafts/:id` and refreshes the Drafts
+list if that's where you are. The normal close-button (×)
+still preserves the draft for later, which is the right
+distinction: closing = "save and come back", discarding =
+"throw this away".
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.7.18 | 0.7.19 |
+| `@agenticmail/cli` | 0.8.33 | 0.8.34 |
+
+Plugin manifest mirrored to 0.8.34. core / mcp / claudecode unchanged.
+
 ## [0.8.33] - 2026-05-14
 
 ### Fixed — Deleting one message wiped the whole inbox

@@ -9,7 +9,7 @@
 // in the Drafts folder.
 import { state } from './state.js';
 import { escapeHtml, toast } from './utils.js';
-import { apiPost, apiPut, apiDelete } from './api.js';
+import { apiGet, apiPost, apiPut, apiDelete } from './api.js';
 import { loadList } from './list-view.js';
 
 const AUTOSAVE_DEBOUNCE_MS = 2000;
@@ -81,6 +81,44 @@ export function openReply(replyAll) {
   setTimeout(() => document.getElementById('compose-body').focus(), 50);
 }
 
+/**
+ * Open an existing autosaved draft for further editing. Pulls the
+ * SQL row, populates every field, and arms `composeDraftId` so
+ * subsequent autosaves PUT to the same row instead of creating a
+ * second draft. The user can resume right where they left off.
+ */
+export async function openDraft(draftId) {
+  state.composeReplyContext = null;
+  state.composeDraftId = draftId;
+  pendingAttachments = [];
+  document.getElementById('compose-title').textContent = 'Draft';
+  if (state.selectedAgent) document.getElementById('compose-from').value = state.selectedAgent.id;
+  // Clear first so we don't leak data from a previous compose if
+  // the fetch fails halfway.
+  ['compose-to', 'compose-cc', 'compose-wake', 'compose-subject', 'compose-body']
+    .forEach(id => { document.getElementById(id).value = ''; });
+  setComposeStatus('Loading…');
+  showModal();
+  wireAutosave();
+  wireAttachmentPicker();
+  try {
+    const data = await apiGet('/drafts', { agentKey: state.selectedAgent.apiKey });
+    const draft = (data?.drafts ?? []).find(d => d.id === draftId);
+    if (!draft) throw new Error('Draft not found');
+    document.getElementById('compose-to').value = draft.to_addr ?? '';
+    document.getElementById('compose-cc').value = draft.cc ?? '';
+    document.getElementById('compose-subject').value = draft.subject ?? '';
+    document.getElementById('compose-body').value = draft.text_body ?? '';
+    document.getElementById('compose-title').textContent =
+      `Draft: ${draft.subject || '(no subject)'}`;
+    renderAttachmentChips();
+    setComposeStatus('Loaded from Drafts');
+    setTimeout(() => document.getElementById('compose-body').focus(), 50);
+  } catch (err) {
+    setComposeStatus(`Couldn't load draft: ${err.message}`);
+  }
+}
+
 export function closeCompose() {
   document.getElementById('compose-bg').style.display = 'none';
   // Flush a final save synchronously-ish on close so a quick
@@ -91,6 +129,34 @@ export function closeCompose() {
     clearTimeout(autosaveTimer);
     autosaveTimer = null;
     void runAutosave();
+  }
+}
+
+/**
+ * Discard the in-progress compose — delete the autosaved draft
+ * (if any) and close the modal. Distinct from `closeCompose`
+ * which just hides the modal and lets the draft persist for
+ * later resumption from the Drafts folder. Bound to the
+ * "Discard" button in the compose footer.
+ */
+export async function discardCompose() {
+  // Cancel any pending autosave so it doesn't race the delete.
+  if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
+  const draftId = state.composeDraftId;
+  const agent = state.agents.find(a => a.id === document.getElementById('compose-from').value) ?? state.selectedAgent;
+  // Close UI first so the user gets immediate feedback even if
+  // the delete is slow / fails.
+  document.getElementById('compose-bg').style.display = 'none';
+  state.composeDraftId = null;
+  pendingAttachments = [];
+  if (draftId && agent) {
+    try { await apiDelete(`/drafts/${draftId}`, { agentKey: agent.apiKey }); }
+    catch { /* draft already gone or transient failure — fine */ }
+    // If the user is currently looking at the Drafts list, refresh
+    // so the deleted draft disappears from the visible rows.
+    if (state.selectedAgent && state.selectedFolder === 'drafts') {
+      try { await loadList(state.selectedAgent, 'drafts'); } catch { /* ignore */ }
+    }
   }
 }
 

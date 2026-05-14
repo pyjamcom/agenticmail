@@ -12,7 +12,7 @@ import { renderProfile, toggleProfileMenu, closeProfileMenu } from './profile.js
 import { renderSidebar } from './sidebar.js';
 import { loadList, renderList, clearSearch, ensureFolderCache } from './list-view.js';
 import { openMessage } from './message-view.js';
-import { populateComposeFrom, openCompose, closeCompose, sendCompose } from './compose.js';
+import { populateComposeFrom, openCompose, openDraft, closeCompose, discardCompose, sendCompose } from './compose.js';
 import { subscribeToAllAgents, maybeRequestNotificationPermission } from './sse.js';
 import { icon } from './icons.js';
 
@@ -137,6 +137,14 @@ function route() {
     openMessage(Number(msgMatch[1]));
     return;
   }
+  // Drafts use UUIDs as ids and open the compose modal pre-
+  // populated rather than the read-only message view. The list
+  // row click handler emits #/d/<uuid> for draft rows.
+  const draftMatch = hash.match(/^#\/d\/([a-zA-Z0-9-]+)$/);
+  if (draftMatch) {
+    openDraft(draftMatch[1]);
+    return;
+  }
   const folderMatch = hash.match(/^#\/folder\/([a-z]+)$/);
   const folder = folderMatch ? folderMatch[1] : 'inbox';
   if (state.selectedFolder !== folder) {
@@ -185,7 +193,7 @@ document.addEventListener('click', e => {
 
 // ─── Compose modal wiring ────────────────────────────────────────────
 document.getElementById('compose-close').addEventListener('click', closeCompose);
-document.getElementById('compose-cancel').addEventListener('click', closeCompose);
+document.getElementById('compose-cancel').addEventListener('click', discardCompose);
 document.getElementById('compose-send').addEventListener('click', sendCompose);
 document.getElementById('compose-bg').addEventListener('click', e => {
   if (e.target.id === 'compose-bg') closeCompose();
