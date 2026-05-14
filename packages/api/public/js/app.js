@@ -179,10 +179,20 @@ function onFolderSelect(folder) {
 // Folder switches go through here too so the URL is the source of truth
 // for "what's on screen". If you bookmark or copy-paste a URL like
 // http://127.0.0.1:3829/#/folder/sent, opening it lands you on Sent.
+// Track which view shape is currently on screen so the router knows
+// whether navigating back to #/folder/<x> for the SAME folder should
+// re-render the list. Without this, hitting Back from #/m/54 to
+// #/folder/inbox would early-return because state.selectedFolder is
+// still 'inbox' (it never changed when the message opened) — leaving
+// the message-detail view stuck on screen even though the URL bar
+// flipped back to the folder.
+let currentView = 'folder';   // 'folder' | 'message' | 'draft'
+
 function route() {
   const hash = location.hash || '#/inbox';
   const msgMatch = hash.match(/^#\/m\/(\d+)$/);
   if (msgMatch) {
+    currentView = 'message';
     openMessage(Number(msgMatch[1]));
     return;
   }
@@ -191,23 +201,27 @@ function route() {
   // row click handler emits #/d/<uuid> for draft rows.
   const draftMatch = hash.match(/^#\/d\/([a-zA-Z0-9-]+)$/);
   if (draftMatch) {
+    currentView = 'draft';
     openDraft(draftMatch[1]);
     return;
   }
   const folderMatch = hash.match(/^#\/folder\/([a-z]+)$/);
   const folder = folderMatch ? folderMatch[1] : 'inbox';
-  // Only do work if the folder actually changed. Re-firing loadList
-  // for the SAME folder on every hashchange (e.g. closing a message
-  // detail back to the list) makes the UI feel sluggish — the list
-  // is already rendered, and a second digest fetch just churns
-  // through 50 messages on the IMAP server for no visible change.
-  if (state.selectedFolder === folder) return;
+  // Skip the reload ONLY when we're already showing this folder's
+  // list view. Coming back from a message / draft → folder must
+  // always re-render the list, even if state.selectedFolder hasn't
+  // changed since the message was opened.
+  if (currentView === 'folder' && state.selectedFolder === folder) return;
+  const folderChanged = state.selectedFolder !== folder;
   state.selectedFolder = folder;
-  // Reset pagination on every folder switch — a fresh folder
-  // starts at page 1. Preserved across silent SSE refreshes so
-  // a new arrival doesn't yank the user back from page 3.
-  state.pagination = { offset: 0, limit: 50, total: 0 };
-  renderSidebar(onFolderSelect);
+  currentView = 'folder';
+  if (folderChanged) {
+    // Fresh folder → page 1. Preserved across silent SSE refreshes so
+    // a new arrival doesn't yank the user back from page 3. We also
+    // re-render the sidebar so the active-folder highlight updates.
+    state.pagination = { offset: 0, limit: 50, total: 0 };
+    renderSidebar(onFolderSelect);
+  }
   if (state.selectedAgent) loadList(state.selectedAgent, folder);
 }
 window.addEventListener('hashchange', route);

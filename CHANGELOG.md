@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] - 2026-05-14
+
+### Fixed — Back button from message detail left the message view stuck on screen
+
+Regression introduced in 0.9.8's `route()` rewrite. The function was:
+
+```js
+if (state.selectedFolder === folder) return;
+```
+
+Goal: skip re-loading the list on no-op hash flips. But `state.selectedFolder`
+never changes when the user opens a message (`#/m/<uid>` only flips the
+URL — the folder selection is preserved so closing the message returns
+to the same folder). So when the user hit Back from `#/m/54` to
+`#/folder/inbox`, the URL updated but `route()` early-returned and the
+message-detail DOM stayed visible.
+
+**Fix:** track which view shape is currently rendered (`'folder' |
+'message' | 'draft'`). Skip the reload only when we're already showing
+this folder's LIST view — coming back from a message/draft to a folder
+URL always re-renders the list, even if the folder hadn't logically
+changed. Pagination + sidebar re-render still only happen when the
+folder actually differs, so the no-op hash-flip optimization survives.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.9.7 | 0.9.8 |
+| `@agenticmail/cli` | 0.9.9 | 0.9.10 |
+
 ## [0.9.9] - 2026-05-14
 
 ### Fixed — Web UI hung on every page refresh (browser connection cap saturation)
