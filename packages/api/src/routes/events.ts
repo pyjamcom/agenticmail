@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { requireAgent, touchActivity } from '../middleware/auth.js';
 import { getAgentPassword } from './mail.js';
 import { evaluateRules } from './features.js';
+import { pushSystemEvent } from './system-events.js';
 
 const MAX_SSE_PER_AGENT = 5;
 const activeWatchers = new Map<string, Set<{ watcher: InboxWatcher; res: Response }>>();
@@ -217,6 +218,20 @@ export function createEventRoutes(accountManager: AccountManager, config: Agenti
           }
         }
         safeWrite(`data: ${JSON.stringify(event)}\n\n`);
+        // Fan out to the master /system/events bus so the web UI can use
+        // ONE shared SSE for every agent instead of N connections (one
+        // per agent). With 5 agents the old fan-out would saturate the
+        // browser's 6-connections-per-origin cap and block every other
+        // request (page navigation, message fetches, attachments).
+        try {
+          pushSystemEvent({
+            type: 'new_mail',
+            agentId: agent.id,
+            agentName: agent.name,
+            event,
+          });
+        } catch { /* never fatal — the per-agent stream above is the
+                    primary path for the dispatcher */ }
       });
 
       watcher.on('expunge', (event) => {

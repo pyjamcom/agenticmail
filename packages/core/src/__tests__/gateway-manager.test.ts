@@ -1,10 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GatewayManager } from '../gateway/manager.js';
 import { createTestDatabase } from '../storage/db.js';
-import type Database from 'better-sqlite3';
 
 describe('GatewayManager', () => {
-  let db: Database.Database;
+  // Use the actual return type of createTestDatabase rather than the
+  // historical `better-sqlite3` type — the implementation switched to
+  // node:sqlite (Node 22 stdlib) and the old type annotation was
+  // diverging from runtime.
+  let db: ReturnType<typeof createTestDatabase>;
   let mockStalwart: any;
 
   beforeEach(() => {

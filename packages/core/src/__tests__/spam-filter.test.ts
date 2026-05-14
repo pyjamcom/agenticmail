@@ -39,8 +39,11 @@ describe('isInternalEmail', () => {
   });
 
   it('returns false when from has no address', () => {
+    // Address is required on AddressInfo but the test deliberately
+    // exercises the "missing/empty address" path that exists in
+    // production data. Cast to bypass the strict typing.
     expect(isInternalEmail(makeEmail({
-      from: [{ name: 'No Address' }],
+      from: [{ name: 'No Address' } as unknown as { address: string; name?: string }],
     }))).toBe(false);
   });
 });

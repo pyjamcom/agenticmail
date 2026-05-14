@@ -11,7 +11,7 @@
 // arrive at the heartbeat cadence (30 s) so the badge text
 // reflects what the agent is doing right now.
 
-import { state, API_URL } from './state.js';
+import { onSystemEvent } from './system-stream.js';
 
 const BADGE_CONTAINER_ID = 'activity-badges';
 
@@ -21,7 +21,9 @@ const BADGE_CONTAINER_ID = 'activity-badges';
  * the badge container on every event.
  */
 const workers = new Map();
-let sseController = null;
+let unsubWorkerStarted = null;
+let unsubWorkerHeartbeat = null;
+let unsubWorkerFinished = null;
 
 /**
  * Map an SDK tool name (or the truncated head we capture in
@@ -91,36 +93,16 @@ function handleEvent(event) {
 }
 
 /**
- * Subscribe to /system/events with the master key. The web UI
- * already holds the master key in state.masterKey (set on
- * sign-in). Re-subscribes idempotently — safe to call after
- * agent-list refresh.
+ * Subscribe to worker_* events on the shared /system/events stream.
+ * Idempotent — safe to call after agent-list refresh.
  */
 export function subscribeToActivity() {
-  if (sseController) { try { sseController.abort(); } catch {} }
-  sseController = new AbortController();
-  fetch(`${API_URL}/api/agenticmail/system/events`, {
-    headers: { Authorization: `Bearer ${state.masterKey}`, Accept: 'text/event-stream' },
-    signal: sseController.signal,
-  }).then(async res => {
-    if (!res.ok || !res.body) return;
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (!sseController.signal.aborted) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf('\n\n')) !== -1) {
-        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
-        for (const line of frame.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          try { handleEvent(JSON.parse(line.slice(6))); } catch {}
-        }
-      }
-    }
-  }).catch(() => { /* dropped — user can refresh to reconnect */ });
+  if (unsubWorkerStarted) { try { unsubWorkerStarted(); } catch {} }
+  if (unsubWorkerHeartbeat) { try { unsubWorkerHeartbeat(); } catch {} }
+  if (unsubWorkerFinished) { try { unsubWorkerFinished(); } catch {} }
+  unsubWorkerStarted   = onSystemEvent('worker_started',   handleEvent);
+  unsubWorkerHeartbeat = onSystemEvent('worker_heartbeat', handleEvent);
+  unsubWorkerFinished  = onSystemEvent('worker_finished',  handleEvent);
 }
 
 // Tiny HTML escapers (kept local to avoid an import cycle).

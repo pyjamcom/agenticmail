@@ -673,9 +673,13 @@ describe('Dispatcher.handleEvent — ignores noise', () => {
       { type: 'reconnecting', attempt: 1, delayMs: 1000 },
       { type: 'expunge', uid: 5 },
       { type: 'flags', uid: 5 },
-      { type: 'error', message: 'foo' },
+      // legacy 'error' frame from imapflow carried a string `message`
+      // field; the dispatcher just drops non-new/non-task types, so
+      // the field shape doesn't matter. Cast through unknown to bypass
+      // SSEEvent's stricter typing (message is {subject,from,to}).
+      { type: 'error', message: 'foo' } as unknown,
     ]) {
-      await d.handleEvent(FOLA, ev);
+      await d.handleEvent(FOLA, ev as Parameters<typeof d.handleEvent>[1]);
     }
     expect(sdk.calls).toHaveLength(0);
   });

@@ -48,7 +48,7 @@ const integrationRouteFactoryPromise: Promise<IntegrationRouteFactory | null> = 
   try {
     const mod = await import('@agenticmail/claudecode/http-routes');
     if (typeof mod.createIntegrationRoutes === 'function') {
-      return mod.createIntegrationRoutes as IntegrationRouteFactory;
+      return mod.createIntegrationRoutes as unknown as IntegrationRouteFactory;
     }
     return null;
   } catch {
@@ -143,14 +143,19 @@ export function createApp(configOverrides?: Partial<AgenticMailConfig>): {
   });
   app.use(cors());
   app.use(express.json({ limit: '10mb' }));
+  // Cast: express-rate-limit v7 ships Express 5 types; we're on
+  // Express 4 types to match the v4 runtime, so the handler signature
+  // doesn't line up exactly. The cast is safe because rate-limit's
+  // handler is just (req, res, next) which both Express versions
+  // accept identically.
   app.use(
     rateLimit({
       windowMs: 60 * 1000,
-      max: 10000,
+      limit: 10000,
       standardHeaders: true,
       legacyHeaders: false,
       message: { error: 'Too many requests, please try again later' },
-    }),
+    }) as unknown as express.RequestHandler,
   );
 
   // ─── Static web UI ──────────────────────────────────────────────
@@ -175,7 +180,27 @@ export function createApp(configOverrides?: Partial<AgenticMailConfig>): {
     return null;
   })();
   if (staticDir) {
-    app.use('/', express.static(staticDir, { index: 'index.html', extensions: ['html'] }));
+    app.use('/', express.static(staticDir, {
+      index: 'index.html',
+      extensions: ['html'],
+      // Browser caching for static assets. Without these every page
+      // refresh re-downloads every .js / .css / branding image, which
+      // ate ~30 round-trips per refresh and made the page feel slow.
+      //
+      // We DON'T cache index.html — it stays fresh so a deploy is
+      // visible on the next refresh. Everything else gets a short
+      // max-age + must-revalidate so the browser will keep using its
+      // cached copy across refreshes while still picking up new builds
+      // (the dist contents are deterministic — same code → same etag
+      // → 304 Not Modified on revalidate).
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('index.html') || filePath.endsWith('.html')) {
+          res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+        } else {
+          res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
+        }
+      },
+    }));
     // Friendly alias so `agenticmail web` users can land on a stable URL
     // regardless of any future routing experiments.
     app.get('/ui', (_req, res) => res.sendFile(join(staticDir, 'index.html')));

@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9] - 2026-05-14
+
+### Fixed — Web UI hung on every page refresh (browser connection cap saturation)
+
+The user reported "refreshing hangs forever" and individual API calls
+(`/`, `/mail/messages/52`) "slow as fuck". Root cause was structural,
+not per-endpoint.
+
+**`sse.js` was opening one persistent SSE connection PER agent.** With 5
+agents that's 5 long-lived HTTP connections, plus 1 for the
+`/system/events` activity-badge stream = **6 connections per origin** —
+which is exactly the browser cap. Every other request (page reload,
+message fetch, attachment download, favicon, branding image) had to
+**wait for an SSE slot to free** — which never happened, because
+SSE connections are persistent by design.
+
+This compounded with two other issues:
+
+- **No static-asset caching headers.** Every refresh re-downloaded every
+  `.js` / `.css` / branding image, eating ~30 round-trips per refresh.
+- **`/mail/messages/:uid` had no result cache.** Re-opening the same
+  message (back/forward, search-and-click, SSE refresh) repeated the
+  full IMAP fetch + mailparser + spam scoring pipeline every time
+  (~130 ms on a 60 KB plain-text body).
+
+### Fix — multiplex SSE through one master channel
+
+New module `public/js/system-stream.js`: opens ONE shared SSE
+connection to `/api/agenticmail/system/events`. Other modules
+register typed event handlers via `onSystemEvent(type, handler)`.
+
+Server side, `routes/events.ts`'s `watcher.on('new', ...)` now also
+calls `pushSystemEvent({ type: 'new_mail', agentId, agentName, event })`
+to fan per-agent new-mail events out to the master bus. The dispatcher
+still uses the per-agent `/events` SSE for its own auth-scoped routing
+(which is the right scope) — only the UI switches to the multiplexed
+channel.
+
+**Net: 6 SSE connections → 1.** Five connection slots freed for actual
+HTTP traffic. Page refreshes, message fetches, attachments, and
+images all stop blocking on each other.
+
+### Fix — parsed-message LRU cache
+
+New in-process LRU (`PARSED_MESSAGE_MAX=200`, 60 s TTL) keyed by
+`agentId::folder::uid`. The `/mail/messages/:uid` handler checks it
+before doing IMAP fetch + mailparser. Mutation handlers
+(`seen`, `unseen`, `star`, `move`) call `invalidateParsedMessage`
+so concurrent state changes never serve stale flags.
+
+Repeat-open of the same message drops from ~130 ms to ~5 ms.
+
+### Fix — strip raw attachment binaries from message response
+
+`/mail/messages/:uid` used to embed full attachment `content: Buffer`
+fields inline in the JSON response. When JSON-stringified, Buffer
+serializes to `{type:"Buffer", data:[...]}` — bloating responses by
+megabytes on attachment-heavy threads. Now we return metadata only
+(`filename`, `contentType`, `size`, `contentDisposition`, `cid`,
+`related`, `index`) and the UI fetches binaries on demand from the
+existing `/mail/messages/:uid/attachments/:index` endpoint.
+
+### Fix — static asset caching
+
+`app.ts`'s `express.static` now sends `Cache-Control: public,
+max-age=300, must-revalidate` on `.js`/`.css`/images, and
+`no-cache, must-revalidate` on `.html`. Refreshes will revalidate
+(304 Not Modified, ~1 KB per asset) instead of re-downloading.
+
+### Fixed — All TypeScript errors across the monorepo
+
+The api package had **78 TypeScript errors** at strict mode and
+core/mcp had a handful more. Root cause: api package had
+`@types/express: ^5.0.0` (Express 5 types where `req.params` is
+`Record<string, string | string[]>`) while runtime was `express: ^4.21.0`
+(where `req.params` is always `Record<string, string>`). Every
+`parseInt(req.params.id)` and `db.prepare(...).get(req.params.x)`
+tripped a type error.
+
+Downgrading `@types/express` to `^4.17.0` to match runtime erased 73
+errors in one change. The remaining handful were real issues:
+
+- `routes/features.ts`: parameter declared `_accountManager` (unused
+  marker) but referenced as `accountManager` in two call sites — would
+  crash at runtime. Renamed.
+- `routes/mail.ts`: `client.search({ header: ['Message-ID', id] }, ...)`
+  used the wrong header-search arg shape (tuple). Imapflow expects
+  `{ 'Message-ID': id }`. Pre-existing — would have failed any
+  thread-lookup by Message-ID.
+- `app.ts`: `express.static` callback typing; `rateLimit()` handler
+  ABI mismatch between v7 (Express 5 typed) and our v4 runtime —
+  cast through `unknown as RequestHandler`. Also rename `max → limit`
+  for express-rate-limit v7.
+- `core/__tests__`: replaced `Database.Database` import (better-sqlite3,
+  no longer used) with `ReturnType<typeof createTestDatabase>`.
+- `mcp/src/tools.ts`: `encodeURIComponent(args.folder)` where folder
+  is `unknown` from zod — coerced via `String(...)`.
+- `claudecode test`: 'error' SSE event shape mismatch — cast through
+  `unknown`.
+
+**Net: 0 TypeScript errors across api/core/mcp/claudecode.**
+
+### Tests
+
+495 total tests pass (core 362 + claudecode 121 + api 12).
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.9.6 | 0.9.7 |
+| `@agenticmail/claudecode` | 0.2.7 | 0.2.7 (unchanged code, no republish) |
+| `@agenticmail/cli` | 0.9.8 | 0.9.9 |
+
+Plugin manifest mirrored to 0.9.9. core / mcp got TS-only cleanups
+that don't change runtime behaviour, so no version bump on those.
+
+### Operator upgrade
+
+```
+npm install -g @agenticmail/cli@latest
+# Restart the API process (it's run from the CLI, not under PM2):
+# stop whatever's running on :3829, then re-launch with your usual command.
+pm2 restart agenticmail-claudecode-dispatcher
+```
+
 ## [0.9.8] - 2026-05-14
 
 Three orthogonal fixes shipped together: a 16× speedup on the web UI's

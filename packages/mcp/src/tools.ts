@@ -1704,7 +1704,7 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
       if (action === 'untag_message') {
         if (!args.id || !args.uid) throw new Error('id and uid are required');
         const folder = args.folder || 'INBOX';
-        await apiRequest('DELETE', `/tags/${args.id}/messages/${args.uid}?folder=${encodeURIComponent(folder)}`);
+        await apiRequest('DELETE', `/tags/${args.id}/messages/${args.uid}?folder=${encodeURIComponent(String(folder))}`);
         return `Removed tag from message UID ${args.uid} in ${folder}`;
       }
       if (action === 'get_messages') {
@@ -2436,7 +2436,7 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
     case 'check_tasks': {
       let endpoint = args.direction === 'outgoing' ? '/tasks/assigned' : '/tasks/pending';
       if (args.direction !== 'outgoing' && args.assignee) {
-        endpoint += `?assignee=${encodeURIComponent(args.assignee)}`;
+        endpoint += `?assignee=${encodeURIComponent(String(args.assignee))}`;
       }
       const r = await apiRequest('GET', endpoint);
       if (!r?.tasks?.length) return args.direction === 'outgoing' ? 'No tasks assigned by you.' : 'No pending tasks.';
@@ -2514,7 +2514,7 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
         const uid = Number(args.uid);
         if (!uid || uid < 1) throw new Error('uid is required');
         const folder = args.folder || 'INBOX';
-        const result = await apiRequest('GET', `/mail/messages/${uid}/spam-score?folder=${encodeURIComponent(folder)}`);
+        const result = await apiRequest('GET', `/mail/messages/${uid}/spam-score?folder=${encodeURIComponent(String(folder))}`);
         const lines = [
           `Spam Score: ${result.score}/100 (${result.isSpam ? 'SPAM' : result.isWarning ? 'WARNING' : 'CLEAN'})`,
           result.topCategory ? `Top Category: ${result.topCategory}` : null,

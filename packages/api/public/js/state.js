@@ -10,7 +10,6 @@ export const state = {
   currentMessage: null,
   composeReplyContext: null,
   searchQuery: '',
-  sseControllers: [],
   unread: {},                  // { [agentId]: count }
   /**
    * Mapping from sidebar folder id ('sent', 'drafts', 'spam', etc.)

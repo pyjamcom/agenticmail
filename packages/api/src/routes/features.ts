@@ -133,7 +133,7 @@ function parseScheduleTime(input: string): Date | null {
  */
 export function createFeatureRoutes(
   db: Database,
-  _accountManager: AccountManager,
+  accountManager: AccountManager,
   config: AgenticMailConfig,
   gatewayManager?: GatewayManager,
 ): Router {

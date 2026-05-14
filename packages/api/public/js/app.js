@@ -14,6 +14,7 @@ import { loadList, renderList, clearSearch, ensureFolderCache } from './list-vie
 import { openMessage } from './message-view.js';
 import { populateComposeFrom, openCompose, openDraft, closeCompose, discardCompose, sendCompose } from './compose.js';
 import { subscribeToAllAgents, maybeRequestNotificationPermission } from './sse.js';
+import { connectSystemStream } from './system-stream.js';
 import { subscribeToActivity } from './activity-badges.js';
 import { icon } from './icons.js';
 import { isSoundEnabled, setSoundEnabled, playNotificationSound } from './sound.js';
@@ -111,12 +112,14 @@ async function bootstrap() {
     if (initial) await selectAgent(initial);
     renderProfile();
     populateComposeFrom();
-    subscribeToAllAgents();
-    // Real-time worker activity badges. Master-key-scoped SSE on
-    // /system/events; the dispatcher's worker_started /
-    // worker_heartbeat / worker_finished events drive the badge
-    // rendering. Idempotent — safe to call after bootstrap reruns.
-    subscribeToActivity();
+    // ONE shared SSE connection on /system/events for the whole UI.
+    // Used to be N+1 (one per agent for new mail + one for activity
+    // badges), which saturated the browser's 6-connections-per-origin
+    // cap with 5 agents and blocked page navigation. Now everything
+    // multiplexes through this single stream — see system-stream.js.
+    connectSystemStream();
+    subscribeToAllAgents();   // new_mail handlers
+    subscribeToActivity();    // worker_* handlers
     maybeRequestNotificationPermission();
     // If the URL points at a message (not a folder), open it now —
     // the folder list selectAgent already loaded stays in the
