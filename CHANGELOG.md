@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.30] - 2026-05-14
+
+### Changed — Centered search bar + centered message reading column
+
+Two layout fixes:
+
+1. **Topbar is now a 3-column grid** (`1fr · auto · 1fr`) with the
+   search input in the centre column. Previously the topbar was a
+   flexbox with `flex: 1` on both the search and a trailing spacer,
+   which split the remaining space evenly and drifted search left
+   of the visual middle. New grouping divs `topbar-left` (menu +
+   brand) and `topbar-right` (refresh + account) anchor the side
+   columns so the centre column genuinely centres regardless of
+   how wide the side groups get.
+
+2. **Open-message view is centered** in the content pane. Header,
+   body, and attachments share `max-width: 840px; margin: 0 auto`
+   so long-line text doesn't sprawl across ultrawide displays.
+   Matches Gmail's reading column width.
+
+Mobile (<800 px) drops the centered grid in favour of
+`auto · 1fr · auto` so the search expands to fill remaining space;
+the brand wordmark hides to make room.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.7.14 | 0.7.15 |
+| `@agenticmail/cli` | 0.8.29 | 0.8.30 |
+
+Plugin manifest mirrored to 0.8.30. core / mcp / claudecode unchanged.
+
 ## [0.8.29] - 2026-05-14
 
 ### Added — Star button is now wired

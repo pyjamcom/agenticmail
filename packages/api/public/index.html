@@ -23,12 +23,14 @@
 
 <!-- ─── App shell ─────────────────────────────────────────────────── -->
 <div class="app" id="app" style="display:none">
-  <!-- Top bar -->
+  <!-- Top bar — three-column grid: left chrome, centered search, right buttons. -->
   <header class="topbar">
-    <button class="menu-btn" id="menu-btn" title="Menu" data-icon="menu"></button>
-    <div class="brand">
-      <img src="/branding/agenticmail-logo.png" alt="AgenticMail" class="brand-logo" />
-      <span class="brand-name">AgenticMail</span>
+    <div class="topbar-left">
+      <button class="menu-btn" id="menu-btn" title="Menu" data-icon="menu"></button>
+      <div class="brand">
+        <img src="/branding/agenticmail-logo.png" alt="AgenticMail" class="brand-logo" />
+        <span class="brand-name">AgenticMail</span>
+      </div>
     </div>
     <div class="search-container">
       <span class="search-icon" data-icon="search"></span>
@@ -36,11 +38,12 @@
       <span id="search-hint" class="search-hint"></span>
       <button id="search-clear" class="search-clear-btn" title="Clear (Esc)" data-icon="close"></button>
     </div>
-    <div class="topbar-spacer"></div>
-    <button class="icon-btn" id="refresh-btn" title="Refresh (r)" data-icon="refresh"></button>
-    <button id="profile-btn" class="profile-trigger" title="Account">
-      <span id="profile-avatar"></span>
-    </button>
+    <div class="topbar-right">
+      <button class="icon-btn" id="refresh-btn" title="Refresh (r)" data-icon="refresh"></button>
+      <button id="profile-btn" class="profile-trigger" title="Account">
+        <span id="profile-avatar"></span>
+      </button>
+    </div>
     <div id="profile-menu" class="profile-menu">
       <div class="profile-menu-section">Inboxes</div>
       <div id="profile-menu-list"></div>
