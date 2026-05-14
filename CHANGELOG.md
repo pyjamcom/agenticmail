@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.33] - 2026-05-14
+
+### Fixed — Deleting one message wiped the whole inbox
+
+Critical data-loss bug. `receiver.deleteMessage(uid)` called
+ImapFlow's `messageDelete` which does:
+
+1. `STORE +FLAGS (\Deleted)` on the target UID
+2. **`EXPUNGE`** — which is **mailbox-wide** in IMAP
+
+If any other message in the mailbox already had `\Deleted` set
+(from a previous half-completed delete, an agent operation, or
+another IMAP client), the expunge removes those too. That's the
+IMAP spec, not an ImapFlow quirk.
+
+Same reason your Trash folder was empty after the delete:
+`EXPUNGE` is permanent removal, not move-to-Trash.
+
+The fix rewires the API's delete endpoint to **move-to-Trash by
+default**, matching Gmail / Outlook semantics:
+
+- `DELETE /mail/messages/:uid` → `messageMove(uid, INBOX, Trash)`.
+  Other mailbox state is untouched; the message lives in Trash
+  until permanently removed.
+- `DELETE /mail/messages/:uid?permanent=true` → explicit expunge.
+  Used by the UI when you delete from inside Trash. When the
+  server advertises `UIDPLUS` (RFC 4315) we use `UID EXPUNGE` to
+  scope the operation to the target UID; falls back to mailbox-
+  wide expunge only on servers that don't support it.
+- The handler auto-discovers the trash mailbox name (Stalwart's
+  "Deleted Items", Gmail's `[Gmail]/Trash`, Outlook's "Deleted
+  Items", macOS Mail's "Deleted Messages") via `receiver.list-
+  Folders()` + `specialUse === '\\Trash'` matching.
+- Source folder defaults to `INBOX`; the web UI passes the real
+  IMAP folder name on `?folder=` so deletes from Sent / Drafts
+  / Spam etc. move from the right mailbox.
+
+The `MailReceiver` class gained two clearer methods to make the
+distinction first-class:
+
+- `moveToTrash(uid, from, trash)` — the safe Gmail-style action.
+- `expungeMessage(uid, mailbox)` — explicit permanent delete,
+  with the UID EXPUNGE narrowing.
+
+The legacy `deleteMessage()` is preserved as a `@deprecated`
+alias for back-compat, but now routes through `expungeMessage`
+with the UID EXPUNGE narrowing so even direct API callers get
+slightly safer behaviour.
+
+### Hardened — Mark-spam, batchMove, every move path
+
+`moveMessage(uid, from, to)` and `batchMove(uids, from, to)` now
+detect IMAP `MOVE` capability (RFC 6851) and use it when
+available — that command is atomic and per-UID. On pre-MOVE
+servers, the fallback is **COPY + `STORE +\Deleted` on the
+target UID(s) ONLY, no EXPUNGE**. The source message survives
+as a "hidden" entry until an explicit empty-trash flow, which
+is the right tradeoff: an EXPUNGE here would have the same
+amplification bug the delete path had.
+
+Mark-spam (`POST /mail/messages/:uid/spam`) and not-spam
+(`POST /mail/messages/:uid/not-spam`) call `moveMessage` so
+they inherit the hardening — no separate fix needed.
+
+### Changed — Web UI delete copy
+
+The confirm modal now adapts to the current folder:
+
+- From Inbox / Sent / Drafts / etc.: **"Move to Trash" — can
+  be recovered from there**.
+- From Trash itself: **"Delete forever — can't be undone"**.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/core` | 0.7.4 | 0.7.5 |
+| `@agenticmail/api` | 0.7.17 | 0.7.18 |
+| `@agenticmail/cli` | 0.8.32 | 0.8.33 |
+
+Plugin manifest mirrored to 0.8.33. mcp / claudecode unchanged.
+
 ## [0.8.32] - 2026-05-14
 
 ### Added — In-line thread chrome in the message body view

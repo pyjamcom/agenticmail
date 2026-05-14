@@ -828,7 +828,26 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
     }
   });
 
-  // Delete message
+  /**
+   * Delete a message.
+   *
+   * Default behaviour is **move-to-trash** (Gmail / Outlook
+   * semantics): the message is moved to the IMAP trash folder
+   * with `messageMove`. It still exists, the user can recover
+   * it from Trash, and no other mailbox state is touched.
+   *
+   * Opt into IMAP EXPUNGE with `?permanent=true`. The web UI
+   * uses this when the user empties Trash. **Beware**: classic
+   * IMAP EXPUNGE is mailbox-wide and removes every message
+   * with `\Deleted` set, not just the target UID. We try
+   * `UID EXPUNGE` (RFC 4315) when the server advertises
+   * UIDPLUS to narrow the scope, but the user must explicitly
+   * opt in.
+   *
+   * Source folder defaults to INBOX; override with
+   * `?folder=Foo` so callers (e.g. the web UI deleting from
+   * Sent / Drafts / etc.) point at the right mailbox.
+   */
   router.delete('/mail/messages/:uid', requireAgent, async (req, res, next) => {
     try {
       const agent = req.agent!;
@@ -837,11 +856,40 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
         res.status(400).json({ error: 'Invalid UID' });
         return;
       }
+      const permanent = req.query.permanent === 'true' || req.query.permanent === '1';
+      const sourceFolder = (req.query.folder as string) || 'INBOX';
 
       const password = getAgentPassword(agent);
       const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
-      await receiver.deleteMessage(uid);
 
+      if (permanent) {
+        // Explicit permanent delete — only fires when the user opts
+        // in (typically from the Trash folder's "Delete forever"
+        // action). Uses UID EXPUNGE when the server supports it.
+        await receiver.expungeMessage(uid, sourceFolder);
+        res.status(204).send();
+        return;
+      }
+
+      // Discover the trash mailbox by name. Pattern matches
+      // Stalwart's "Deleted Items" / "Trash", Gmail's
+      // "[Gmail]/Trash", Outlook's "Deleted Items", macOS Mail's
+      // "Deleted Messages". Falls back to the conservative
+      // expunge path if no trash mailbox is found — better to
+      // remove than to crash, but it's a degraded mode.
+      const folders = await receiver.listFolders();
+      const trashRe = /^trash\b|deleted items|deleted messages|\[gmail\]\/trash|\[gmail\]\/bin/i;
+      const trashFolder = folders.find(f => trashRe.test(f.name) || trashRe.test(f.path))?.path
+        ?? folders.find(f => f.specialUse === '\\Trash')?.path;
+      if (!trashFolder || trashFolder === sourceFolder) {
+        // Either no trash mailbox, or the user is already in
+        // Trash — fall through to expunge so the action does
+        // something visible. The "in Trash" case is the natural
+        // "empty trash" flow on most clients.
+        await receiver.expungeMessage(uid, sourceFolder);
+      } else {
+        await receiver.moveToTrash(uid, sourceFolder, trashFolder);
+      }
       res.status(204).send();
     } catch (err) {
       next(err);

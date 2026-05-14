@@ -247,15 +247,25 @@ async function markSpam() {
 async function deleteMessage() {
   if (!state.currentMessage || !state.selectedAgent) return;
   const subject = state.currentMessage.subject ?? '(no subject)';
+  // From Trash, delete is permanent (no further fallback). From
+  // every other folder it's a move-to-trash, recoverable.
+  const isTrash = state.selectedFolder === 'trash';
   const ok = await confirmModal({
-    title: 'Delete this message?',
-    body: `"${subject}" will be moved to Trash. This can't be undone from the web UI.`,
-    confirm: 'Delete',
+    title: isTrash ? 'Delete this message forever?' : 'Delete this message?',
+    body: isTrash
+      ? `"${subject}" will be permanently removed. This can't be undone.`
+      : `"${subject}" will be moved to Trash. You can recover it from there.`,
+    confirm: isTrash ? 'Delete forever' : 'Move to Trash',
     danger: true,
   });
   if (!ok) return;
   try {
-    await apiDelete(`/mail/messages/${state.selectedUid}`, { agentKey: state.selectedAgent.apiKey });
+    // Pass the real IMAP folder name + permanent flag. The API
+    // uses the folder for the IMAP source mailbox and decides
+    // move-to-trash vs expunge based on `permanent`.
+    const imap = state.folderNames?.[state.selectedFolder] ?? 'INBOX';
+    const qs = `?folder=${encodeURIComponent(imap)}${isTrash ? '&permanent=true' : ''}`;
+    await apiDelete(`/mail/messages/${state.selectedUid}${qs}`, { agentKey: state.selectedAgent.apiKey });
     toast('Deleted.');
     location.hash = `#/folder/${state.selectedFolder ?? 'inbox'}`;
     await loadList(state.selectedAgent, state.selectedFolder);

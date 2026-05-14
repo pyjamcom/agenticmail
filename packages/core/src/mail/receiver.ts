@@ -180,13 +180,91 @@ export class MailReceiver {
     }
   }
 
-  async deleteMessage(uid: number, mailbox = 'INBOX'): Promise<void> {
+  /**
+   * Permanently remove a single message via IMAP EXPUNGE.
+   *
+   * DANGEROUS — EXPUNGE is mailbox-wide. The IMAP semantics are:
+   *
+   *   1. STORE +FLAGS (\Deleted) on the target UID
+   *   2. EXPUNGE → removes EVERY message in the mailbox that has
+   *      \Deleted set, not just the one we just flagged
+   *
+   * If any other messages in the mailbox already had \Deleted
+   * (from a previous half-completed delete, an agent operation,
+   * an external client) they all vanish too. This is the IMAP
+   * spec, not an ImapFlow quirk.
+   *
+   * Callers that just want "delete this email" — i.e. the Gmail
+   * UX — should use `moveToTrash()` instead, which moves the
+   * message to the trash mailbox without touching \Deleted.
+   * Reserve `expungeMessage` for explicit "empty trash" /
+   * permanent-delete UI paths.
+   *
+   * If the server supports UIDPLUS (RFC 4315), we use UID EXPUNGE
+   * to limit the scope to the target UID — even then, callers
+   * should treat this as the destructive option.
+   */
+  async expungeMessage(uid: number, mailbox = 'INBOX'): Promise<void> {
     const lock = await this.client.getMailboxLock(mailbox);
     try {
+      // Try UID EXPUNGE (RFC 4315) first — narrows scope to a
+      // single UID instead of the mailbox-wide EXPUNGE that the
+      // legacy IMAP4rev1 spec mandates. Falls through to
+      // messageDelete if the server doesn't advertise UIDPLUS.
+      const caps = (this.client as unknown as { capabilities?: Set<string> | string[] }).capabilities;
+      const hasUidPlus = caps
+        && (Array.isArray(caps) ? caps.includes('UIDPLUS') : caps.has('UIDPLUS'));
+      if (hasUidPlus) {
+        await this.client.messageFlagsAdd(String(uid), ['\\Deleted'], { uid: true });
+        // ImapFlow doesn't expose UID EXPUNGE directly; run it raw.
+        const exec = (this.client as unknown as { exec?: (cmd: string, args?: string[]) => Promise<unknown> }).exec;
+        if (typeof exec === 'function') {
+          await exec.call(this.client, 'UID EXPUNGE', [String(uid)]);
+          return;
+        }
+      }
+      // Fallback: mailbox-wide EXPUNGE via messageDelete.
       await this.client.messageDelete(String(uid), { uid: true });
     } finally {
       lock.release();
     }
+  }
+
+  /**
+   * Move a single message to the trash mailbox.
+   *
+   * This is the Gmail / Outlook "delete" semantics — the user
+   * still sees the message under Trash and can restore it. No
+   * \Deleted flag is set, no EXPUNGE happens, so other messages
+   * in the source mailbox are untouched.
+   *
+   * `trashMailbox` is the IMAP folder name (varies by server:
+   * Stalwart uses "Deleted Items" by default; Gmail uses
+   * "[Gmail]/Trash"; etc.). Callers should pass the discovered
+   * name rather than hard-coding.
+   */
+  async moveToTrash(uid: number, fromMailbox: string, trashMailbox: string): Promise<void> {
+    if (fromMailbox === trashMailbox) {
+      throw new Error('source and trash mailbox are the same; use expungeMessage for permanent delete');
+    }
+    // Delegate to the hardened `moveMessage` so we inherit the
+    // MOVE-extension detection + the safe COPY-only fallback.
+    // Keeping the trash semantics in a named method makes call
+    // sites read clearly ("move to trash" vs "move anywhere").
+    return this.moveMessage(uid, fromMailbox, trashMailbox);
+  }
+
+  /**
+   * Back-compat alias for callers that haven't migrated to the
+   * explicit moveToTrash / expungeMessage split yet. Behaviour is
+   * unchanged: this still EXPUNGES (mailbox-wide). New callers
+   * should use moveToTrash() unless they specifically want the
+   * destructive variant.
+   *
+   * @deprecated Use moveToTrash() or expungeMessage() instead.
+   */
+  async deleteMessage(uid: number, mailbox = 'INBOX'): Promise<void> {
+    return this.expungeMessage(uid, mailbox);
   }
 
   /** Mark a message as unseen (unread) */
@@ -219,10 +297,40 @@ export class MailReceiver {
   }
 
   /** Move a message to another folder */
+  /**
+   * Move a single message from one mailbox to another.
+   *
+   * Uses the IMAP MOVE extension (RFC 6851) when the server
+   * advertises it — that command is atomic and scoped: only the
+   * named UID moves, no other mailbox state is touched.
+   *
+   * Falls back to **COPY + STORE +\Deleted on the source UID
+   * ONLY (no EXPUNGE)** when the server doesn't support MOVE.
+   * The source message is left in place with the `\Deleted`
+   * flag; it disappears on the next expunge from a permanent-
+   * delete action. This is intentional: a mailbox-wide EXPUNGE
+   * here would wipe every previously-`\Deleted` message in the
+   * source mailbox as a side effect, which was the bug that
+   * cleared a user's inbox in 0.8.32. Leaving the flag set is
+   * the safe fallback.
+   */
   async moveMessage(uid: number, fromMailbox: string, toMailbox: string): Promise<void> {
     const lock = await this.client.getMailboxLock(fromMailbox);
     try {
-      await this.client.messageMove(String(uid), toMailbox, { uid: true });
+      const caps = (this.client as unknown as { capabilities?: Set<string> | string[] }).capabilities;
+      const hasMove = caps
+        && (Array.isArray(caps) ? caps.includes('MOVE') : caps.has('MOVE'));
+      if (hasMove) {
+        await this.client.messageMove(String(uid), toMailbox, { uid: true });
+        return;
+      }
+      // Pre-MOVE servers: copy then flag the original. We do NOT
+      // call EXPUNGE — that would be mailbox-wide and could wipe
+      // other messages with \Deleted set. The original survives
+      // as a "hidden" entry until an explicit empty-trash flow
+      // expunges the entire source mailbox.
+      await this.client.messageCopy(String(uid), toMailbox, { uid: true });
+      await this.client.messageFlagsAdd(String(uid), ['\\Deleted'], { uid: true });
     } finally {
       lock.release();
     }
@@ -294,12 +402,29 @@ export class MailReceiver {
     }
   }
 
-  /** Batch move multiple messages to another folder */
+  /**
+   * Batch move multiple messages to another folder.
+   *
+   * Same safety model as `moveMessage`: prefers the IMAP MOVE
+   * extension (atomic, scoped per UID); falls back to
+   * COPY + STORE \Deleted with NO mailbox-wide EXPUNGE so an
+   * existing `\Deleted` flag on an unrelated message can't
+   * be amplified into a full inbox wipe.
+   */
   async batchMove(uids: number[], fromMailbox: string, toMailbox: string): Promise<void> {
     if (uids.length === 0) return;
+    const range = uids.join(',');
     const lock = await this.client.getMailboxLock(fromMailbox);
     try {
-      await this.client.messageMove(uids.join(','), toMailbox, { uid: true });
+      const caps = (this.client as unknown as { capabilities?: Set<string> | string[] }).capabilities;
+      const hasMove = caps
+        && (Array.isArray(caps) ? caps.includes('MOVE') : caps.has('MOVE'));
+      if (hasMove) {
+        await this.client.messageMove(range, toMailbox, { uid: true });
+        return;
+      }
+      await this.client.messageCopy(range, toMailbox, { uid: true });
+      await this.client.messageFlagsAdd(range, ['\\Deleted'], { uid: true });
     } finally {
       lock.release();
     }
