@@ -419,6 +419,27 @@ a { color: var(--accent-strong); }
   font-size: 12px; color: var(--muted);
 }
 
+/* Bulk-action toolbar — appears between select-all and refresh
+   when one or more rows are checked. Replaces the visual idle
+   state of the row (toolbar) with action buttons + a "N selected"
+   indicator on the right. */
+.bulk-actions {
+  display: flex; align-items: center; gap: 4px;
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+}
+.bulk-actions[hidden] { display: none; }
+.bulk-actions .bulk-btn {
+  width: 36px; height: 36px;
+  color: var(--ink-soft);
+}
+.bulk-actions .bulk-btn:hover { background: var(--bg-hover); color: var(--ink); }
+.bulk-count {
+  font-size: 12px; font-weight: 500; color: var(--accent-strong);
+  margin-left: 8px;
+}
+
 /* Gmail-style compact rows.
    Single line per message; subject + preview share one truncated
    cell so longer previews tail off with ellipsis instead of
@@ -576,6 +597,13 @@ mark.search-hl {
   max-width: 840px;
   margin: 0 auto;
   width: 100%;
+  /* Clear visual end-of-message marker. The reply / quoted-thread
+     chrome above made the body's bottom ambiguous; a hairline rule
+     gives the reader a definite stop and separates from the
+     attachments / next message in stack views. */
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 28px;
+  margin-bottom: 8px;
 }
 .message-body h1, .message-body h2, .message-body h3 {
   color: var(--pink); margin: 1.2em 0 .4em;

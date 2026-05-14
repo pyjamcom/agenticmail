@@ -19,6 +19,7 @@ export async function openMessage(uid) {
       <button class="icon-btn" id="msg-back" title="Back to list">${icon('back')}</button>
       <button class="icon-btn" id="msg-reply" title="Reply">${icon('reply')}</button>
       <button class="icon-btn" id="msg-reply-all" title="Reply all">${icon('replyAll')}</button>
+      <button class="icon-btn" id="msg-archive" title="Archive">${icon('archive')}</button>
       <button class="icon-btn" id="msg-unread" title="Mark unread">${icon('mailUnread')}</button>
       <button class="icon-btn" id="msg-spam" title="Report spam">${icon('spam')}</button>
       <button class="icon-btn" id="msg-delete" title="Delete">${icon('trash')}</button>
@@ -29,6 +30,7 @@ export async function openMessage(uid) {
   document.getElementById('msg-back').addEventListener('click', () => { location.hash = `#/folder/${state.selectedFolder ?? 'inbox'}`; });
   document.getElementById('msg-reply').addEventListener('click', () => openReply(false));
   document.getElementById('msg-reply-all').addEventListener('click', () => openReply(true));
+  document.getElementById('msg-archive').addEventListener('click', () => archiveMessage());
   document.getElementById('msg-unread').addEventListener('click', () => markUnread());
   document.getElementById('msg-spam').addEventListener('click', () => markSpam());
   document.getElementById('msg-delete').addEventListener('click', () => deleteMessage());
@@ -219,6 +221,24 @@ async function markUnread() {
  * route is POST /mail/messages/:uid/spam — it does the move +
  * flags the message so future scans treat it as known spam.
  */
+/**
+ * Archive the open message — move it to the Archive folder.
+ * No confirm dialog; archive is non-destructive (Gmail UX) so
+ * the user can always go to Archive and move things back.
+ */
+async function archiveMessage() {
+  if (!state.currentMessage || !state.selectedAgent) return;
+  try {
+    const imap = state.folderNames?.[state.selectedFolder] ?? 'INBOX';
+    await apiPost(`/mail/messages/${state.selectedUid}/archive`, { folder: imap }, { agentKey: state.selectedAgent.apiKey });
+    toast('Archived.');
+    location.hash = `#/folder/${state.selectedFolder ?? 'inbox'}`;
+    await loadList(state.selectedAgent, state.selectedFolder);
+  } catch (err) {
+    toast(`Archive failed: ${err.message}`, true);
+  }
+}
+
 async function markSpam() {
   if (!state.currentMessage || !state.selectedAgent) return;
   const ok = await confirmModal({

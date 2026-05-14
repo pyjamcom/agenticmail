@@ -38,6 +38,11 @@ const FOLDER_MATCHERS = {
   drafts:  /^drafts?\b|\[gmail\]\/drafts/i,
   spam:    /^junk\b|junk mail|^spam\b|\[gmail\]\/spam/i,
   trash:   /^trash\b|deleted items|deleted messages|\[gmail\]\/trash|\[gmail\]\/bin/i,
+  // Archive is a Gmail/Outlook concept — most servers don't ship
+  // with one by default. We auto-create on demand (see the API's
+  // archive endpoint) so this matcher only needs to recognise
+  // existing folders.
+  archive: /^archives?\b|^all archive\b/i,
   all:     /^all mail\b|\[gmail\]\/all/i,
 };
 
@@ -72,10 +77,11 @@ export async function ensureFolderCache(agent) {
   } catch {
     // Discovery failed — fall back to the most common defaults so
     // at least Inbox + Sent work for vanilla Stalwart.
-    state.folderNames.sent   = 'Sent Items';
-    state.folderNames.drafts = 'Drafts';
-    state.folderNames.spam   = 'Junk Mail';
-    state.folderNames.trash  = 'Trash';
+    state.folderNames.sent    = 'Sent Items';
+    state.folderNames.drafts  = 'Drafts';
+    state.folderNames.spam    = 'Junk Mail';
+    state.folderNames.trash   = 'Trash';
+    state.folderNames.archive = 'Archive';
   }
 }
 
@@ -91,6 +97,14 @@ export async function loadList(agent, folder) {
         <input type="checkbox" id="list-select-all-input" />
       </label>
       <button class="icon-btn list-refresh" title="Refresh" id="list-refresh-btn">${icon('refresh', { size: 18 })}</button>
+      <div class="bulk-actions" id="bulk-actions" hidden>
+        <button class="icon-btn bulk-btn" id="bulk-archive" title="Archive selected">${icon('archive', { size: 18 })}</button>
+        <button class="icon-btn bulk-btn" id="bulk-delete" title="Delete selected">${icon('trash', { size: 18 })}</button>
+        <button class="icon-btn bulk-btn" id="bulk-spam" title="Report as spam">${icon('spam', { size: 18 })}</button>
+        <button class="icon-btn bulk-btn" id="bulk-mark-read" title="Mark as read">${icon('check', { size: 18 })}</button>
+        <button class="icon-btn bulk-btn" id="bulk-mark-unread" title="Mark as unread">${icon('mailUnread', { size: 18 })}</button>
+        <span class="bulk-count" id="bulk-count"></span>
+      </div>
       <div class="list-toolbar-spacer"></div>
       <span class="count-text" id="list-count"></span>
     </div>
@@ -101,7 +115,17 @@ export async function loadList(agent, folder) {
     const checked = e.target.checked;
     document.querySelectorAll('#list-rows .row-check input[type=checkbox]')
       .forEach(cb => { cb.checked = checked; });
+    updateBulkActions();
   });
+  // Wire bulk-action handlers — each gathers the selected UIDs,
+  // calls the matching batch endpoint, and reloads the list. The
+  // toolbar visibility is driven by `updateBulkActions` which is
+  // called every time a checkbox flips.
+  document.getElementById('bulk-archive')?.addEventListener('click', () => runBulkAction(agent, folder, 'archive'));
+  document.getElementById('bulk-delete')?.addEventListener('click',  () => runBulkAction(agent, folder, 'delete'));
+  document.getElementById('bulk-spam')?.addEventListener('click',    () => runBulkAction(agent, folder, 'spam'));
+  document.getElementById('bulk-mark-read')?.addEventListener('click',   () => runBulkAction(agent, folder, 'mark-read'));
+  document.getElementById('bulk-mark-unread')?.addEventListener('click', () => runBulkAction(agent, folder, 'mark-unread'));
 
   // Drafts are a SQL-backed app primitive, not an IMAP mailbox.
   // The autosave path writes to /drafts (sqlite) and the agent
@@ -204,6 +228,20 @@ export function renderList() {
   if (state.selectedFolder === 'starred') {
     filtered = filtered.filter(m => flagsHas(m.flags, '\\Flagged'));
   }
+  // Defensive Sent-folder filter. The API serves the IMAP Sent
+  // mailbox directly, but some Stalwart configurations (or
+  // misconfigured saveSentCopy targets) can land messages whose
+  // sender ISN'T the active agent in Sent. Filter client-side
+  // so the user only ever sees messages they actually sent.
+  // This is a safety net — the server-side fix lives in
+  // saveSentCopy and the dispatcher's send path.
+  if (state.selectedFolder === 'sent' && state.selectedAgent?.email) {
+    const me = state.selectedAgent.email.toLowerCase();
+    filtered = filtered.filter(m => {
+      const fromAddr = (m.from?.[0]?.address ?? '').toLowerCase();
+      return fromAddr === me;
+    });
+  }
 
   const hlTerm = filters?.subject || filters?.from || filters?.text || '';
 
@@ -270,6 +308,12 @@ export function renderList() {
   }).join('');
 
   root.querySelectorAll('.list-row').forEach(el => {
+    // Checkbox change on individual rows — drives the bulk-action
+    // toolbar visibility. Attached separately from the row click
+    // handler so clicking the box doesn't propagate to "open
+    // message".
+    const cb = el.querySelector('.row-check input[type=checkbox]');
+    cb?.addEventListener('change', updateBulkActions);
     el.addEventListener('click', (e) => {
       // Star click — toggle via API and optimistically update the
       // local flags so the icon flips without a reload.
@@ -296,6 +340,112 @@ export function renderList() {
       location.hash = `#/m/${uid}`;
     });
   });
+}
+
+/**
+ * Read every checked row's UID. Empty array when nothing is
+ * selected. Used by the bulk-action handlers and toolbar
+ * visibility logic.
+ */
+function getSelectedUids() {
+  const uids = [];
+  document.querySelectorAll('#list-rows .list-row').forEach(row => {
+    const cb = row.querySelector('.row-check input[type=checkbox]');
+    if (cb?.checked) {
+      const uid = Number(row.dataset.uid);
+      if (Number.isFinite(uid)) uids.push(uid);
+    }
+  });
+  return uids;
+}
+
+/**
+ * Toggle the visibility of the bulk-action toolbar based on
+ * current selection. Also updates the count label so the user
+ * sees "3 selected" etc. Called on every checkbox change +
+ * after each successful bulk action.
+ */
+function updateBulkActions() {
+  const uids = getSelectedUids();
+  const bar = document.getElementById('bulk-actions');
+  const count = document.getElementById('bulk-count');
+  if (!bar || !count) return;
+  if (uids.length === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  count.textContent = `${uids.length} selected`;
+}
+
+/**
+ * Execute a bulk action against every currently-selected row.
+ * Maps the action name to the matching batch endpoint, fires
+ * one request, then reloads the list so the rows disappear /
+ * change visibly. Confirm dialogs only on destructive actions
+ * (delete, spam) — archive + mark-read/unread are silent.
+ */
+async function runBulkAction(agent, folder, action) {
+  const uids = getSelectedUids();
+  if (uids.length === 0) return;
+  const imap = state.folderNames?.[folder] ?? 'INBOX';
+  let confirmTitle = '';
+  let confirmBody = '';
+  let confirmLabel = '';
+  let endpoint = '';
+  let body = { uids, folder: imap };
+  let danger = false;
+  switch (action) {
+    case 'archive':
+      endpoint = '/mail/batch/archive';
+      break;
+    case 'delete':
+      // From Trash, batch/trash falls through to permanent
+      // expunge; everywhere else it's a move-to-trash.
+      endpoint = '/mail/batch/trash';
+      danger = true;
+      confirmTitle = folder === 'trash' ? `Delete ${uids.length} message${uids.length === 1 ? '' : 's'} forever?` : `Move ${uids.length} message${uids.length === 1 ? '' : 's'} to Trash?`;
+      confirmBody = folder === 'trash' ? "This can't be undone." : 'You can recover them from Trash.';
+      confirmLabel = folder === 'trash' ? 'Delete forever' : 'Move to Trash';
+      break;
+    case 'spam':
+      // No batch/spam route yet — fall back to batch/move with
+      // the auto-discovered Spam folder.
+      endpoint = '/mail/batch/move';
+      body.toFolder = state.folderNames?.spam ?? 'Junk Mail';
+      danger = true;
+      confirmTitle = `Report ${uids.length} message${uids.length === 1 ? '' : 's'} as spam?`;
+      confirmBody = 'They will be moved to the Junk folder.';
+      confirmLabel = 'Report spam';
+      break;
+    case 'mark-read':
+      endpoint = '/mail/batch/seen';
+      break;
+    case 'mark-unread':
+      endpoint = '/mail/batch/unseen';
+      break;
+    default:
+      return;
+  }
+  if (confirmTitle) {
+    const { confirmModal } = await import('./modal.js');
+    const ok = await confirmModal({ title: confirmTitle, body: confirmBody, confirm: confirmLabel, danger });
+    if (!ok) return;
+  }
+  try {
+    await apiPost(endpoint, body, { agentKey: agent.apiKey });
+    toast(`${uids.length} message${uids.length === 1 ? '' : 's'} ${
+      action === 'archive' ? 'archived' :
+      action === 'delete' ? (folder === 'trash' ? 'deleted' : 'moved to Trash') :
+      action === 'spam' ? 'reported as spam' :
+      action === 'mark-read' ? 'marked as read' :
+      'marked as unread'
+    }.`);
+    // Reload so the rows that moved/changed visibly update.
+    await loadList(agent, folder);
+  } catch (err) {
+    toast(`Bulk ${action} failed: ${err.message}`, true);
+  }
 }
 
 /**

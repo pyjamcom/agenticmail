@@ -19,6 +19,7 @@ export const FOLDERS = [
   { id: 'starred', label: 'Starred',  icon: 'starOutline' },
   { id: 'sent',    label: 'Sent',     icon: 'sent' },
   { id: 'drafts',  label: 'Drafts',   icon: 'drafts' },
+  { id: 'archive', label: 'Archive',  icon: 'archive' },
   { id: 'all',     label: 'All Mail', icon: 'allMail', requiresDiscovery: true },
   { id: 'spam',    label: 'Spam',     icon: 'spam' },
   { id: 'trash',   label: 'Trash',    icon: 'trash' },

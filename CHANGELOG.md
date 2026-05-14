@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.36] - 2026-05-14
+
+### Added — Archive folder, archive button, bulk-action toolbar
+
+Three connected pieces of the same UX gap:
+
+**Archive folder.** New sidebar entry between Drafts and All Mail with the proper IMAP `\Archive` semantics. Auto-discovered via `specialUse === '\Archive'` + name-pattern fallback (`/^archives?\b/i`). On first archive against a vanilla Stalwart, the API auto-creates the folder so the move doesn't 404.
+
+**Single-message archive.** New API endpoint `POST /mail/messages/:uid/archive` moves a message to the archive folder. Adds an archive button to the message-view toolbar between Reply-all and Mark-unread. Archive is non-destructive (Gmail UX) so it skips the confirm modal — toast on success, the user can always undo from the Archive folder.
+
+**Bulk-action toolbar.** When any row checkbox is checked, the list toolbar shows action buttons + a "N selected" counter:
+
+- **Archive** → `POST /mail/batch/archive` (new). Auto-discovers archive folder, creates it if missing.
+- **Delete** → `POST /mail/batch/trash` (new). Move-to-Trash by default; from inside Trash it falls through to permanent expunge. Confirm modal with folder-aware copy.
+- **Spam** → `POST /mail/batch/move` with `toFolder: <auto-discovered Spam>`. Confirm modal.
+- **Mark as read** / **Mark as unread** → existing `POST /mail/batch/seen` / `unseen`. Silent.
+
+Selecting all via the header checkbox flips every visible row; per-row checkboxes also drive the toolbar in / out of view.
+
+### Fixed — Received mail showing up in Sent on some configurations
+
+The previous `saveSentCopy` helper appended outgoing mail to a hard-coded `'Sent Items'` folder. On Stalwart installs that name their folder just `Sent` (or any other variant), every APPEND silently failed with a warning log — leaving the Sent folder empty and explaining why outgoing mail seemed to disappear there. Now uses the same auto-discovery the sidebar does: prefers `specialUse === '\Sent'`, falls back to name-pattern matching, caches per-account.
+
+The web UI also gets a defensive client-side filter: in the Sent folder, only messages whose `from` matches the active agent's email are shown. Server-side mis-routing (if it happens) can't trick the UI into displaying received mail as "Sent" anymore.
+
+### Changed — Visible end-of-message border in the body view
+
+Added a hairline `border-bottom` to `.message-body` so the reader gets a definite stop after the body and quoted-thread chrome. Disambiguates body / attachments / reply-card boundaries.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.7.20 | 0.7.21 |
+| `@agenticmail/cli` | 0.8.35 | 0.8.36 |
+
+Plugin manifest mirrored to 0.8.36. core / mcp / claudecode unchanged.
+
 ## [0.8.35] - 2026-05-14
 
 ### Fixed — Refresh always reset the active inbox to the host

@@ -415,17 +415,36 @@ async function notifyLocalRecipientsOfNewMail(
   }
 }
 
-/** Append a sent message to the agent's Sent folder (fire-and-forget) */
-function saveSentCopy(authUser: string, password: string, config: AgenticMailConfig, raw: Buffer): void {
-  (async () => {
-    try {
-      const receiver = await getReceiver(authUser, password, config);
-      await receiver.appendMessage(raw, 'Sent Items', ['\\Seen']);
-    } catch (err) {
-      // Best-effort — don't let Sent copy failures affect the send response
-      console.warn(`[mail] Failed to save Sent copy for ${authUser}: ${(err as Error).message}`);
+/**
+ * Append a sent message to the agent's Sent folder (fire-and-forget).
+ *
+ * Auto-discovers the correct folder name instead of hard-coding
+ * 'Sent Items'. Different mail servers use different names —
+ * Stalwart defaults to `Sent`, Outlook installs often `Sent Items`,
+ * macOS Mail can mount it as `Sent Messages`. Before this lookup,
+ * the hard-coded name would silently fail on every server that
+ * didn't match, leaving an empty Sent folder. The first match
+ * is cached on the IMAP capability set so we only pay the
+ * listFolders cost once per process.
+ */
+const sentFolderCache = new Map<string, string>(); // authUser → folder path
+async function saveSentCopy(authUser: string, password: string, config: AgenticMailConfig, raw: Buffer): Promise<void> {
+  try {
+    const receiver = await getReceiver(authUser, password, config);
+    let folder = sentFolderCache.get(authUser);
+    if (!folder) {
+      const folders = await receiver.listFolders();
+      const sentRe = /^sent\b|sent items|sent mail|sent messages|\[gmail\]\/sent/i;
+      folder = folders.find(f => f.specialUse === '\\Sent')?.path
+        ?? folders.find(f => sentRe.test(f.name) || sentRe.test(f.path))?.path
+        ?? 'Sent Items';   // last-resort fallback
+      sentFolderCache.set(authUser, folder);
     }
-  })();
+    await receiver.appendMessage(raw, folder, ['\\Seen']);
+  } catch (err) {
+    // Best-effort — don't let Sent copy failures affect the send response
+    console.warn(`[mail] Failed to save Sent copy for ${authUser}: ${(err as Error).message}`);
+  }
 }
 
 export function createMailRoutes(accountManager: AccountManager, config: AgenticMailConfig, db: Database, gatewayManager?: GatewayManager): Router {
@@ -1160,6 +1179,124 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
 
       const envelopes = await receiver.listEnvelopes('Spam', { limit, offset });
       res.json({ messages: envelopes, count: envelopes.length, total: mailboxInfo.exists, folder: 'Spam' });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Archive a single message — move it to the agent's Archive
+   * mailbox. Auto-discovers the archive folder using the
+   * `\Archive` specialUse marker first (the IMAP-blessed signal)
+   * and falls back to common names. Creates `Archive` on the fly
+   * if nothing exists; without that step, first-archive on a
+   * vanilla Stalwart would 404.
+   *
+   * Body: { folder?: string } — source folder; defaults to INBOX.
+   */
+  router.post('/mail/messages/:uid/archive', requireAgent, async (req, res, next) => {
+    try {
+      const agent = req.agent!;
+      const uid = parseInt(req.params.uid);
+      if (isNaN(uid) || uid < 1) {
+        res.status(400).json({ error: 'Invalid UID' });
+        return;
+      }
+      const sourceFolder = (req.body?.folder as string) || 'INBOX';
+      const password = getAgentPassword(agent);
+      const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
+      // Find a real archive mailbox. Prefer the IMAP \Archive
+      // specialUse hint; fall back to common names; create if missing.
+      const folders = await receiver.listFolders();
+      const archiveRe = /^archives?\b|^all archive\b/i;
+      let archiveFolder = folders.find(f => f.specialUse === '\\Archive')?.path
+        ?? folders.find(f => archiveRe.test(f.name) || archiveRe.test(f.path))?.path;
+      if (!archiveFolder) {
+        try { await receiver.createFolder('Archive'); } catch { /* race or already-exists is fine */ }
+        archiveFolder = 'Archive';
+      }
+      if (archiveFolder === sourceFolder) {
+        res.status(400).json({ error: 'Message already in archive' });
+        return;
+      }
+      await receiver.moveMessage(uid, sourceFolder, archiveFolder);
+      res.json({ ok: true, archive: archiveFolder });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Batch archive — same shape as `batch/move` but with
+   * auto-discovery of the archive target. Single-call convenience
+   * for the web UI's bulk-action toolbar.
+   */
+  router.post('/mail/batch/archive', requireAgent, async (req, res, next) => {
+    try {
+      const agent = req.agent!;
+      const { uids: rawUids, folder } = req.body || {};
+      const uids = validateUids(rawUids);
+      if (!uids) {
+        res.status(400).json({ error: 'uids must be a non-empty array of positive integers (max 1000)' });
+        return;
+      }
+      const sourceFolder = (folder as string) || 'INBOX';
+      const password = getAgentPassword(agent);
+      const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
+      const folders = await receiver.listFolders();
+      const archiveRe = /^archives?\b|^all archive\b/i;
+      let archiveFolder = folders.find(f => f.specialUse === '\\Archive')?.path
+        ?? folders.find(f => archiveRe.test(f.name) || archiveRe.test(f.path))?.path;
+      if (!archiveFolder) {
+        try { await receiver.createFolder('Archive'); } catch { /* race */ }
+        archiveFolder = 'Archive';
+      }
+      if (archiveFolder === sourceFolder) {
+        res.status(400).json({ error: 'Messages already in archive' });
+        return;
+      }
+      await receiver.batchMove(uids, sourceFolder, archiveFolder);
+      res.json({ ok: true, archived: uids.length, archive: archiveFolder });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Batch move-to-trash — the safe alternative to
+   * `batch/delete`'s mailbox-wide EXPUNGE. The web UI's bulk
+   * Delete action calls this. Trash folder is auto-discovered;
+   * if the user is already in Trash, falls through to the
+   * existing batch-delete (permanent expunge) which is the
+   * natural "empty trash" flow.
+   */
+  router.post('/mail/batch/trash', requireAgent, async (req, res, next) => {
+    try {
+      const agent = req.agent!;
+      const { uids: rawUids, folder } = req.body || {};
+      const uids = validateUids(rawUids);
+      if (!uids) {
+        res.status(400).json({ error: 'uids must be a non-empty array of positive integers (max 1000)' });
+        return;
+      }
+      const sourceFolder = (folder as string) || 'INBOX';
+      const password = getAgentPassword(agent);
+      const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
+      const folders = await receiver.listFolders();
+      const trashRe = /^trash\b|deleted items|deleted messages|\[gmail\]\/trash|\[gmail\]\/bin/i;
+      const trashFolder = folders.find(f => f.specialUse === '\\Trash')?.path
+        ?? folders.find(f => trashRe.test(f.name) || trashRe.test(f.path))?.path;
+      if (!trashFolder || trashFolder === sourceFolder) {
+        // Either no trash mailbox, or the user is in Trash — do
+        // the permanent expunge variant. The user opted into
+        // batch/trash from Trash specifically (UI surfaces
+        // "Delete forever" copy there), so this is intended.
+        await receiver.batchDelete(uids, sourceFolder);
+        res.json({ ok: true, deleted: uids.length });
+        return;
+      }
+      await receiver.batchMove(uids, sourceFolder, trashFolder);
+      res.json({ ok: true, trashed: uids.length, trash: trashFolder });
     } catch (err) {
       next(err);
     }
