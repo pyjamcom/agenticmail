@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.35] - 2026-05-14
+
+### Fixed — Refresh always reset the active inbox to the host
+
+Refreshing the web UI (or opening it in a new tab) always
+re-selected the bridge / host agent, even when the user had
+explicitly switched to a sub-agent's inbox. The bootstrap
+flow picked the bridge from the freshly-loaded `/accounts`
+response and ignored whatever the user had been looking at.
+
+Now persists the selected agent id in `localStorage` under
+`agenticmail.selectedAgentId` on every `selectAgent` call.
+Bootstrap reads it first; falls back to the bridge if the
+stored id is gone (agent deleted) or absent (first visit).
+The key is cleared on sign-out so a re-login starts clean.
+
+### Added — Drafts persist attachments across reopen
+
+0.8.31's compose autosave wrote to `/drafts` (SQL) but the
+schema had no place for binary blobs, so attachments stayed in
+memory only — close the modal, reopen the draft, and your
+attached PDF / image was gone. 0.8.32 documented this as
+intentional. The user disagreed; here's the fix.
+
+New migration `015_draft_attachments.sql`:
+
+```sql
+ALTER TABLE drafts ADD COLUMN attachments TEXT;
+```
+
+The column stores a JSON array of `{filename, contentType,
+content (base64), size}` entries. The web UI's 20 MB total cap
+is preserved; the server adds its own 25 MB sanity bound to
+refuse pathological payloads (413 Payload Too Large).
+
+API changes:
+
+- **`POST /drafts`** and **`PUT /drafts/:id`** now accept an
+  `attachments` field with the shape above.
+- **`PUT`** treats `attachments` as **optional partial-update**:
+  it's only written when the field is explicitly present in the
+  body. An autosave that just updates the body text doesn't wipe
+  the existing attachments.
+- New endpoint **`GET /drafts/:id`** returns a single draft with
+  full attachment content (base64). The list endpoint
+  `GET /drafts` continues to return metadata only (filename /
+  contentType / size) so the sidebar list payload stays small.
+- **`POST /drafts/:id/send`** materialises persisted attachments
+  into the nodemailer `attachments` array with
+  `encoding: 'base64'` so sending a draft now includes the files.
+
+Web UI changes:
+
+- The compose modal's autosave includes `attachments` in every
+  payload; adding or removing a chip explicitly schedules a save
+  so the draft round-trip stays in sync.
+- `openDraft(id)` calls the new single-draft endpoint and
+  rehydrates `pendingAttachments` with the persisted blobs;
+  chips show up in the modal exactly as the user left them.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/core` | 0.7.5 | 0.7.6 |
+| `@agenticmail/api` | 0.7.19 | 0.7.20 |
+| `@agenticmail/cli` | 0.8.34 | 0.8.35 |
+
+Plugin manifest mirrored to 0.8.35. mcp / claudecode unchanged.
+
+Tests: 339 core tests still pass.
+
 ## [0.8.34] - 2026-05-14
 
 ### Fixed — Drafts sidebar showed nothing

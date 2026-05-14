@@ -55,8 +55,15 @@ function showAuthErr(msg) {
 }
 function signOut() {
   localStorage.removeItem('agenticmail.masterKey');
+  localStorage.removeItem('agenticmail.selectedAgentId');
   location.reload();
 }
+
+// localStorage key for the inbox the user was last viewing.
+// Persisted on every successful agent switch and consulted on
+// bootstrap so a refresh / reopen lands on the same account
+// instead of bouncing back to the bridge.
+const STORAGE_LAST_AGENT = 'agenticmail.selectedAgentId';
 
 document.getElementById('auth-submit').addEventListener('click', signIn);
 document.getElementById('auth-key').addEventListener('keydown', e => {
@@ -77,7 +84,15 @@ async function bootstrap() {
       return a.name.localeCompare(b.name);
     });
     state.agents = all;
-    const initial = state.agents.find(isBridgeAgent) ?? state.agents[0];
+    // Prefer the inbox the user was last viewing (persisted in
+    // localStorage on every selectAgent call). Falls back to the
+    // bridge if the stored id is gone (agent was deleted) or the
+    // user never switched. Fixes the "refresh always bounces me
+    // back to the host account" bug.
+    const lastId = localStorage.getItem(STORAGE_LAST_AGENT);
+    const initial = (lastId && state.agents.find(a => a.id === lastId))
+      ?? state.agents.find(isBridgeAgent)
+      ?? state.agents[0];
     if (initial) await selectAgent(initial);
     renderProfile();
     populateComposeFrom();
@@ -96,6 +111,11 @@ async function selectAgent(agent) {
   state.selectedAgent = agent;
   state.selectedUid = null;
   state.currentMessage = null;
+  // Persist the selection so a page refresh lands back on this
+  // inbox rather than bouncing to the bridge. Stored under a
+  // separate key from the master key so signing out clears it
+  // cleanly without affecting auth.
+  try { localStorage.setItem(STORAGE_LAST_AGENT, agent.id); } catch { /* private mode etc. */ }
   // Reset the per-agent folder cache so a fresh discovery runs
   // against the new agent's IMAP. Otherwise switching to an
   // account that uses different folder names (e.g. Gmail relay

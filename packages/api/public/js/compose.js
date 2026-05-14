@@ -102,8 +102,10 @@ export async function openDraft(draftId) {
   wireAutosave();
   wireAttachmentPicker();
   try {
-    const data = await apiGet('/drafts', { agentKey: state.selectedAgent.apiKey });
-    const draft = (data?.drafts ?? []).find(d => d.id === draftId);
+    // Use the single-draft endpoint, which returns attachment
+    // content in full (the list endpoint only sends metadata to
+    // keep the sidebar payload small).
+    const draft = await apiGet(`/drafts/${encodeURIComponent(draftId)}`, { agentKey: state.selectedAgent.apiKey });
     if (!draft) throw new Error('Draft not found');
     document.getElementById('compose-to').value = draft.to_addr ?? '';
     document.getElementById('compose-cc').value = draft.cc ?? '';
@@ -111,6 +113,19 @@ export async function openDraft(draftId) {
     document.getElementById('compose-body').value = draft.text_body ?? '';
     document.getElementById('compose-title').textContent =
       `Draft: ${draft.subject || '(no subject)'}`;
+    // Rehydrate attachment chips with the persisted blobs. Map
+    // the server-side `size` field back into the in-memory
+    // `sizeBytes` alias the rest of the compose code uses for
+    // the UI-side 20 MB cap.
+    pendingAttachments = Array.isArray(draft.attachments)
+      ? draft.attachments.map(a => ({
+          filename: a.filename,
+          contentType: a.contentType,
+          content: a.content,
+          encoding: 'base64',
+          sizeBytes: typeof a.size === 'number' ? a.size : 0,
+        }))
+      : [];
     renderAttachmentChips();
     setComposeStatus('Loaded from Drafts');
     setTimeout(() => document.getElementById('compose-body').focus(), 50);
@@ -174,12 +189,27 @@ function readComposeFields() {
   const subject = document.getElementById('compose-subject').value.trim();
   const text = document.getElementById('compose-body').value;
   const cc = document.getElementById('compose-cc').value.trim();
-  if (!to && !subject && !text.trim() && !cc) return null;
+  if (!to && !subject && !text.trim() && !cc && pendingAttachments.length === 0) return null;
+  // The API expects `{ filename, contentType, content (base64),
+  // size }` per attachment. Drop the local-only sizeBytes alias
+  // and the redundant encoding field — the server defaults to
+  // base64 anyway.
+  const attachments = pendingAttachments.map(a => ({
+    filename: a.filename,
+    contentType: a.contentType,
+    content: a.content,
+    size: a.sizeBytes,
+  }));
   return {
     to: to || null,
     subject: subject || null,
     text: text || null,
     cc: cc || null,
+    // Always send `attachments` (even empty) so the server clears
+    // the stored blob when the user removes every chip. The PUT
+    // route uses `hasOwnProperty('attachments')` to distinguish
+    // "leave alone" from "set to empty".
+    attachments,
   };
 }
 
@@ -278,6 +308,11 @@ function wireAttachmentPicker() {
       }
     }
     renderAttachmentChips();
+    // Persist the new attachments to the draft so a "close and
+    // reopen" round-trip keeps them. Without this, attachments
+    // only ever lived in memory until the user typed in another
+    // field and triggered autosave organically.
+    scheduleAutosave();
   });
 }
 
@@ -310,6 +345,9 @@ function renderAttachmentChips() {
     el.addEventListener('click', () => {
       pendingAttachments.splice(Number(el.dataset.attRemove), 1);
       renderAttachmentChips();
+      // Same reason as the picker: removing a chip needs to
+      // persist or the draft round-trip will resurrect the file.
+      scheduleAutosave();
     });
   });
 }

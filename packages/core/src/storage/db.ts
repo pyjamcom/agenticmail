@@ -368,6 +368,18 @@ CREATE INDEX IF NOT EXISTS idx_pending_notification ON pending_outbound(notifica
 -- v0.8.x behaviour, fully back-compat).
 ALTER TABLE agent_tasks ADD COLUMN output_schema TEXT;
 `,
+  '015_draft_attachments.sql': `
+-- Persist attachments alongside their draft.
+--
+-- Stored as a JSON array on the row: each entry is
+-- { filename, contentType, content (base64), size }. The web UI
+-- cap is 20 MB total per draft, which SQLite handles fine without
+-- bloating other queries — the column is only fetched on the
+-- per-draft GET (not on the list endpoint) so the Drafts sidebar
+-- stays snappy. NULL means "no attachments", fully back-compat
+-- with rows from before this migration.
+ALTER TABLE drafts ADD COLUMN attachments TEXT;
+`,
 };
 
 function runMigrations(database: Database): void {

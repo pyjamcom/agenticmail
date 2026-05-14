@@ -169,38 +169,125 @@ export function createFeatureRoutes(
 
   // ─── Drafts ───
 
+  /**
+   * Normalise an attachments value coming in on POST/PUT bodies.
+   * Returns a JSON string suitable for sqlite or null. Each entry
+   * is { filename, contentType, content (base64), size }. The web
+   * UI's 20 MB total cap is enforced client-side; this is a
+   * server-side sanity bound to refuse pathological payloads.
+   */
+  const MAX_DRAFT_ATTACHMENTS_BYTES = 25 * 1024 * 1024;
+  function normaliseDraftAttachments(raw: unknown): string | null {
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    let totalBytes = 0;
+    const cleaned = raw.map((a: any) => {
+      const content = typeof a?.content === 'string' ? a.content : '';
+      // base64 → ~3/4 bytes per char; approximate the on-wire size.
+      totalBytes += Math.ceil(content.length * 0.75);
+      return {
+        filename: typeof a?.filename === 'string' ? a.filename : 'attachment',
+        contentType: typeof a?.contentType === 'string' ? a.contentType : 'application/octet-stream',
+        content,
+        encoding: 'base64' as const,
+        size: typeof a?.size === 'number' ? a.size : Math.ceil(content.length * 0.75),
+      };
+    });
+    if (totalBytes > MAX_DRAFT_ATTACHMENTS_BYTES) {
+      throw Object.assign(new Error('attachments exceed 25 MB total'), { status: 413 });
+    }
+    return JSON.stringify(cleaned);
+  }
+
+  /**
+   * List drafts. Strips the heavy `attachments` column from each
+   * row — only metadata (filename/contentType/size) is included so
+   * the sidebar list payload stays small. Fetch a single draft via
+   * GET /drafts/:id to get full attachment content for editing.
+   */
   router.get('/drafts', requireAgent, async (req, res, next) => {
     try {
-      const rows = db.prepare('SELECT * FROM drafts WHERE agent_id = ? ORDER BY updated_at DESC').all(req.agent!.id);
-      res.json({ drafts: rows });
+      const rows = db.prepare('SELECT * FROM drafts WHERE agent_id = ? ORDER BY updated_at DESC').all(req.agent!.id) as any[];
+      const stripped = rows.map(r => {
+        let metaOnly: any[] | undefined;
+        if (r.attachments) {
+          try {
+            metaOnly = (JSON.parse(r.attachments) as any[]).map(a => ({
+              filename: a.filename, contentType: a.contentType, size: a.size,
+            }));
+          } catch { metaOnly = undefined; }
+        }
+        return { ...r, attachments: metaOnly };
+      });
+      res.json({ drafts: stripped });
+    } catch (err) { next(err); }
+  });
+
+  /**
+   * Fetch a single draft with full attachment content (base64) so
+   * the compose modal can rehydrate every field on resume-edit.
+   */
+  router.get('/drafts/:id', requireAgent, async (req, res, next) => {
+    try {
+      const row = db.prepare('SELECT * FROM drafts WHERE id = ? AND agent_id = ?').get(req.params.id, req.agent!.id) as any;
+      if (!row) { res.status(404).json({ error: 'Draft not found' }); return; }
+      if (row.attachments) {
+        try { row.attachments = JSON.parse(row.attachments); }
+        catch { row.attachments = []; }
+      }
+      res.json(row);
     } catch (err) { next(err); }
   });
 
   router.post('/drafts', requireAgent, async (req, res, next) => {
     try {
-      const { to, subject, text, html, cc, bcc, inReplyTo, references } = req.body || {};
+      const { to, subject, text, html, cc, bcc, inReplyTo, references, attachments } = req.body || {};
+      const attachmentsJson = normaliseDraftAttachments(attachments);
       const id = uuidv4();
-      db.prepare(`INSERT INTO drafts (id, agent_id, to_addr, subject, text_body, html_body, cc, bcc, in_reply_to, refs)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      db.prepare(`INSERT INTO drafts (id, agent_id, to_addr, subject, text_body, html_body, cc, bcc, in_reply_to, refs, attachments)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, req.agent!.id, to || null, subject || null, text || null, html || null,
-          cc || null, bcc || null, inReplyTo || null, references ? JSON.stringify(references) : null);
+          cc || null, bcc || null, inReplyTo || null, references ? JSON.stringify(references) : null,
+          attachmentsJson);
       res.json({ ok: true, id });
-    } catch (err) { next(err); }
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status) { res.status(status).json({ error: (err as Error).message }); return; }
+      next(err);
+    }
   });
 
   router.put('/drafts/:id', requireAgent, async (req, res, next) => {
     try {
-      const { to, subject, text, html, cc, bcc, inReplyTo, references } = req.body || {};
-      const result = db.prepare(`UPDATE drafts SET to_addr=?, subject=?, text_body=?, html_body=?,
-        cc=?, bcc=?, in_reply_to=?, refs=?, updated_at=datetime('now')
-        WHERE id=? AND agent_id=?`)
-        .run(to || null, subject || null, text || null, html || null,
-          cc || null, bcc || null, inReplyTo || null,
-          references ? JSON.stringify(references) : null,
-          req.params.id, req.agent!.id);
+      const { to, subject, text, html, cc, bcc, inReplyTo, references, attachments } = req.body || {};
+      // Allow the client to omit `attachments` to leave the existing
+      // value alone (partial updates) — only overwrite when the
+      // field is explicitly present. Otherwise an autosave that
+      // doesn't re-send the base64 blob each tick would lose the
+      // attachments on every keystroke.
+      const includeAttachments = Object.prototype.hasOwnProperty.call(req.body || {}, 'attachments');
+      const attachmentsJson = includeAttachments ? normaliseDraftAttachments(attachments) : undefined;
+      const sql = includeAttachments
+        ? `UPDATE drafts SET to_addr=?, subject=?, text_body=?, html_body=?,
+            cc=?, bcc=?, in_reply_to=?, refs=?, attachments=?, updated_at=datetime('now')
+            WHERE id=? AND agent_id=?`
+        : `UPDATE drafts SET to_addr=?, subject=?, text_body=?, html_body=?,
+            cc=?, bcc=?, in_reply_to=?, refs=?, updated_at=datetime('now')
+            WHERE id=? AND agent_id=?`;
+      const params: unknown[] = [
+        to || null, subject || null, text || null, html || null,
+        cc || null, bcc || null, inReplyTo || null,
+        references ? JSON.stringify(references) : null,
+      ];
+      if (includeAttachments) params.push(attachmentsJson);
+      params.push(req.params.id, req.agent!.id);
+      const result = db.prepare(sql).run(...params as [string]);
       if (result.changes === 0) { res.status(404).json({ error: 'Draft not found' }); return; }
       res.json({ ok: true });
-    } catch (err) { next(err); }
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status) { res.status(status).json({ error: (err as Error).message }); return; }
+      next(err);
+    }
   });
 
   router.delete('/drafts/:id', requireAgent, async (req, res, next) => {
@@ -225,6 +312,23 @@ export function createFeatureRoutes(
       const wakeList = normalizeWakeList(req.body?.wake);
       const customHeaders = wakeHeaders(wakeList);
 
+      // Materialise persisted attachments into the nodemailer
+      // shape the sender expects. The draft column stores base64
+      // strings; nodemailer accepts them as-is when we pass
+      // `encoding: 'base64'`.
+      let persistedAttachments: Array<{ filename: string; content: string; contentType?: string; encoding: 'base64' }> | undefined;
+      if (draft.attachments) {
+        try {
+          const parsed = JSON.parse(draft.attachments) as Array<{ filename: string; contentType?: string; content: string }>;
+          persistedAttachments = parsed.map(a => ({
+            filename: a.filename,
+            contentType: a.contentType,
+            content: a.content,
+            encoding: 'base64' as const,
+          }));
+        } catch { /* corrupt blob — fall through with no attachments */ }
+      }
+
       const mailOpts = {
         to: draft.to_addr,
         subject: draft.subject || '(no subject)',
@@ -234,6 +338,7 @@ export function createFeatureRoutes(
         bcc: draft.bcc || undefined,
         inReplyTo: draft.in_reply_to || undefined,
         references: draft.refs ? JSON.parse(draft.refs) : undefined,
+        ...(persistedAttachments && persistedAttachments.length > 0 ? { attachments: persistedAttachments } : {}),
         ...(Object.keys(customHeaders).length > 0 ? { headers: customHeaders } : {}),
       };
 
