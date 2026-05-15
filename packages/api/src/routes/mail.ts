@@ -1392,6 +1392,36 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
 
   // ─── Spam Management ───
 
+  /**
+   * Resolve the agent's spam folder, with auto-discovery + create-on-
+   * miss. Mirrors the archive/trash discovery patterns above.
+   *
+   * Order of preference:
+   *   1. IMAP `\Junk` specialUse marker (the spec-blessed signal)
+   *   2. Common names: "Junk Mail" (Stalwart's default), "Junk", "Spam"
+   *   3. Create "Junk Mail" — matches what Stalwart bootstraps so the
+   *      next IMAP login won't surface a duplicate folder.
+   *
+   * Pre-0.9.27 every spam route hard-coded `'Spam'`. The list route
+   * thus returned empty (Stalwart's actual spam folder is "Junk Mail")
+   * and the mark-as-spam route created a duplicate "Spam" folder that
+   * the UI never showed. Both together: user marks an email as spam,
+   * UI silently moves it into a phantom "Spam" folder, Spam tab in the
+   * UI queries "Junk Mail" (correct), gets nothing back. Two bugs
+   * cancelling each other to look like "spam is broken".
+   */
+  async function resolveSpamFolder(receiver: import('@agenticmail/core').MailReceiver): Promise<string> {
+    const folders = await receiver.listFolders();
+    const junkRe = /^junk\b|^junk mail\b|^spam\b/i;
+    const found = folders.find(f => f.specialUse === '\\Junk')?.path
+      ?? folders.find(f => junkRe.test(f.name) || junkRe.test(f.path))?.path;
+    if (found) return found;
+    // Default to Stalwart's canonical name so we don't fragment the
+    // user's mailbox layout across hosts.
+    try { await receiver.createFolder('Junk Mail'); } catch { /* race / already-exists */ }
+    return 'Junk Mail';
+  }
+
   // List spam folder
   router.get('/mail/spam', requireAgent, async (req, res, next) => {
     try {
@@ -1401,16 +1431,17 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
       const password = getAgentPassword(agent);
       const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
 
+      const spamFolder = await resolveSpamFolder(receiver);
       let mailboxInfo;
       try {
-        mailboxInfo = await receiver.getMailboxInfo('Spam');
+        mailboxInfo = await receiver.getMailboxInfo(spamFolder);
       } catch {
-        res.json({ messages: [], count: 0, total: 0, folder: 'Spam' });
+        res.json({ messages: [], count: 0, total: 0, folder: spamFolder });
         return;
       }
 
-      const envelopes = await receiver.listEnvelopes('Spam', { limit, offset });
-      res.json({ messages: envelopes, count: envelopes.length, total: mailboxInfo.exists, folder: 'Spam' });
+      const envelopes = await receiver.listEnvelopes(spamFolder, { limit, offset });
+      res.json({ messages: envelopes, count: envelopes.length, total: mailboxInfo.exists, folder: spamFolder });
     } catch (err) {
       next(err);
     }
@@ -1534,7 +1565,7 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
     }
   });
 
-  // Report as spam — move to Spam folder
+  // Report as spam — move to the agent's spam folder (auto-discovered)
   router.post('/mail/messages/:uid/spam', requireAgent, async (req, res, next) => {
     try {
       const agent = req.agent!;
@@ -1546,15 +1577,19 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
       const folder = req.body?.folder || 'INBOX';
       const password = getAgentPassword(agent);
       const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
-      try { await receiver.createFolder('Spam'); } catch { /* already exists */ }
-      await receiver.moveMessage(uid, folder, 'Spam');
-      res.json({ ok: true, movedToSpam: true });
+      const spamFolder = await resolveSpamFolder(receiver);
+      if (spamFolder === folder) {
+        res.status(400).json({ error: 'Message already in spam' });
+        return;
+      }
+      await receiver.moveMessage(uid, folder, spamFolder);
+      res.json({ ok: true, movedToSpam: true, spam: spamFolder });
     } catch (err) {
       next(err);
     }
   });
 
-  // Not spam — move from Spam to INBOX
+  // Not spam — move from the spam folder back to INBOX
   router.post('/mail/messages/:uid/not-spam', requireAgent, async (req, res, next) => {
     try {
       const agent = req.agent!;
@@ -1565,8 +1600,9 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
       }
       const password = getAgentPassword(agent);
       const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
-      await receiver.moveMessage(uid, 'Spam', 'INBOX');
-      res.json({ ok: true, movedToInbox: true });
+      const spamFolder = await resolveSpamFolder(receiver);
+      await receiver.moveMessage(uid, spamFolder, 'INBOX');
+      res.json({ ok: true, movedToInbox: true, spam: spamFolder });
     } catch (err) {
       next(err);
     }

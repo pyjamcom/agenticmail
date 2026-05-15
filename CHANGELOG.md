@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.27] - 2026-05-15
+
+### Fixed — Spam folder always empty even after marking emails as spam
+
+User report: clicking "Spam" in the web UI sidebar always showed `{ "messages": [], "count": 0, "total": 0 }` from `GET /mail/digest?folder=Junk%20Mail`, even though they had explicitly marked emails as spam.
+
+Two bugs cancelling each other:
+
+1. **`GET /mail/spam` (list)** hard-coded `'Spam'` as the folder name, but Stalwart's default spam folder is `'Junk Mail'`. The list route looked at the wrong folder and silently returned empty.
+2. **`POST /mail/messages/:uid/spam` (mark)** hard-coded `'Spam'` as the destination, creating a duplicate "Spam" folder on first use. Mail went there but the UI never queried it.
+
+Together: user marks an email → it lands in a phantom "Spam" folder → UI's Spam tab queries the correct `"Junk Mail"` (auto-discovered via `/mail/folders` since 0.9.16) → gets nothing back.
+
+Same trick `/mail/messages/:uid/archive` and `/mail/messages/:uid/trash` already use: a `resolveSpamFolder()` helper that looks for the IMAP `\Junk` specialUse marker first, falls back to common names (`Junk Mail` / `Junk` / `Spam`), and creates `"Junk Mail"` if nothing exists. Applied to all three spam routes:
+
+- `GET /mail/spam` — list
+- `POST /mail/messages/:uid/spam` — mark as spam
+- `POST /mail/messages/:uid/not-spam` — unmark + move to INBOX
+
+### Versions
+
+- `@agenticmail/api@0.9.19`
+- `@agenticmail/cli@0.9.27`
+
 ## [0.9.26] - 2026-05-15
 
 ### Fixed — `agenticmail-codex install --workspace` crashed with "Dynamic require of fs is not supported"
