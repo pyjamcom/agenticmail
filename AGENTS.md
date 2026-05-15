@@ -43,8 +43,9 @@ that:
 5. Provisions a default agent.
 6. Waits for `GET http://127.0.0.1:3829/api/agenticmail/health` to
    return 200 (port read from config, never hardcoded).
-7. Wires the Claude Code integration (`agenticmail claudecode`) —
-   harmless no-op if Claude Code isn't installed.
+7. Wires the Claude Code integration (`agenticmail claudecode`) and
+   the OpenAI Codex CLI integration (`agenticmail codex`) — both are
+   harmless no-ops if their host CLI isn't installed.
 
 External email relay (Gmail / custom domain) and SMS are deliberately
 SKIPPED — those need user-owned credentials nobody else has. The
@@ -62,9 +63,10 @@ external mail any time later with `agenticmail setup` (interactive).
   Do NOT try to run bootstrap on Node 20 — `@agenticmail/core@0.7.x`
   uses the built-in `node:sqlite` module which requires Node 22.
 
-After `bootstrap` finishes, tell the user to **restart Claude Code**
-(or whichever MCP-aware client they use) so the new MCP server entry
-in `~/.claude.json` takes effect.
+After `bootstrap` finishes, tell the user to **restart their host CLI**
+(Claude Code, Codex, or whichever MCP-aware client they use) so the
+new MCP server entry takes effect. The MCP block lands in
+`~/.claude.json` for Claude Code and `~/.codex/config.toml` for Codex.
 
 ### Right after install — ASK THE USER about dispatcher tuning
 
@@ -86,11 +88,18 @@ finishes:**
 >     agenticmail-claudecode tune --max-wakes-per-thread N
 > Or by editing `~/.agenticmail/dispatcher.json` directly."
 
-When the user answers (call the number `N`), you apply it via:
+When the user answers (call the number `N`), you apply it via the
+right host's CLI — both share the same `~/.agenticmail/dispatcher.json`
+so tuning one tunes the other:
 
 ```bash
+# Claude Code host
 agenticmail-claudecode tune --max-wakes-per-thread <N>
 pm2 restart agenticmail-claudecode-dispatcher
+
+# OpenAI Codex host
+agenticmail-codex tune --max-wakes-per-thread <N>
+pm2 restart agenticmail-codex-dispatcher
 ```
 
 Also ask **once** whether they want to raise the global concurrency
@@ -144,7 +153,7 @@ primitive for AgenticMail too:
 3. send_email({
      to:   "vesper@localhost",                          // primary owner of step 1
      cc:   "orion@localhost, claudecode@localhost",     // teammates + yourself
-     wake: ["vesper"],                                  // ★ only Vesper gets a Claude turn
+     wake: ["vesper"],                                  // ★ only Vesper gets a host turn
      subject: "Build a small terminal game",
      text: [
        "Team —",
@@ -172,10 +181,15 @@ primitive for AgenticMail too:
 What happens under the hood:
 - The mail server pushes an SSE wake-up to **every local recipient**
   the moment the email lands.
-- The **`wake` allowlist** gates which of them actually get a Claude
+- The **`wake` allowlist** gates which of them actually get a host
   turn from the dispatcher. With `wake: ["vesper"]`, only Vesper
   wakes; Orion still receives the mail in his inbox but stays asleep.
   Without `wake`, every CC'd recipient wakes (the v0.8.x default).
+- Each woken agent runs under the SDK of whichever host owns it —
+  Claude-owned agents wake via `@anthropic-ai/claude-agent-sdk`,
+  Codex-owned agents wake via `@openai/codex-sdk`. Per-account
+  ownership is recorded in `metadata.host` (auto-stamped by MCP
+  `create_account` from each host's `AGENTICMAIL_MCP_HOST` env var).
 - Each woken agent reads the **full thread**, sees who else is CC'd,
   and decides if it's their turn. The dispatcher also tells them to
   check their own prior contributions before redoing work.
@@ -185,8 +199,8 @@ What happens under the hood:
 
 ### `wake` is the single biggest token saver on large threads
 
-Without it, every CC'd recipient gets a Claude turn on every reply.
-15 agents on a thread × every reply = 15 Claude turns per round.
+Without it, every CC'd recipient gets a host turn on every reply.
+15 agents on a thread × every reply = 15 host turns per round.
 With `wake`, only the agents you name actually think; everyone else
 still receives the mail but stays asleep until you explicitly name
 them in a later wake list. Pass `wake: []` to deliver silently.
@@ -243,28 +257,73 @@ agents drive their own handoffs.
 
 ---
 
-## 3. If the user asks you to set up the Claude Code integration
+## 3. If the user asks you to set up a host integration
 
 If AgenticMail is already installed (`agenticmail --version` works,
-`curl -s http://127.0.0.1:3829/api/agenticmail/health` returns 200):
+`curl -s http://127.0.0.1:3829/api/agenticmail/health` returns 200),
+pick the host and run its one-command installer:
 
 ```bash
-agenticmail claudecode
+# Anthropic Claude Code
+agenticmail-claudecode install
+
+# OpenAI Codex CLI (optionally bind every worker to a project root)
+agenticmail-codex install
+agenticmail-codex install --workspace ~/projects/<repo>
 ```
 
-One command. It:
-- Provisions a dedicated `claudecode` bridge agent inside AgenticMail
-  (idempotent — reuses if already present)
-- Writes an MCP server entry to `~/.claude.json`
-- Generates one Claude Code subagent file per AgenticMail agent under
-  `~/.claude/agents/agenticmail-<name>.md`
-- Starts the dispatcher daemon under PM2 (PM2 must be installed;
-  `npm install -g pm2` if missing)
+Both installers do the same five things for their respective host:
 
-Then tell the user to restart Claude Code.
+- Provision a dedicated bridge agent inside AgenticMail (idempotent —
+  `claudecode@localhost` for Claude Code, `codex@localhost` for Codex)
+- Stamp `metadata.host = '<host>'` on the bridge so the dispatcher's
+  ownership filter routes correctly when both hosts are co-installed
+- Write an MCP server entry to the host's config file (`~/.claude.json`
+  for Claude Code, `~/.codex/config.toml` for Codex), including
+  `default_tools_approval_mode = "approve"` on Codex so worker turns
+  can actually call MCP tools without being interactively prompted
+- Generate one host-native subagent file per AgenticMail account the
+  host owns (`.md` for Claude Code, `.toml` for Codex). Strict
+  ownership: the installer only writes files for accounts where
+  `metadata.host` matches its own bridge name
+- Register lifecycle hooks (SessionStart / UserPromptSubmit / Stop)
+  and start a PM2 dispatcher daemon for the host. PM2 must be
+  installed; `npm install -g pm2` if missing.
 
-To check current status: `agenticmail claudecode --status`.
-To remove: `agenticmail claudecode --remove`.
+After both installers run, tell the user to restart the relevant host
+CLI session so the new MCP server is picked up. For Codex they also
+need to run `/hooks` and press `t` on each of the three AgenticMail
+hooks the first time (Codex doesn't auto-trust new hooks).
+
+### Co-installation: both hosts on one machine
+
+Co-installing is fully supported. Each host owns its own teammates
+(`metadata.host` is the source of truth), and each dispatcher only
+watches its own. Claude-owned agents wake via the Anthropic SDK;
+Codex-owned agents wake via the OpenAI Codex SDK.
+
+Legacy accounts created before per-host ownership shipped have no
+`metadata.host` value. The operator settles ownership with the
+`claim` CLI:
+
+```bash
+# Take ownership of every unclaimed teammate
+agenticmail-claudecode claim --all
+
+# Hand a specific teammate to the other host (unclaim first, then re-claim)
+agenticmail-claudecode claim vesper --unclaim
+agenticmail-codex claim vesper
+```
+
+### Status / remove
+
+```bash
+agenticmail-claudecode status      # or: status --json
+agenticmail-codex      status      # or: status --json
+
+agenticmail-claudecode uninstall   # add --purge-bridge to delete the bridge too
+agenticmail-codex      uninstall   # add --purge-bridge to delete the bridge too
+```
 
 ---
 
@@ -276,26 +335,45 @@ each other for coordination (real RFC-822 mail through a local
 Stalwart server), and optionally email the public internet through
 a Gmail relay or a custom domain.
 
-The Claude Code integration (`@agenticmail/claudecode`, new in 0.7/0.8)
-makes every AgenticMail agent callable as a native Claude Code subagent
-via `Agent { subagent_type: "agenticmail-<name>" }`, AND auto-wakes
-agents when mail arrives in their inbox (workers run inside the
-user's existing Claude Code OAuth — no separate Anthropic key needed).
+Two host integrations ship today:
+
+- **`@agenticmail/claudecode`** — makes every AgenticMail agent
+  callable as a native Claude Code subagent via
+  `Agent { subagent_type: "agenticmail-<name>" }`, and auto-wakes
+  agents on inbound mail. Workers run inside the user's existing
+  Claude Code OAuth — no separate Anthropic key needed.
+- **`@agenticmail/codex`** — same shape for OpenAI's Codex CLI.
+  Agents are callable via `spawn_agent({ agent_type: "agenticmail-<name>" })`
+  and woken by a parallel codex dispatcher daemon. Workers ride on
+  `@openai/codex-sdk`.
+
+Both can run side-by-side on one machine; per-account ownership
+(`metadata.host`) routes each agent to the right dispatcher with no
+dual-wake. Grok Build (xAI) and Hermes Agent (Nous) are on the
+roadmap.
 
 ---
 
 ## 5. If the user asks you to verify it's working
 
 ```bash
-agenticmail status                   # service health
-agenticmail claudecode --status      # integration health
-curl -s http://127.0.0.1:3829/api/agenticmail/health   # raw API health
+agenticmail status                                      # service health
+agenticmail-claudecode status                           # Claude integration health
+agenticmail-codex      status                           # Codex integration health
+curl -s http://127.0.0.1:3829/api/agenticmail/health    # raw API health
 ```
 
-Inside a fresh Claude Code session after restart:
+Inside a fresh **Claude Code** session after restart:
 
 ```
 Agent { subagent_type: "agenticmail-secretary", prompt: "what's your name and email?" }
+```
+
+Inside a fresh **Codex** session after restart (run `/hooks` and approve
+the three AgenticMail hooks once):
+
+```
+spawn_agent({ agent_type: "agenticmail-secretary", message: "what's your name and email?" })
 ```
 
 The subagent should respond as the bridge agent ("secretary" by
@@ -345,6 +423,8 @@ behalf via the Bash tool.
 | "I want a Gmail-like view" | `agenticmail web` |
 | "have Fola reply to my last email from accounting" | MCP — `call_agent` or `Agent { subagent_type: "agenticmail-fola" }` |
 | "coordinate Vesper and Orion on this build" | MCP — `send_email` with both on CC + `wake: ["vesper"]`, then `wait_for_email` |
+| "set a project root all my codex sub-agents should work in" | `agenticmail-codex install --workspace ~/projects/<name>` |
+| "transfer this agent from Claude to Codex" | `agenticmail-claudecode claim <name> --unclaim` then `agenticmail-codex claim <name>` |
 
 Rule of thumb: **UI (web or shell) for monitoring by a human, MCP
 for programmatic work driven by you.**
@@ -368,12 +448,13 @@ for programmatic work driven by you.**
 
 | Path | What it is |
 |---|---|
-| `packages/core/` | `@agenticmail/core` — DB layer, account/mail/gateway managers, spam filter, search index. Uses `node:sqlite` (Node 22+). |
-| `packages/api/` | `@agenticmail/api` — Express REST API. Mounts integration routes when `@agenticmail/claudecode` is installed. |
-| `packages/mcp/` | `@agenticmail/mcp` — MCP server (62 tools + `request_tools`/`invoke` meta-tools + `_account` per-call identity). |
-| `packages/claudecode/` | `@agenticmail/claudecode` — Claude Code integration. Dispatcher daemon, persona engine, HTTP install endpoint, subagent .md generator. |
+| `packages/core/` | `@agenticmail/core` — DB layer, account/mail/gateway managers, spam filter, search index, `AGENT_ROLES` (including `'bridge'`), `MESSAGE_NOT_FOUND` sentinel. Uses `node:sqlite` (Node 22+). |
+| `packages/api/` | `@agenticmail/api` — Express REST API. Mounts integration routes when `@agenticmail/claudecode` is installed. Also serves the Gmail-style web UI under `public/`, including the per-host avatar registry (`public/js/avatar.js` + `/branding/`). |
+| `packages/mcp/` | `@agenticmail/mcp` — MCP server (62 tools + `request_tools`/`invoke` meta-tools + `_account` per-call identity). `create_account` auto-stamps `metadata.host` from `AGENTICMAIL_MCP_HOST`. |
+| `packages/claudecode/` | `@agenticmail/claudecode` — Claude Code integration. Dispatcher daemon, persona engine, HTTP install endpoint, subagent `.md` generator, `claim` CLI. |
+| `packages/codex/` | `@agenticmail/codex` — OpenAI Codex CLI integration. Same shape as `claudecode`: TOML config writers (`~/.codex/config.toml`), subagent `.toml` generator (`~/.codex/agents/`), lifecycle hooks (`~/.codex/hooks.json`), PM2 dispatcher that wakes via `@openai/codex-sdk`. Supports `--workspace <dir>` to bind every worker to a shared project tree. |
 | `packages/openclaw/` | `@agenticmail/openclaw` — OpenClaw runtime integration. Older code path, still pinned to `@agenticmail/core@^0.5`. |
-| `agenticmail/` | `@agenticmail/cli` — the user-facing `agenticmail` binary. Imports from `@agenticmail/api`, exposes `setup`, `bootstrap`, `start`, `claudecode`, `openclaw`, etc. |
+| `agenticmail/` | `@agenticmail/cli` — the user-facing `agenticmail` binary. Imports from `@agenticmail/api`, exposes `setup`, `bootstrap`, `start`, etc. Ships wrapper bins so `agenticmail-claudecode` and `agenticmail-codex` are on PATH from a single global install. |
 
 ## 9. Build / test / lint commands
 
@@ -385,9 +466,12 @@ npm run build --workspace=@agenticmail/core  # build one package
 npx vitest run -w packages/claudecode        # run one package's tests
 ```
 
-Test counts as of `0.8.2`:
-- `@agenticmail/core`: 339 specs
-- `@agenticmail/claudecode`: 75 specs
+Test counts as of `0.9.26`:
+- `@agenticmail/core`: 362 specs
+- `@agenticmail/claudecode`: 136 specs
+- `@agenticmail/codex`: 80 specs
+- `@agenticmail/api`: 19 specs
+- `@agenticmail/cli`: 61 specs
 - `@agenticmail/mcp`: 8 specs (catalogue audit)
 
 ## 10. Conventions to follow when contributing
@@ -403,6 +487,11 @@ Test counts as of `0.8.2`:
 - **Engines `>=22` for all packages that depend on `@agenticmail/core`**
   (because of `node:sqlite`). Openclaw stays on `>=20` because it
   still depends on `@agenticmail/core@^0.5`.
+- **ESM-only.** All host packages (`api`, `claudecode`, `codex`, `cli`,
+  `mcp`) are tsup-bundled ESM. No `require()` calls anywhere — they
+  throw `Dynamic require of "X" is not supported` at runtime even
+  when TypeScript is fine with them. Use top-level `import` statements
+  for `node:fs` / `node:path` / etc.
 - **Releases follow the `@agenticmail/cli` version**. Tag is `v<cli-version>`
   on GitHub. Commit message: `Release X.Y.Z: <short description>`.
 - **CHANGELOG.md** at repo root uses Keep-a-Changelog format with
