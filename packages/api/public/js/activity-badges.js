@@ -15,6 +15,8 @@ import { onSystemEvent } from './system-stream.js';
 import { state, API_URL } from './state.js';
 
 const BADGE_CONTAINER_ID = 'activity-badges';
+const SHELL_ID = 'activity-badges-shell';
+const COUNT_ID = 'activity-badges-count';
 
 /**
  * Map of workerId → { agentName, kind, lastTool, turnCount,
@@ -59,8 +61,20 @@ function statusFor(lastTool) {
 
 function render() {
   const root = document.getElementById(BADGE_CONTAINER_ID);
+  const shell = document.getElementById(SHELL_ID);
+  const countEl = document.getElementById(COUNT_ID);
   if (!root) return;
   const list = Array.from(workers.values()).sort((a, b) => (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0));
+  // Drive the shell + count pill so users see "3 active" even when only
+  // 2 badges fit in the scroll viewport. Empty state hides the whole
+  // shell so the topbar doesn't carry a dangling "0" pill.
+  if (shell) shell.hidden = list.length === 0;
+  if (countEl) {
+    countEl.textContent = String(list.length);
+    countEl.title = list.length === 1
+      ? '1 agent active'
+      : `${list.length} agents active`;
+  }
   if (list.length === 0) { root.innerHTML = ''; return; }
   root.innerHTML = list.map(w => {
     const initial = (w.agentName ?? '?').slice(0, 1).toUpperCase();

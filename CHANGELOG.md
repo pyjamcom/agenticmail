@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.15] - 2026-05-15
+
+### Fixed — No sound or browser notification on agent-to-agent mail (the bulk of real traffic)
+
+User report: *"am not getting the push notification or the sounds in the web UI anymore."*
+
+### Root cause
+
+`routes/events.ts`'s `watcher.on('new', ...)` handler has THREE code paths that `safeWrite` the event to the per-agent SSE stream:
+
+1. internal agent-to-agent mail (`isInternalEmail(parsed) === true`)
+2. spam-routed mail (`spamResult.isSpam === true`)
+3. the fall-through "normal external" path at the bottom
+
+Only path #3 ran `pushSystemEvent({ type: 'new_mail', ... })` — the bus the web UI subscribes to since 0.9.9. Paths #1 and #2 early-returned BEFORE the fan-out, so the master stream never saw the event.
+
+Most of the user's real traffic is **internal agent-to-agent mail** (orion@localhost replying to vesper@localhost on a coordination thread). All of it took path #1 and never reached the UI's `new_mail` handler. Result: list silently refreshed (via per-agent stream the dispatcher subscribed to) but no chime, no browser notification, no toast.
+
+### Fix
+
+Factor the dual-write into a single `broadcastNew(event)` helper inside the watcher's scope. Every path that previously `safeWrite`d now calls the helper instead. The helper writes once to the per-agent stream and once to the master bus.
+
+```ts
+const broadcastNew = (e: Record<string, unknown>) => {
+  safeWrite(`data: ${JSON.stringify(e)}\n\n`);
+  try {
+    pushSystemEvent({ type: 'new_mail', agentId: agent.id, agentName: agent.name, event: e });
+  } catch { /* never fatal */ }
+};
+```
+
+Three call sites updated. Net: chime, notification, and toast now fire for ALL new-mail classes, not just the external fall-through path.
+
+### Fixed — Activity badges hid agents off the right edge with no way to know
+
+User report: *"whenever there are multiple agents running it does not show all of them status because of the spacing."*
+
+The topbar's `.activity-badges` was `overflow-x: auto` but with `scrollbar-width: none` AND no visible affordance for "there's more". With 4 active agents on a normal-width screen only 2 badges fit; the other 2 were silently clipped off the right edge.
+
+### Fix
+
+Three small UI changes:
+
+1. **Always-visible count pill.** New `<span id="activity-badges-count">` sits to the left of the scrolling strip and renders the active-worker total ("3"). Stable affordance independent of how many badges fit in view. Click target / tooltip shows the friendly form ("3 agents active").
+2. **Edge-fade mask.** The scrollable strip now has a CSS `mask-image` linear gradient that fades to transparent at each end, visually signalling "more content past this edge". Pure CSS, no JS.
+3. **Scroll-snap.** `scroll-snap-type: x proximity` so swiping/trackpad-scrolling never leaves a badge half-clipped at the viewport boundary.
+
+The DOM was restructured: badges now live inside a `<div id="activity-badges-shell">` whose `hidden` attribute is toggled when the worker count is zero (avoids leaving an empty "0" pill in the topbar).
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.9.11 | 0.9.12 |
+| `@agenticmail/cli` | 0.9.14 | 0.9.15 |
+
 ## [0.9.14] - 2026-05-15
 
 ### Fixed — Moving an email to Spam/Archive: mail disappeared from inbox but never showed in the target

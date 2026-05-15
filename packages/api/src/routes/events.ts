@@ -118,6 +118,28 @@ export function createEventRoutes(accountManager: AccountManager, config: Agenti
 
       safeWrite(`data: ${JSON.stringify({ type: 'connected', agentId: agent.id })}\n\n`);
 
+      // Helper: every new-mail event MUST land in two places —
+      //   (a) the per-agent /events SSE (this connection's `safeWrite`),
+      //       which the dispatcher daemon listens on; and
+      //   (b) the master /system/events bus, which the web UI listens on
+      //       since 0.9.9 (one shared SSE replaces N per-agent ones).
+      // Multiple code paths below early-return after firing (a) — internal
+      // agent-to-agent mail, spam-routed mail, deleted-by-rule mail. Before
+      // 0.9.x had this helper, those paths skipped (b) entirely, which
+      // silently broke the web UI's chime/notification for the EXACT
+      // traffic class users see most: agent-to-agent threads.
+      const broadcastNew = (e: Record<string, unknown>) => {
+        safeWrite(`data: ${JSON.stringify(e)}\n\n`);
+        try {
+          pushSystemEvent({
+            type: 'new_mail',
+            agentId: agent.id,
+            agentName: agent.name,
+            event: e,
+          });
+        } catch { /* never fatal — per-agent stream is the primary path */ }
+      };
+
       watcher.on('new', async (event) => {
         // Agent is active — receiving events via SSE
         if (db) touchActivity(db, agent.id);
@@ -171,7 +193,7 @@ export function createEventRoutes(accountManager: AccountManager, config: Agenti
                   if (actions.move_to) await receiver.moveMessage(event.uid, 'INBOX', actions.move_to);
                   (event as any).ruleApplied = { ruleId: ruleResult.ruleId, actions };
                 }
-                safeWrite(`data: ${JSON.stringify(event)}\n\n`);
+                broadcastNew(event as Record<string, unknown>);
                 return;
               }
 
@@ -194,7 +216,7 @@ export function createEventRoutes(accountManager: AccountManager, config: Agenti
                 try { await receiver.createFolder('Spam'); } catch { /* already exists */ }
                 await receiver.moveMessage(event.uid, 'INBOX', 'Spam');
                 (event as any).spam = { score: spamResult.score, category: spamResult.topCategory, movedToSpam: true };
-                safeWrite(`data: ${JSON.stringify(event)}\n\n`);
+                broadcastNew(event as Record<string, unknown>);
                 return;
               }
               if (spamResult.isWarning) {
@@ -217,21 +239,7 @@ export function createEventRoutes(accountManager: AccountManager, config: Agenti
             console.error('[SSE] Spam/rule evaluation error:', (err as Error).message);
           }
         }
-        safeWrite(`data: ${JSON.stringify(event)}\n\n`);
-        // Fan out to the master /system/events bus so the web UI can use
-        // ONE shared SSE for every agent instead of N connections (one
-        // per agent). With 5 agents the old fan-out would saturate the
-        // browser's 6-connections-per-origin cap and block every other
-        // request (page navigation, message fetches, attachments).
-        try {
-          pushSystemEvent({
-            type: 'new_mail',
-            agentId: agent.id,
-            agentName: agent.name,
-            event,
-          });
-        } catch { /* never fatal — the per-agent stream above is the
-                    primary path for the dispatcher */ }
+        broadcastNew(event as Record<string, unknown>);
       });
 
       watcher.on('expunge', (event) => {

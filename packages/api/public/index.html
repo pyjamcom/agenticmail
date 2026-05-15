@@ -42,8 +42,16 @@
       <!-- Real-time worker activity badges. Populated by SSE; one
            badge per active dispatcher worker showing what each
            agent is doing right now (reading, editing, running
-           shell, etc.). Empty when no workers are active. -->
-      <div id="activity-badges" class="activity-badges"></div>
+           shell, etc.). Empty when no workers are active.
+
+           The count pill is always rendered first by activity-badges.js
+           when there's at least one worker — gives users a stable
+           "3 active" affordance independent of how many badges fit
+           in the horizontal-scroll viewport. -->
+      <div id="activity-badges-shell" class="activity-badges-shell" hidden>
+        <span id="activity-badges-count" class="activity-badges-count" title="Active agents"></span>
+        <div id="activity-badges" class="activity-badges"></div>
+      </div>
       <button class="icon-btn" id="sound-toggle-btn" title="Notification sound"></button>
       <button class="icon-btn" id="refresh-btn" title="Refresh (r)" data-icon="refresh"></button>
       <button id="profile-btn" class="profile-trigger" title="Account">

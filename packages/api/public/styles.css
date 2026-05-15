@@ -170,14 +170,49 @@ a { color: var(--accent-strong); }
    events. Each badge shows the agent's initial + name + a short
    verb derived from the worker's `lastTool`. The green dot
    gently pulses so the row reads as "alive" rather than static. */
+/* Shell wraps the always-visible count pill + the scrollable badge
+   row. Two children, side-by-side; the count never scrolls so the
+   user can see how many agents are active even when the scroll viewport
+   is full. */
+.activity-badges-shell {
+  display: flex; align-items: center; gap: 6px;
+  margin-right: 4px;
+  min-width: 0;  /* lets the inner scrollable strip shrink without
+                    pushing siblings off the topbar */
+}
+.activity-badges-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 22px; min-width: 22px; padding: 0 7px;
+  background: var(--pink, #ff4d8c);
+  color: #fff;
+  font-size: 11px; font-weight: 700;
+  border-radius: 999px;
+  flex-shrink: 0;
+  user-select: none;
+}
+/* Horizontal-scrolling strip of badges. We deliberately allow
+   `overflow-x: auto` so the user can swipe / trackpad-scroll through
+   more than fit on screen, and use an edge fade mask so it's visually
+   clear there's more content past the right edge. Scrollbar stays
+   hidden (cleaner topbar) but the count pill + edge fade make
+   "there's more" discoverable. */
 .activity-badges {
   display: flex; align-items: center; gap: 6px;
   max-width: 480px;
   overflow-x: auto;
   scrollbar-width: none;
-  margin-right: 4px;
+  -ms-overflow-style: none;
+  /* Mask creates a gentle fade-out on each end so badges visually
+     hint "I'm continuing past the viewport edge". Pure CSS, no JS. */
+  mask-image: linear-gradient(to right, transparent 0, black 12px, black calc(100% - 16px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 12px, black calc(100% - 16px), transparent 100%);
+  /* Snap-scroll so swiping never leaves a badge half-clipped. */
+  scroll-snap-type: x proximity;
+  /* Ensure the inner strip can shrink inside its flex parent. */
+  min-width: 0;
 }
 .activity-badges::-webkit-scrollbar { display: none; }
+.activity-badge { scroll-snap-align: start; }
 .activity-badge {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px 4px 6px;
@@ -213,10 +248,10 @@ a { color: var(--accent-strong); }
 .activity-badge .badge-status { color: var(--muted); }
 .activity-badge .badge-status::before { content: '· '; opacity: .6; }
 
-/* Mobile — hide badges on narrow viewports; they fold to the
-   topbar's account avatar dropdown anyway. */
+/* Mobile — hide the whole activity-badge shell (count pill + scrolling
+   strip) on narrow viewports; folds into the profile dropdown anyway. */
 @media (max-width: 800px) {
-  .activity-badges { display: none; }
+  .activity-badges-shell { display: none !important; }
 }
 
 /* ─── Profile (top right) ─────────────────────────────────────────── */
