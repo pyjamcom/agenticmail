@@ -21,14 +21,26 @@
  */
 
 import { Dispatcher } from './dispatcher.js';
+import { resolveDispatcherTuning } from './dispatcher-tuning.js';
 
 async function main(): Promise<void> {
+  const tuning = resolveDispatcherTuning();
+  console.error(
+    `[codex-dispatcher-bin] tuning: maxConcurrentWorkers=${tuning.maxConcurrentWorkers ?? '(default)'} ` +
+    `maxWakesPerThread=${tuning.maxWakesPerThread ?? '(default)'} ` +
+    `wakeWindowMs=${tuning.wakeWindowMs ?? '(default)'} ` +
+    `wakeCoalesceMs=${tuning.wakeCoalesceMs ?? '(default)'} ` +
+    `accountSyncIntervalMs=${tuning.accountSyncIntervalMs ?? '(default)'}`,
+  );
   const dispatcher = new Dispatcher({
     apiUrl: process.env.AGENTICMAIL_API_URL,
     masterKey: process.env.AGENTICMAIL_MASTER_KEY,
     agentsDir: process.env.CODEX_AGENTS_DIR,
-    maxConcurrentWorkers: positiveInt(process.env.AGENTICMAIL_DISPATCHER_MAX),
-    accountSyncIntervalMs: positiveInt(process.env.AGENTICMAIL_DISPATCHER_SYNC),
+    maxConcurrentWorkers: tuning.maxConcurrentWorkers,
+    maxWakesPerThread: tuning.maxWakesPerThread,
+    wakeWindowMs: tuning.wakeWindowMs,
+    wakeCoalesceMs: tuning.wakeCoalesceMs,
+    accountSyncIntervalMs: tuning.accountSyncIntervalMs,
   });
 
   // Graceful shutdown on the usual signals (PM2 sends SIGINT on stop).
@@ -62,12 +74,6 @@ async function main(): Promise<void> {
 
   await dispatcher.start();
   // Stay alive — the dispatcher's intervals keep the event loop busy.
-}
-
-function positiveInt(s: string | undefined): number | undefined {
-  if (!s) return undefined;
-  const n = parseInt(s, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 main().catch(err => {

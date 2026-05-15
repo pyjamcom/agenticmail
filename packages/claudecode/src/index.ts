@@ -20,6 +20,12 @@ export { listAccounts, getAccountByName, ensureAccount, deleteAccount, checkApiH
 export { renderSubagentMarkdown, MANAGED_BY_MARKER } from './subagent-template.js';
 export { createIntegrationRoutes } from './http-routes.js';
 export { Dispatcher, type DispatcherOptions, type QueryFn } from './dispatcher.js';
+export {
+  resolveDispatcherTuning,
+  writeDispatcherTuning,
+  defaultDispatcherConfigPath,
+  type DispatcherTuning,
+} from './dispatcher-tuning.js';
 export { loadPersonaForAgent, type LoadPersonaOptions, type LoadedPersona } from './persona-loader.js';
 export { renderPersonaBody } from './subagent-template.js';
 export type {

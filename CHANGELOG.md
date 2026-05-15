@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.16] - 2026-05-15
+
+### Added — Dispatcher tuning knobs are now end-user-tunable
+
+User report: *"how can users easily increase budgets? It looks like we are locking them out with our default settings — what about power users who don't mind 100 agents running simultaneously for same tasks or different tasks?"*
+
+The dispatcher has five rate-limit / concurrency knobs that were
+hardcoded before today. Power users running active multi-agent
+coordination hit the default 10-wakes-per-thread cap routinely and
+had no way to raise it without editing source.
+
+### Knobs now end-user-exposed
+
+| Knob | Default | What it does |
+|---|---|---|
+| `maxConcurrentWorkers` | 50 | Hard cap on simultaneous workers across all agents |
+| `maxWakesPerThread` | 10 | Wakes a single (agent, thread) pair gets per window |
+| `wakeWindowMs` | 86_400_000 (24h) | Rolling window for the above counter |
+| `wakeCoalesceMs` | 30_000 (30s) | Burst-debounce — rapid replies collapse into one wake (set 0 to disable) |
+| `accountSyncIntervalMs` | 30_000 (30s) | How often dispatcher polls /accounts for new agents |
+
+### Three input layers, precedence env > file > default
+
+  1. **Env vars** (PM2 ecosystem.config.cjs):
+
+     ```
+     AGENTICMAIL_DISPATCHER_MAX=200
+     AGENTICMAIL_DISPATCHER_MAX_WAKES_PER_THREAD=50
+     AGENTICMAIL_DISPATCHER_WAKE_WINDOW_MS=86400000
+     AGENTICMAIL_DISPATCHER_COALESCE_MS=30000
+     AGENTICMAIL_DISPATCHER_SYNC=30000
+     ```
+
+  2. **Persistent config file** at `~/.agenticmail/dispatcher.json` (written by the new `tune` CLI subcommand):
+
+     ```json
+     { "version": 1,
+       "maxConcurrentWorkers": 200,
+       "maxWakesPerThread": 50 }
+     ```
+
+  3. **Built-in defaults** when neither is set.
+
+### New `tune` CLI subcommand
+
+Both host integrations got a new subcommand:
+
+```
+agenticmail-claudecode tune                                  # show current settings
+agenticmail-claudecode tune --max-wakes-per-thread 100       # raise budget
+agenticmail-claudecode tune --max-concurrent 200             # raise concurrency
+agenticmail-claudecode tune --wake-coalesce-ms 0             # disable coalescing
+agenticmail-claudecode tune --reset                          # back to defaults
+agenticmail-claudecode tune --json                           # machine-readable
+```
+
+`agenticmail-codex tune` exists with the same flags. The file is shared between hosts — tune once, both dispatchers pick it up on next restart.
+
+### Discoverability fix in the "budget exhausted" log line
+
+The wake-budget-exhausted warning now includes the lever to pull inline:
+
+```
+[dispatcher] wake-budget exhausted for "lyra" on thread "..." —
+  dropped uid=76 (cap=10 per 1440min;
+  raise with AGENTICMAIL_DISPATCHER_MAX_WAKES_PER_THREAD env var,
+  or via ~/.agenticmail/dispatcher.json)
+```
+
+### Fixed — Server-classified spam invisible in the web UI Spam tab
+
+User report: *"Archive returns the emails but Spam still returning empty!"*
+
+`routes/events.ts`'s spam-classifier code path hardcoded the destination folder as `'Spam'`. Stalwart's default junk folder is `'Junk Mail'`, and the web UI's FOLDER_MATCHERS regex resolves `state.folderNames.spam` to whatever junk-like folder already exists — `'Junk Mail'` on a default install. Net: server-classified spam silently disappeared into a parallel `'Spam'` folder while the UI's Spam tab queried `'Junk Mail'`.
+
+User-reported-spam (via the bulk-action toolbar) DID land correctly because that flow uses `state.folderNames.spam` for the destination — same folder it queries. Two parallel folders with the same purpose, only one of which the UI ever saw.
+
+### Fix
+
+Discover the existing junk folder the same way `batch/archive` does — prefer `\Junk` special-use, fall back to a regex match on common names (`junk`/`junk mail`/`spam`/`[gmail]/spam`), only create a new `'Spam'` folder when none exists.
+
+### Fixed — Favicon 404
+
+User report: */favicon.ico → 404*
+
+Dropped the existing 256×256 logo PNG at `public/favicon.ico`. Modern browsers (Chrome, Firefox, Safari, Edge) accept PNG content under the .ico filename. The `<link rel="icon" type="image/png">` tag in index.html already pointed at the canonical logo — this just stops the auxiliary `/favicon.ico` request from 404'ing in the dev tools.
+
+### Tests
+
+- `dispatcher-tuning.test.ts` — 15 tests covering env / file / explicit precedence + idempotent atomic writes + malformed-input tolerance. Mirrored in both `@agenticmail/claudecode` and `@agenticmail/codex`.
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.9.12 | 0.9.13 |
+| `@agenticmail/claudecode` | 0.2.8 | 0.2.9 |
+| `@agenticmail/cli` | 0.9.15 | 0.9.16 |
+
 ## [0.9.15] - 2026-05-15
 
 ### Fixed — No sound or browser notification on agent-to-agent mail (the bulk of real traffic)

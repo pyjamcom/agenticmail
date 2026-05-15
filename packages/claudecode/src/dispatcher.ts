@@ -1667,7 +1667,16 @@ export class Dispatcher {
   private async fireWakeImmediately(account: AgenticMailAccount, event: SSEEvent, threadId: string): Promise<void> {
     const verdict = this.chargeWake(account.id, threadId);
     if (!verdict.ok) {
-      this.log('warn', `[dispatcher] wake-budget exhausted for "${account.name}" on thread "${threadId}" — dropped uid=${event.uid}`);
+      // Include the tuning hint inline so users hitting the cap on
+      // active coordination threads (the common case) immediately know
+      // the lever to pull. Without this, the operator stares at
+      // "wake-budget exhausted" with no idea where to raise the limit.
+      this.log(
+        'warn',
+        `[dispatcher] wake-budget exhausted for "${account.name}" on thread "${threadId}" — ` +
+          `dropped uid=${event.uid} (cap=${this.maxWakesPerThread} per ${Math.round(this.wakeWindowMs / 60000)}min; ` +
+          `raise with AGENTICMAIL_DISPATCHER_MAX_WAKES_PER_THREAD env var, or via ~/.agenticmail/dispatcher.json)`,
+      );
       this.postSkipped(account, event, 'budget-exhausted', `wake budget exhausted for thread "${threadId}" (count=${verdict.count}, cap=${this.maxWakesPerThread})`);
       return;
     }

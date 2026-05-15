@@ -1678,7 +1678,12 @@ export class Dispatcher {
   private async fireWakeImmediately(account: AgenticMailAccount, event: SSEEvent, threadId: string): Promise<void> {
     const verdict = this.chargeWake(account.id, threadId);
     if (!verdict.ok) {
-      this.log('warn', `[dispatcher] wake-budget exhausted for "${account.name}" on thread "${threadId}" — dropped uid=${event.uid}`);
+      this.log(
+        'warn',
+        `[dispatcher] wake-budget exhausted for "${account.name}" on thread "${threadId}" — ` +
+          `dropped uid=${event.uid} (cap=${this.maxWakesPerThread} per ${Math.round(this.wakeWindowMs / 60000)}min; ` +
+          `raise with AGENTICMAIL_DISPATCHER_MAX_WAKES_PER_THREAD env var, or via ~/.agenticmail/dispatcher.json)`,
+      );
       this.postSkipped(account, event, 'budget-exhausted', `wake budget exhausted for thread "${threadId}" (count=${verdict.count}, cap=${this.maxWakesPerThread})`);
       return;
     }

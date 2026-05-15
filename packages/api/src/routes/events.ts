@@ -212,10 +212,33 @@ export function createEventRoutes(accountManager: AccountManager, config: Agenti
               } catch { /* ignore log errors */ }
 
               if (spamResult.isSpam) {
-                // Create Spam folder (idempotent) and move message
-                try { await receiver.createFolder('Spam'); } catch { /* already exists */ }
-                await receiver.moveMessage(event.uid, 'INBOX', 'Spam');
-                (event as any).spam = { score: spamResult.score, category: spamResult.topCategory, movedToSpam: true };
+                // Resolve the EXISTING junk folder before falling back to
+                // creating a new "Spam" folder. Stalwart ships with "Junk
+                // Mail" by default; hardcoding "Spam" here meant every
+                // spam-classified message landed in a brand-new "Spam"
+                // folder while the web UI's Spam tab queried "Junk Mail"
+                // (the one the FOLDER_MATCHERS regex resolves to). Net:
+                // user-reported spam ✓ visible, but server-classified
+                // spam ✗ silently disappearing into a parallel folder.
+                let spamFolder = 'Spam';
+                try {
+                  const folders = await receiver.listFolders();
+                  const junkRe = /^junk\b|junk mail|^spam\b|\[gmail\]\/spam/i;
+                  const existing =
+                    folders.find(f => f.specialUse === '\\Junk')?.path
+                    ?? folders.find(f => junkRe.test(f.name) || junkRe.test(f.path))?.path;
+                  if (existing) {
+                    spamFolder = existing;
+                  } else {
+                    try { await receiver.createFolder('Spam'); } catch { /* race */ }
+                  }
+                } catch {
+                  // listFolders failed — fall back to creating "Spam" the
+                  // way we used to. Better than dropping the message.
+                  try { await receiver.createFolder('Spam'); } catch { /* race */ }
+                }
+                await receiver.moveMessage(event.uid, 'INBOX', spamFolder);
+                (event as any).spam = { score: spamResult.score, category: spamResult.topCategory, movedToSpam: true, folder: spamFolder };
                 broadcastNew(event as Record<string, unknown>);
                 return;
               }

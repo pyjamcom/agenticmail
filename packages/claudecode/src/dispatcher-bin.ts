@@ -3,27 +3,49 @@
  * Standalone bin: `agenticmail-claudecode-dispatcher`.
  *
  * This is what PM2 (or any process supervisor) runs. It builds a
- * Dispatcher with config pulled from env vars + ~/.agenticmail/config.json,
- * starts it, and stays alive until SIGINT/SIGTERM — at which point it
- * cleanly closes every SSE channel before exiting.
+ * Dispatcher with config pulled from env vars + ~/.agenticmail/config.json
+ * + ~/.agenticmail/dispatcher.json, starts it, and stays alive until
+ * SIGINT/SIGTERM — at which point it cleanly closes every SSE channel
+ * before exiting.
  *
- * Env overrides (same as the rest of the package):
+ * Tuning knobs (all optional, precedence env > file > default):
+ *
+ *   AGENTICMAIL_DISPATCHER_MAX                    — max concurrent workers (default 50)
+ *   AGENTICMAIL_DISPATCHER_MAX_WAKES_PER_THREAD   — wakes per (agent, thread) per window (default 10)
+ *   AGENTICMAIL_DISPATCHER_WAKE_WINDOW_MS         — window length ms (default 86_400_000 = 24h)
+ *   AGENTICMAIL_DISPATCHER_COALESCE_MS            — burst-debounce window (default 30_000 = 30s)
+ *   AGENTICMAIL_DISPATCHER_SYNC                   — account sync interval ms (default 30_000)
+ *
+ * Persistent config: ~/.agenticmail/dispatcher.json — same keys (camelCase),
+ * minus the AGENTICMAIL_DISPATCHER_ prefix. See dispatcher-tuning.ts.
+ *
+ * Identity knobs:
  *   AGENTICMAIL_API_URL          Override master API URL.
  *   AGENTICMAIL_MASTER_KEY       Override master key.
  *   CLAUDE_CODE_AGENTS_DIR       Override agents dir (for persona files).
- *   AGENTICMAIL_DISPATCHER_MAX   Concurrency cap (default 10).
- *   AGENTICMAIL_DISPATCHER_SYNC  Account sync interval ms (default 60000).
  */
 
 import { Dispatcher } from './dispatcher.js';
+import { resolveDispatcherTuning } from './dispatcher-tuning.js';
 
 async function main(): Promise<void> {
+  const tuning = resolveDispatcherTuning();
+  console.error(
+    `[dispatcher-bin] tuning: maxConcurrentWorkers=${tuning.maxConcurrentWorkers ?? '(default)'} ` +
+    `maxWakesPerThread=${tuning.maxWakesPerThread ?? '(default)'} ` +
+    `wakeWindowMs=${tuning.wakeWindowMs ?? '(default)'} ` +
+    `wakeCoalesceMs=${tuning.wakeCoalesceMs ?? '(default)'} ` +
+    `accountSyncIntervalMs=${tuning.accountSyncIntervalMs ?? '(default)'}`,
+  );
   const dispatcher = new Dispatcher({
     apiUrl: process.env.AGENTICMAIL_API_URL,
     masterKey: process.env.AGENTICMAIL_MASTER_KEY,
     agentsDir: process.env.CLAUDE_CODE_AGENTS_DIR,
-    maxConcurrentWorkers: positiveInt(process.env.AGENTICMAIL_DISPATCHER_MAX),
-    accountSyncIntervalMs: positiveInt(process.env.AGENTICMAIL_DISPATCHER_SYNC),
+    maxConcurrentWorkers: tuning.maxConcurrentWorkers,
+    maxWakesPerThread: tuning.maxWakesPerThread,
+    wakeWindowMs: tuning.wakeWindowMs,
+    wakeCoalesceMs: tuning.wakeCoalesceMs,
+    accountSyncIntervalMs: tuning.accountSyncIntervalMs,
   });
 
   // Graceful shutdown on the usual signals (PM2 sends SIGINT on stop).
@@ -67,12 +89,6 @@ async function main(): Promise<void> {
   await dispatcher.start();
   // Stay alive — the dispatcher's intervals keep the event loop busy,
   // but we don't await on anything here; signals do the unblocking.
-}
-
-function positiveInt(s: string | undefined): number | undefined {
-  if (!s) return undefined;
-  const n = parseInt(s, 10);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 main().catch(err => {
