@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.31] - 2026-05-15
+
+### Fixed — `wake: []` mid-project killed coordination threads
+
+Real diagnosis from a LinkedIn-rebuild thread that flatlined for 8 hours:
+
+```
+06:31:26  worker for "lyra" finished (893 chars)
+          ← ~8 HOURS OF ZERO DISPATCHER EVENTS →
+14:25:49  waking "atlas" — new-mail uid=94   (operator ping)
+14:30:21  worker for "atlas" finished
+          ← silent again →
+```
+
+The dispatcher was healthy. The persona was the bug. The 0.9.28 wake-reinforcement persona listed `wake: []` as a legitimate "broadcast" pattern for status updates. Agents treated it as "I have nothing to add right now" and ended turns with it — dropping the handoff baton on the floor. Once that happens, every CC'd agent stays asleep and the thread sits dead until a human pings someone back in.
+
+### The fix — "The Baton Rule" in both host personas
+
+`packages/{claudecode,codex}/src/subagent-template.ts` now hard-codes that **`wake: []` is reserved for project completion only**:
+
+> **THE BATON RULE — never drop the chain.** Until the project is genuinely DONE and the thread has been closed with `[FINAL]`/`[DONE]`/`[CLOSED]`/`[WRAP]`, every reply you send MUST either (a) name the next actor in `wake`, OR (b) not be sent at all. `wake: []` (empty array) means "deliver silently, wake NOBODY" — which only makes sense when the work is finished. Using it mid-project terminates the coordination chain.
+
+Plus an explicit decision tree:
+
+| Situation | Right move |
+|---|---|
+| Project in progress, you know who acts next | `wake: ["that-name"]` |
+| Project in progress, you don't know who's next | `wake: ["<coordinator>"]` — bounce the baton back with an explicit question |
+| Project in progress, you have nothing to add | **Do not reply.** `mark_read` and return |
+| Project DONE | `[FINAL]` in subject + `wake: []` (the ONLY legitimate use) |
+
+The old "broadcasting an update no specific teammate needs to act on — silent delivery" example was deleted. A correct example for closing a thread with `[FINAL] LinkedIn rebuild — shipped` was added instead.
+
+### Step 7 sharpened
+
+Previously: *"If no: `mark_read` and return. Silence IS a valid contribution."*
+
+Now: *"If no: **do not reply at all** — `mark_read` and return. Silence IS a valid contribution; a silent broadcast is NOT. The dispatcher only stops poking the chain when YOU mark the message read; it never interprets an empty reply as 'nothing to do here'. DO NOT send a 'no update from me' mail with `wake: []` — that drops the baton on the floor."*
+
+### Versions
+
+- `@agenticmail/claudecode@0.2.17`
+- `@agenticmail/codex@0.1.12`
+- `@agenticmail/cli@0.9.31`
+
+After upgrading, re-run `agenticmail-claudecode install` and `agenticmail-codex install --workspace <dir>` to regenerate every subagent file with the new persona text.
+
 ## [0.9.30] - 2026-05-15
 
 ### Security — dependabot sweep + code-scanning closure
