@@ -361,7 +361,28 @@ export function normalizeWakeList(value: unknown): string[] | undefined {
   if (value === 'all' || value === WAKE_ALL_SENTINEL) return undefined; // opt-out: no allowlist filtering
   const strip = (s: string) => s.trim().replace(/@localhost$/i, '').toLowerCase();
   if (Array.isArray(value)) return value.map(v => strip(String(v))).filter(Boolean);
-  if (typeof value === 'string') return value.split(',').map(strip).filter(Boolean);
+  if (typeof value === 'string') {
+    // Tolerate JSON-stringified arrays — `wake: '["orion","vesper"]'`.
+    // Claude (and any over-eager middleware) sometimes serializes the
+    // array before the MCP call instead of passing it through raw,
+    // and the previous CSV-only path turned that into a one-element
+    // list containing the LITERAL string `'["orion"]'`. The dispatcher
+    // then compared agent names against that quoted-and-bracketed
+    // blob, found no match, and silently dropped every wake.
+    // Symptom in the wild: `list=["[\"orion\"]"]` in the dispatcher
+    // log + "wake allowlist excludes orion" for an email explicitly
+    // addressed to orion.
+    const trimmed = value.trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed.map(v => strip(String(v))).filter(Boolean);
+        }
+      } catch { /* not valid JSON — fall through to CSV path */ }
+    }
+    return value.split(',').map(strip).filter(Boolean);
+  }
   return undefined;
 }
 

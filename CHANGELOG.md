@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.13] - 2026-05-15
+
+### Fixed — Wake allowlist silently excluded everyone when sent as a JSON string
+
+User report: a Claude session sent emails to two sub-agents
+explicitly via `wake: ["orion"]` and `wake: ["vesper"]`, but
+the dispatcher logged:
+
+```
+[dispatcher] wake allowlist excludes "orion" (list=["[\"orion\"]"]) — mail delivered, no Claude turn
+[dispatcher] wake allowlist excludes "vesper" (list=["[\"vesper\"]"]) — mail delivered, no Claude turn
+```
+
+The dispatcher was checking `is "orion" in the list?` against a
+list whose ONLY element was the literal string `'["orion"]'` —
+brackets and quotes baked in. No match → wake excluded → mail
+delivered to the inbox but no Claude turn fired. The sender's
+intent was correctly addressing orion, but no agent woke up.
+
+### Root cause
+
+`normalizeWakeList` in `routes/mail.ts` handled three input
+shapes:
+
+  - real array (`["orion"]`) → used as-is
+  - CSV string (`"orion,vesper"`) → split on commas
+  - anything else → undefined
+
+When Claude (or middleware) JSON-stringified the array before
+the MCP call — producing `wake: '["orion"]'` — the function hit
+the CSV path:
+
+```ts
+if (typeof value === 'string') return value.split(',').map(strip).filter(Boolean);
+```
+
+`'["orion"]'.split(',')` → `['["orion"]']`. The `strip` helper
+trimmed whitespace and stripped `@localhost`, neither of which
+applied → the literal bracketed-and-quoted string survived as
+a single "agent name". Every wake against the real agent name
+then failed.
+
+### Fix
+
+`normalizeWakeList` now detects JSON-array strings before
+falling through to the CSV path:
+
+```ts
+const trimmed = value.trim();
+if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      return parsed.map(v => strip(String(v))).filter(Boolean);
+    }
+  } catch { /* not valid JSON — fall through to CSV path */ }
+}
+return value.split(',').map(strip).filter(Boolean);
+```
+
+The CSV fallback is preserved for genuinely malformed input
+(`"[orion]"` with no quotes around the name is treated as a
+single-name CSV — same behaviour as before).
+
+### Tests
+
+19 api tests pass (was 12, +7 in `wake-list.test.ts`):
+
+  - undefined / null → undefined
+  - `"all"` and `WAKE_ALL_SENTINEL` → undefined (opt-out)
+  - real array → pass through (lowercased, `@localhost` stripped)
+  - CSV string → split on commas
+  - JSON-array string → parsed back to array (the regression fix)
+  - bogus brackets → CSV fallback (no silent drop)
+  - non-string non-array → undefined
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/api` | 0.9.9 | 0.9.10 |
+| `@agenticmail/cli` | 0.9.12 | 0.9.13 |
+
 ## [0.9.12] - 2026-05-14
 
 ### Added — Capabilities preamble injected on session start (and on auto-compact)
