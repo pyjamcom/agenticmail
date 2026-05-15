@@ -8,7 +8,7 @@ import { state, API_URL } from './state.js';
 import { toast } from './utils.js';
 import { apiGet } from './api.js';
 import { isBridgeAgent } from './avatar.js';
-import { renderProfile, toggleProfileMenu, closeProfileMenu } from './profile.js';
+import { renderProfile, toggleProfileMenu, closeProfileMenu, bindHostSwitcher } from './profile.js';
 import { renderSidebar } from './sidebar.js';
 import { loadList, renderList, clearSearch, ensureFolderCache } from './list-view.js';
 import { openMessage } from './message-view.js';
@@ -268,6 +268,10 @@ document.getElementById('refresh-btn').addEventListener('click', async () => {
 });
 document.getElementById('compose-btn').addEventListener('click', openCompose);
 document.getElementById('profile-btn').addEventListener('click', toggleProfileMenu);
+// Host-switcher pills inside the profile menu get their own delegated
+// click handler — we bind once and let it survive every re-render of
+// the switcher slot's innerHTML.
+bindHostSwitcher();
 document.getElementById('profile-menu').addEventListener('click', e => {
   e.stopPropagation();
   const item = e.target.closest('.profile-menu-item');

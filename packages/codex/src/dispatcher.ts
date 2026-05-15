@@ -1869,8 +1869,31 @@ export class Dispatcher {
     // the same project would clobber each other's output files.
     // Each worker gets its own scratch dir, advertised via the SDK's
     // `cwd` option. Cleaned up after the worker finishes.
-    const cwdDir = join(homedir(), '.agenticmail', 'worker-cwds', sanitizeId(workerId));
-    try { mkdirSync(cwdDir, { recursive: true }); } catch { /* fail-soft */ }
+    //
+    // OPERATOR OVERRIDE — `AGENTICMAIL_WORKER_CWD`
+    // ─────────────────────────────────────────────
+    // The per-worker scratch dir is the right default for stateless
+    // workers (research, replies, summarisation). It's exactly wrong
+    // for "build me an app" workflows where every agent on the team
+    // should share a single project tree so files one agent writes
+    // are visible to the next.
+    //
+    // When `AGENTICMAIL_WORKER_CWD=<absolute-path>` is set in the
+    // dispatcher's environment, every worker runs in that directory
+    // instead. We skip both the per-worker mkdir AND the post-run
+    // rmSync — deleting the operator's project after every wake
+    // would be catastrophic. Set it via:
+    //     agenticmail-codex install --workspace ~/projects/foo
+    // or directly in PM2:
+    //     pm2 set agenticmail-codex-dispatcher:env.AGENTICMAIL_WORKER_CWD …
+    const workspaceOverride = process.env.AGENTICMAIL_WORKER_CWD?.trim();
+    const useSharedWorkspace = !!(workspaceOverride && workspaceOverride.length > 0);
+    const cwdDir = useSharedWorkspace
+      ? workspaceOverride!
+      : join(homedir(), '.agenticmail', 'worker-cwds', sanitizeId(workerId));
+    if (!useSharedWorkspace) {
+      try { mkdirSync(cwdDir, { recursive: true }); } catch { /* fail-soft */ }
+    }
 
     // ─── Observer + heartbeat ───────────────────────────────────
     // The observer feeds the log file; the heartbeat ticker
@@ -2010,7 +2033,14 @@ export class Dispatcher {
       // Best-effort cwd cleanup. We don't block on failure — if the
       // worker wrote a 5GB file the user can delete it manually; we
       // shouldn't crash the dispatcher trying to clean up.
-      try { rmSync(cwdDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      //
+      // CRITICAL: skip cleanup when the operator pointed workers at a
+      // shared workspace (`AGENTICMAIL_WORKER_CWD`). That directory
+      // is the operator's actual project — recursively deleting it
+      // every wake would destroy their work.
+      if (!useSharedWorkspace) {
+        try { rmSync(cwdDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
       this.postActivity('/dispatcher/worker-finished', {
         workerId,
         agentName: account.name,

@@ -47,7 +47,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@agenticmail/core": "^0.9.3",
+    "@agenticmail/core": "^0.9.4",
     "@agenticmail/mcp": "^0.9.4",
     "@anthropic-ai/claude-agent-sdk": "^0.2.140"
   },

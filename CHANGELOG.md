@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.25] - 2026-05-15
+
+### Three production blockers fixed for co-installed Claude Code + Codex
+
+User report from a real multi-agent build session ("Facebook Rebuild" — codex coordinator + 4 sub-agents working in parallel):
+
+1. Web UI returned 500 with `Cannot read properties of undefined (reading 'Symbol(Symbol.asyncIterator)')` when opening certain messages.
+2. Codex worker turns silently exited with all MCP tool calls reported as "user cancelled MCP tool call" — agents could wake but couldn't read/reply to mail.
+3. Worker output files landed in `~/.agenticmail/worker-cwds/<id>/` instead of the project root — agents couldn't see each other's work, breaking the "build me an app" workflow entirely. Operator had to hand-patch the dispatcher binary with a perl one-liner to override the cwd.
+
+### Fix 1 — `Symbol.asyncIterator` 500 → proper 404
+
+`packages/core/src/mail/receiver.ts::fetchMessage` calls imapflow's `client.download(uid)`. When the UID doesn't exist in the requested folder (deleted between list-fetch and detail-fetch, wrong folder param), imapflow doesn't throw — it resolves with `{ content: undefined }`. The next line `for await (const chunk of content)` then iterates `undefined`, which JavaScript reports as the cryptic Symbol-asyncIterator error.
+
+Now guards with an explicit `if (!content)` and throws a `MESSAGE_NOT_FOUND` sentinel error. The mail route maps that to a clean 404 with `{ error, code: 'MESSAGE_NOT_FOUND' }`.
+
+### Fix 2 — Codex workers can finally use MCP tools
+
+Codex's MCP client defaults `approval_mode = "prompt"` for every tool, which surfaces an interactive approval dialog before the tool runs. In a dispatcher-spawned worker turn (headless `@openai/codex-sdk` invocation) there is no interactive user — Codex auto-cancels every call and the worker exits silently. Every `mcp__agenticmail__read_email` / `reply_email` / `search_emails` / etc dies.
+
+`packages/codex/src/install.ts::buildMcpEntry` now stamps `default_tools_approval_mode = "approve"` on the AgenticMail MCP server entry. One key, all 60+ tools auto-approved. Per-tool exceptions can still be added at `[mcp_servers.agenticmail.tools.<name>]` if a future tool needs interactive guarding (none today).
+
+Documented value confirmed against [openai/codex `docs/config.md`](https://github.com/openai/codex/blob/main/docs/config.md).
+
+### Fix 3 — Worker workspace override
+
+Default behavior (one scratch dir per worker, deleted after the run) is correct for stateless workers — research replies, summarisation, reminders. It's exactly wrong for "build me an app" where every agent on the team needs to see each other's files.
+
+New env var `AGENTICMAIL_WORKER_CWD` plus a new install flag `--workspace <dir>` route every dispatcher-spawned worker to a shared project directory. When set, the dispatcher:
+
+- Uses the override path as `cwd` for every worker
+- Skips the per-worker `mkdirSync` (the directory must already exist)
+- Skips the post-run `rmSync` cleanup (deleting the operator's project after every wake would be catastrophic)
+
+```
+agenticmail-codex install --workspace ~/projects/facebook-rebuild
+```
+
+Or set the env var directly in PM2 if the dispatcher is already running.
+
+### Web UI — host switcher (Airbnb-style flip)
+
+The inbox dropdown was listing every agent across every host on the same machine — claudecode bridge, codex bridge, all sub-agents, all jumbled together. Co-installed setups got long fast.
+
+New segmented toggle at the top of the inbox panel: **All / Claude / Codex**. Clicking flips the inbox list with a 3D Y-axis rotation, swapping the content at the orthogonal midpoint of the rotation so each side of the card carries a distinct roster — same illusion Airbnb's [Host Passport book-flip](https://medium.com/airbnb-engineering/animations-bringing-the-host-passport-to-life-on-ios-72856aea68a7) uses on iOS. Selection persists in localStorage.
+
+Single-host installs see no toggle — the UI degrades cleanly when only one host is present. Future hosts (Grok Build, Hermes) plug in via one row in `HOST_BRANDING` plus their SVG dropped into `/branding/`.
+
+### Codex hook no longer leaks capabilities blurb (carry-over from 0.9.24)
+
+In 0.9.24 we removed the SessionStart capabilities blurb from the codex hook because Codex's UI renders `additionalContext` verbatim under a `hook context:` label (Claude Code suppresses it silently). That fix carries forward unchanged.
+
+### Versions
+
+- `@agenticmail/core@0.9.4` — `MESSAGE_NOT_FOUND` sentinel
+- `@agenticmail/api@0.9.18` — 404 mapping + host switcher UI
+- `@agenticmail/codex@0.1.7` — auto-approve MCP tools + workspace override
+- `@agenticmail/cli@0.9.25` — rolls dependencies forward
+
 ## [0.9.24] - 2026-05-15
 
 ### Fixed — Codex hook no longer leaks the capabilities blurb into the terminal UI

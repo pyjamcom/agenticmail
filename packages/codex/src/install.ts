@@ -99,6 +99,38 @@ function buildMcpEntry(
     args: cfg.mcpArgs,
     env,
     enabled: true,
+    /**
+     * Auto-approve every tool this MCP server exposes.
+     *
+     * Codex defaults each MCP tool call to `approval_mode = "prompt"`,
+     * which surfaces an interactive approval dialog before the tool
+     * runs. That's reasonable for human-driven terminal sessions, but
+     * it's a HARD BLOCK for AgenticMail's dispatcher: when a worker
+     * turn is spawned via `@openai/codex-sdk` to handle inbound mail,
+     * there is no interactive user to approve anything — Codex auto-
+     * cancels the tool call with "user cancelled MCP tool call" and
+     * the worker exits silently with no reply written.
+     *
+     * In practice this means every `read_email` / `reply_email` /
+     * `search_emails` / etc. call inside a dispatcher-spawned worker
+     * fails until the operator hand-edits config.toml. One user
+     * report ended with them manually adding 12 per-tool overrides
+     * before the bridge could function.
+     *
+     * Setting `default_tools_approval_mode = "approve"` once at the
+     * server level auto-approves every AgenticMail tool — both inside
+     * dispatcher workers AND inside interactive Codex sessions (where
+     * the operator has already opted into AgenticMail by running the
+     * installer, so re-prompting them per-tool is just friction).
+     *
+     * Per-tool exceptions can still be added at
+     * `[mcp_servers.agenticmail.tools.<name>] approval_mode = "prompt"`
+     * if a future tool needs interactive guarding (none today).
+     *
+     * Source: openai/codex docs/config.md — the documented example
+     * uses this exact field on the server entry.
+     */
+    default_tools_approval_mode: 'approve',
   };
 }
 

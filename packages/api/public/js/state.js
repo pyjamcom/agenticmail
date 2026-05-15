@@ -33,6 +33,21 @@ export const state = {
    * back to page 1.
    */
   pagination: { offset: 0, limit: 50, total: 0 },
+  /**
+   * Which host's inboxes the user wants visible in the account
+   * switcher. Borrowed from Airbnb's "switch to hosting / switch to
+   * traveling" mode toggle — same agent, two distinct contexts. We
+   * stash it in localStorage so the choice survives reloads.
+   *
+   *   'all'        → every account regardless of host (the original view)
+   *   'claudecode' → only the Claude bridge + Claude-owned sub-agents
+   *   'codex'      → only the Codex bridge + Codex-owned sub-agents
+   *
+   * Future hosts (grok-build, hermes) plug in here by matching their
+   * own bridge name. The dropdown self-discovers available hosts from
+   * `state.agents` so no UI work is needed when a new bridge appears.
+   */
+  activeHost: localStorage.getItem('agenticmail.activeHost') || 'all',
 };
 
 export const API_URL = window.location.origin;

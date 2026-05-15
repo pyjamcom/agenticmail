@@ -846,7 +846,21 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
 
       const password = getAgentPassword(agent);
       const receiver = await getReceiver(agent.stalwartPrincipal, password, config);
-      const raw = await receiver.fetchMessage(uid, folder);
+      let raw: Buffer;
+      try {
+        raw = await receiver.fetchMessage(uid, folder);
+      } catch (err) {
+        // Map the receiver's MESSAGE_NOT_FOUND sentinel (set in
+        // packages/core/src/mail/receiver.ts when imapflow's download
+        // resolves with `{ content: undefined }` for a deleted/missing
+        // UID) to a proper 404. Previously this surfaced as a 500 with
+        // the cryptic "Symbol(Symbol.asyncIterator)" message.
+        if (err && typeof err === 'object' && (err as { code?: string }).code === 'MESSAGE_NOT_FOUND') {
+          res.status(404).json({ error: (err as Error).message, code: 'MESSAGE_NOT_FOUND' });
+          return;
+        }
+        throw err;
+      }
       const parsed = await parseEmail(raw);
 
       // Strip raw attachment binaries from the response. The UI

@@ -54,7 +54,19 @@ export interface CodexMcpServerEntry {
   required?: boolean;
   startup_timeout_sec?: number;
   tool_timeout_sec?: number;
-  /** "trust" | "ask" | "never" — controls per-tool approval default. */
+  /**
+   * Per-server default tool-approval mode. Documented values
+   * (openai/codex docs/config.md):
+   *
+   *   "approve"  — auto-approve every tool on this server
+   *   "prompt"   — show an interactive approval dialog per tool call
+   *
+   * Per-tool overrides go under `[mcp_servers.<name>.tools.<tool>]
+   * approval_mode = "..."`. AgenticMail's installer sets this to
+   * `"approve"` so dispatcher-spawned worker turns (which have no
+   * interactive user to confirm prompts) can call MCP tools without
+   * being silently cancelled.
+   */
   default_tools_approval_mode?: string;
   supports_parallel_tool_calls?: boolean;
 }

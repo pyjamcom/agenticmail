@@ -55,6 +55,9 @@ function usage(): void {
   print(`  ${BOLD('Flags:')}`);
   print(`    --json             (status / tune) Emit machine-readable JSON instead of prose`);
   print(`    --purge-bridge     (uninstall) Also delete the AgenticMail bridge agent`);
+  print(`    --workspace <dir>  (install) Point every worker at this directory instead`);
+  print(`                       of a per-worker scratch dir. Required for "build an app"`);
+  print(`                       workflows where the whole team shares one project tree.`);
   print('');
   print(`  ${BOLD('Tune flags:')}`);
   print(`    --max-concurrent N         Cap total simultaneous workers across all agents (default 50)`);
@@ -75,6 +78,7 @@ function usage(): void {
   print(`    AGENTICMAIL_DISPATCHER_WAKE_WINDOW_MS        Same as --wake-window-ms`);
   print(`    AGENTICMAIL_DISPATCHER_COALESCE_MS           Same as --wake-coalesce-ms`);
   print(`    AGENTICMAIL_DISPATCHER_SYNC                  Same as --sync-ms`);
+  print(`    AGENTICMAIL_WORKER_CWD                       Same as --workspace (absolute path)`);
   print('');
 }
 
@@ -96,16 +100,61 @@ function clean<T extends Record<string, unknown>>(o: T): Partial<T> {
   return out;
 }
 
-async function runInstall(): Promise<number> {
+/**
+ * Parse `--workspace <path>` (or `--workspace=<path>`) out of argv.
+ * Returns the absolute path or undefined. Validates that the directory
+ * exists — refuses to register a nonexistent workspace because the
+ * dispatcher won't realise the error until the first wake, by which
+ * point the operator has long since walked away.
+ */
+function parseWorkspace(args: string[]): string | undefined {
+  const { existsSync, statSync } = require('node:fs');
+  const { isAbsolute, resolve: resolvePath } = require('node:path');
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    let raw: string | undefined;
+    if ((a === '--workspace' || a === '-w') && i + 1 < args.length) raw = args[i + 1];
+    else if (a.startsWith('--workspace=')) raw = a.slice('--workspace='.length);
+    if (!raw) continue;
+    const abs = isAbsolute(raw) ? raw : resolvePath(process.cwd(), raw);
+    if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+      throw new Error(`--workspace ${raw} is not a directory (resolved to ${abs})`);
+    }
+    return abs;
+  }
+  return undefined;
+}
+
+async function runInstall(args: string[] = []): Promise<number> {
   print('');
   print(`  ${PINK('🎀 Installing AgenticMail for Codex')}`);
   print('');
+  // Workspace override — when set, every dispatcher-spawned worker
+  // runs in this directory instead of an isolated scratch dir.
+  // Required for "build me an app" workflows where every agent on
+  // the team needs to see each other's files. We stamp the value
+  // into `process.env` here so the install's PM2 spawn inherits it
+  // via the `{...process.env, ...opts.env}` merge in pm2.ts.
+  let workspace: string | undefined;
+  try {
+    workspace = parseWorkspace(args);
+  } catch (err) {
+    fail((err as Error).message);
+    return 64;  // EX_USAGE
+  }
+  if (workspace) {
+    process.env.AGENTICMAIL_WORKER_CWD = workspace;
+  }
   try {
     const result = await install(clean(envOptions()));
     ok(`Bridge agent: ${result.bridgeAgent.name} (${result.bridgeAgent.email})`);
     ok(`MCP server registered in ${result.codexConfigPath}`);
     ok(`Lifecycle hooks registered in ${result.codexHooksPath}`);
     ok(`${result.registeredAgents.length} Codex subagent${result.registeredAgents.length === 1 ? '' : 's'} written to ${result.agentsDir}`);
+    if (workspace) {
+      ok(`Worker workspace: ${workspace}`);
+      dim('   (every dispatcher-spawned worker runs in this directory)');
+    }
     if (result.registeredAgents.length > 0) {
       for (const a of result.registeredAgents) dim(`  • agenticmail-${a.name.toLowerCase()}  →  ${a.email}`);
     }
@@ -393,7 +442,7 @@ async function main(): Promise<number> {
   const command = args.find(a => !a.startsWith('-')) ?? 'install';
   switch (command) {
     case 'install':
-      return runInstall();
+      return runInstall(args);
     case 'uninstall':
     case 'remove':
       return runUninstall(args.includes('--purge-bridge'));

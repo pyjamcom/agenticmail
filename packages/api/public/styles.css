@@ -298,6 +298,145 @@ a { color: var(--accent-strong); }
   margin-left: 4px;
 }
 .profile-menu-divider { height: 1px; background: var(--line); margin: 8px 0; }
+
+/* ─── Host switcher (Airbnb-style) ────────────────────────────────────
+ *
+ * Segmented pill bar at the top of the inbox menu. Each pill represents
+ * a host (Claude, Codex, All); clicking flips the inbox list with a 3D
+ * Y-axis rotation. The active pill is filled with the accent colour;
+ * inactive pills are subtle so the visual weight rests on the inbox
+ * roster itself rather than the chrome.
+ */
+.host-switcher {
+  display: flex;
+  gap: 4px;
+  margin: 0 12px 6px;
+  padding: 4px;
+  background: var(--bg-hover);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+.host-switcher-pill {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  /* Match Airbnb's "switch to hosting" feel: brisk, eased, no bounce. */
+  transition: background-color 200ms cubic-bezier(0.4, 0, 0.2, 1),
+              color 200ms cubic-bezier(0.4, 0, 0.2, 1),
+              transform 120ms cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+  user-select: none;
+}
+.host-switcher-pill:hover { color: var(--ink); }
+.host-switcher-pill:active { transform: scale(0.97); }
+.host-switcher-pill.is-active {
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+.host-switcher-logo {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: block;
+}
+.host-switcher-dot {
+  width: 8px;
+  height: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+  opacity: 0.7;
+}
+
+/* ─── Flip card (3D rotation on host switch) ──────────────────────────
+ *
+ * The inbox roster lives inside `.flip-card`, which rotates 180deg on
+ * Y when a host is switched. Two stacked `.flip-face` panes carry the
+ * "before" and "after" rosters; `backface-visibility: hidden` ensures
+ * each pane is only visible on its own side of the rotation. Result:
+ * the user sees roster A → edge-on at 90deg → roster B, creating the
+ * illusion that each side of the card carries a distinct view.
+ *
+ * Same trick as Airbnb's Host Passport book-flip on iOS (Tech Blog,
+ * May 2023). The CSS port is straightforward because the swap happens
+ * naturally at the orthogonal midpoint where neither face is visible.
+ */
+#profile-menu-list {
+  perspective: 1200px;
+  /* perspective-origin: top so the flip pivots from the eye line, not
+   * the centre — feels more like turning a page than tumbling a coin. */
+  perspective-origin: 50% 0%;
+}
+.flip-card {
+  position: relative;
+  transform-style: preserve-3d;
+  /* 460ms is the sweet spot from the Airbnb engineering write-up:
+   * fast enough to feel responsive, slow enough to read as deliberate. */
+  transition: transform 460ms cubic-bezier(0.4, 0, 0.2, 1);
+  /* min-height so the menu doesn't collapse to 0 during the flip when
+   * the back face is empty for the resetting frame. */
+  min-height: 80px;
+}
+.flip-card.flipped {
+  transform: rotateY(180deg);
+}
+.flip-face {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  width: 100%;
+}
+.flip-face-back {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  transform: rotateY(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .flip-card { transition: none; }
+}
+
+/* ─── Empty state inside the profile menu (filtered view → 0 rows) ──── */
+.profile-menu-empty {
+  padding: 24px 20px;
+  text-align: center;
+  color: var(--muted);
+}
+.profile-menu-empty .empty-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 10px;
+  opacity: 0.4;
+}
+.profile-menu-empty .empty-text {
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+.profile-menu-empty .empty-hint {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.profile-menu-empty code {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .profile-menu-footer {
   padding: 12px 20px; font-size: 13px; color: var(--muted);
   display: flex; gap: 12px;

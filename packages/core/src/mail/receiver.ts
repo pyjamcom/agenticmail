@@ -140,7 +140,23 @@ export class MailReceiver {
   async fetchMessage(uid: number, mailbox = 'INBOX'): Promise<Buffer> {
     const lock = await this.client.getMailboxLock(mailbox);
     try {
-      const { content } = await this.client.download(String(uid), undefined, { uid: true });
+      // imapflow's `download` resolves with `{ content }` where `content`
+      // is a Readable stream. But when the UID does not exist in the
+      // requested mailbox (deleted between list-fetch and detail-fetch,
+      // wrong folder passed in, etc.) the resolved object's `content`
+      // is `undefined` — NOT an exception. Iterating an undefined value
+      // with `for await` throws a cryptic
+      //   "Cannot read properties of undefined (reading 'Symbol(Symbol.asyncIterator)')"
+      // which bubbled up as a 500 with no useful body. Surface a clear
+      // 404-style error instead so the route can map it to the right
+      // status code and message.
+      const result = await this.client.download(String(uid), undefined, { uid: true });
+      const content = result?.content;
+      if (!content) {
+        const err = new Error(`Message UID ${uid} not found in mailbox "${mailbox}"`) as Error & { code?: string };
+        err.code = 'MESSAGE_NOT_FOUND';
+        throw err;
+      }
       const chunks: Buffer[] = [];
       for await (const chunk of content) {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
