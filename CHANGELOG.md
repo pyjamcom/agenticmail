@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.24] - 2026-05-15
+
+### Fixed — Codex hook no longer leaks the capabilities blurb into the terminal UI
+
+User report: every Codex SessionStart and first UserPromptSubmit pushed a 250-token `🎀 AgenticMail is available via MCP…` block into the Codex interactive UI under a `hook context:` label. Visually:
+
+```
+• SessionStart hook (completed)
+  hook context: 🎀 AgenticMail is available via MCP (mcp__agenticmail__*).When to reach for it: …
+```
+
+That blurb is unreadable noise for the operator.
+
+### Why this happens
+
+Claude Code's hook engine consumes `hookSpecificOutput.additionalContext` silently — the user never sees it, only the model does. Codex's hook engine is byte-compatible at the JSON layer, but its UI deliberately **renders** `additionalContext` verbatim under a `hook context:` heading as part of its transparency-first design.
+
+The capabilities blurb is pure model-guidance — telling the model when to reach for AgenticMail and which three high-leverage tools to use. The model needs it. The operator does not.
+
+### Fix
+
+`packages/codex/src/mail-hook.ts`:
+
+- **SessionStart is now a no-op** in the Codex hook. No output, no UI noise.
+- **UserPromptSubmit's "fallback blurb on first-prompt-of-session" path is removed.** No blurb on any path.
+- **Mail-context surfacing is preserved.** When new mail has arrived since the last check, the hook still emits a terse summary on UserPromptSubmit (`additionalContext`) and Stop (`decision:'block'` + `reason`). That summary IS useful for the operator to see — *"Vesper sent a question 30s ago"* is a notification, not boilerplate guidance — so leaving Codex's UI to render it is the right behavior.
+
+Model-guidance that used to live in the blurb will move into the dispatcher's per-turn system prompt in a future release (SDK system prompts aren't rendered in the UI by construction).
+
+### Versions
+
+- `@agenticmail/codex@0.1.6`
+- `@agenticmail/cli@0.9.24`
+
 ## [0.9.23] - 2026-05-15
 
 ### Changed — Strict host ownership for subagent rosters

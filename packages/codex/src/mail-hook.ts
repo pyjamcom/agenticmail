@@ -110,22 +110,6 @@ interface InboxMessage {
 const AGENTICMAIL_DIR = join(homedir(), '.agenticmail');
 const CONFIG_PATH = join(AGENTICMAIL_DIR, 'config.json');
 const CURSOR_PATH = join(AGENTICMAIL_DIR, 'codex-hook-cursor.json');
-/**
- * Tracks which Claude Code session_ids we've already injected the
- * AgenticMail capabilities blurb into. Capped at SESSIONS_CAP entries
- * (LRU by insertion order) so the file stays small even after
- * months of use. Without this we'd either:
- *   - re-inject on every prompt (token waste, drowns the model in
- *     boilerplate it already saw), or
- *   - never inject (model is unaware of the toolbelt unless the user
- *     names it explicitly, which defeats the point of the hook).
- *
- * Per-session is the right granularity: each `claude` invocation is
- * a fresh model + fresh context, so the blurb needs to land ONCE on
- * that session's first prompt and never again.
- */
-const SESSIONS_PATH = join(AGENTICMAIL_DIR, 'codex-hook-sessions.json');
-const SESSIONS_CAP = 100;
 
 /** Tag the cursor file with the version so future schema changes can
  *  detect and re-bootstrap cleanly. */
@@ -197,143 +181,52 @@ async function readStdinJson(): Promise<{ hook_event_name?: string; session_id?:
   });
 }
 
-/**
- * One-shot capabilities preamble injected on every SessionStart (and as a
- * fallback on the FIRST UserPromptSubmit of each session if SessionStart
- * didn't fire).
- *
- * Why this exists
- * ───────────────
- * Codex sessions start with no prior knowledge of which MCP tools are
- * wired up. The model can SEE the tools (they appear in its tool-use
- * schema), but a tool name + zod schema is a thin signal — the model
- * doesn't know WHEN AgenticMail is the right reach. So when the user
- * asks "build me a flashcard app", the model often goes straight to
- * single-process scaffolding when AgenticMail would unlock multi-agent
- * design/build/review in parallel.
- *
- * This blurb tells the model:
- *   - what AgenticMail is for in plain language
- *   - the specific patterns it should reach for it (multi-agent
- *     coordination, durable email threads, sub-agent spawning via
- *     Codex's `spawn_agent` tool)
- *   - the THREE high-leverage tools (send_email, create_account,
- *     call_agent) — not the full 60+, which would just be noise
- *
- * Kept short: ~250 tokens. Long enough to shape behaviour, short
- * enough that on a 30-prompt session it's <1% of total tokens.
- */
-function capabilitiesBlurb(): string {
-  return [
-    '🎀 AgenticMail is available via MCP (mcp__agenticmail__*).',
-    '',
-    'When to reach for it:',
-    '  · Building anything that benefits from MULTIPLE specialized roles working in parallel — designer + developer + reviewer, researcher + writer + fact-checker, planner + executor + critic.',
-    '  · Coordinating long-running async work that survives across Codex restarts (email threads are durable; in-memory state is not).',
-    '  · Anywhere you would otherwise call `spawn_agent` repeatedly for sub-tasks — prefer AgenticMail when those sub-tasks need to talk to EACH OTHER, not just back to you. (You can ALSO spawn AgenticMail accounts via `spawn_agent({ agent_type: "agenticmail-<name>" })` — each one is pre-wired with its own inbox identity and the MCP toolbelt.)',
-    '',
-    'High-leverage tools:',
-    '  · mcp__agenticmail__create_account({ name, role })       — spawn a fresh persistent agent identity with its own inbox + API key.',
-    '  · mcp__agenticmail__send_email({ to, cc, subject, text, wake }) — kick off the work. CC the whole team; use `wake: ["alice"]` to give exactly one agent the next turn while others stay informed.',
-    '  · mcp__agenticmail__call_agent({ agent, message }) / mcp__agenticmail__wait_for_email — blocking RPC when you need a specific answer back before continuing your own turn.',
-    '',
-    'Coordination pattern: one email thread = the shared workspace. Reply-all keeps the audit trail. Use `wake` to control whose turn it is.',
-    '',
-    'Other tools cover: inbox/folder management, drafts, templates, tasks, contacts, signatures, SMS, voice. Full list under mcp__agenticmail__* — discover on demand, don\'t front-load them all.',
-  ].join('\n');
-}
-
-/**
- * Load the set of session_ids we've already injected the capabilities
- * blurb into. Missing / corrupt file → empty set (next session gets
- * injected, no harm). Bounded by SESSIONS_CAP via LRU at write time.
- */
-function loadSeenSessions(): string[] {
-  if (!existsSync(SESSIONS_PATH)) return [];
-  try {
-    const parsed = JSON.parse(readFileSync(SESSIONS_PATH, 'utf-8'));
-    const arr = Array.isArray(parsed?.seen) ? parsed.seen : [];
-    return arr.filter((s: unknown): s is string => typeof s === 'string');
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Record that we've injected the blurb into `sessionId`. LRU-trims to
- * SESSIONS_CAP so the file can never grow unbounded over months of
- * use. Silent on write failure — worst case we re-inject on the
- * next prompt of the same session (annoying, not broken).
- */
-function rememberSession(sessionId: string, seen: string[]): void {
-  const next = seen.filter(s => s !== sessionId);
-  next.push(sessionId);
-  while (next.length > SESSIONS_CAP) next.shift();
-  try {
-    if (!existsSync(dirname(SESSIONS_PATH))) mkdirSync(dirname(SESSIONS_PATH), { recursive: true });
-    writeFileSync(SESSIONS_PATH, JSON.stringify({ seen: next, hookVersion: HOOK_VERSION }, null, 2));
-  } catch { /* ignore */ }
-}
-
 async function main(): Promise<void> {
   // Read the event type up front — drives the rate-limit decision below.
   const input = await readStdinJson();
   const eventName = input?.hook_event_name ?? 'UserPromptSubmit';
-  const sessionId = typeof input?.session_id === 'string' ? input.session_id : '';
 
-  // ─── SessionStart fast path ─────────────────────────────────────
+  // ─── Why this hook NEVER emits a capabilities blurb in Codex ────
   //
-  // Claude Code fires SessionStart on:
-  //   - "startup" — fresh `claude` invocation
-  //   - "resume"  — `claude --resume <id>`
-  //   - "compact" — auto-compaction wiped the model's context mid-session
+  // The Claude Code variant of this hook emits a one-time capabilities
+  // preamble ("🎀 AgenticMail is available via MCP…") on SessionStart
+  // because Claude Code's UI consumes `additionalContext` silently —
+  // the user never sees it, but the model gets the guidance.
   //
-  // All three want the capabilities blurb re-injected. The compact case
-  // is the one that matters most for long-running sessions: session_id
-  // stays the same across compact, so dedup-by-session-id WOULD swallow
-  // the re-inject silently. SessionStart fires explicitly, so we just
-  // always emit on it — no dedup, no API calls.
+  // Codex's UI is different: it RENDERS the hook's `additionalContext`
+  // verbatim in the terminal under a "hook context:" label as part of
+  // its transparency-first design. A 250-token blurb showing up on
+  // every SessionStart + first UserPromptSubmit was unreadable noise
+  // for the operator (and didn't add much for the model — Codex's MCP
+  // tool listing already surfaces every `mcp__agenticmail__*` tool).
   //
-  // Output schema (per Claude Code hook contract): SessionStart uses
-  // `hookSpecificOutput.additionalContext` just like UserPromptSubmit.
-  if (eventName === 'SessionStart') {
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'SessionStart',
-        additionalContext: capabilitiesBlurb(),
-      },
-    }));
-    return;
-  }
+  // So in the Codex hook, SessionStart is a no-op and UserPromptSubmit
+  // skips the fallback-blurb path entirely. We still inject context on
+  // the other two paths:
+  //
+  //   - UserPromptSubmit: surface new mail since the last check. This
+  //     IS useful for the user to see ("Vesper sent a question 30s
+  //     ago") AND for the model to act on.
+  //   - Stop: same mail summary but emitted as `decision: 'block'` so
+  //     the model is forced to continue and handle outstanding mail
+  //     before exiting autonomous mode.
+  //
+  // The model-guidance the blurb used to provide will move into the
+  // dispatcher's per-turn system prompt in a future release — that
+  // path is invisible to the user by construction (SDK system
+  // prompts aren't rendered in the UI).
+  if (eventName === 'SessionStart') return;
 
-  // For UserPromptSubmit, we also opportunistically emit the blurb if
-  // we've never seen this session_id before. This is a safety net for
-  // Claude Code versions that don't fire SessionStart (some older
-  // releases) or for sessions where SessionStart failed silently. It
-  // is dedup'd by session_id so once SessionStart succeeds, this
-  // fallback is a no-op for the rest of that session.
-  let blurbContext = '';
-  if (eventName === 'UserPromptSubmit' && sessionId) {
-    const seen = loadSeenSessions();
-    if (!seen.includes(sessionId)) {
-      blurbContext = capabilitiesBlurb();
-      rememberSession(sessionId, seen);
-    }
-  }
-
-  // Helper: build the final output. Combines the optional blurb (only
-  // populated on the UserPromptSubmit fallback path) with the
-  // optional mail summary. Empty → no injection, hook is a no-op.
+  // Helper: emit the mail summary. Empty → no injection, hook is a no-op.
   const emitAndExit = (mailContext: string) => {
-    const combined = [blurbContext, mailContext].filter(Boolean).join('\n\n');
-    if (!combined) return;
+    if (!mailContext) return;
     if (eventName === 'Stop') {
-      process.stdout.write(JSON.stringify({ decision: 'block', reason: combined }));
+      process.stdout.write(JSON.stringify({ decision: 'block', reason: mailContext }));
     } else {
       process.stdout.write(JSON.stringify({
         hookSpecificOutput: {
           hookEventName: eventName,
-          additionalContext: combined,
+          additionalContext: mailContext,
         },
       }));
     }
@@ -480,8 +373,9 @@ async function main(): Promise<void> {
     );
   } catch { /* losing the cursor only means we re-tell on next run — annoying, not broken */ }
 
-  // 8. Emit. emitAndExit handles the event-shape dispatch and
-  //    prepends the fallback capabilities blurb if one is queued.
+  // 8. Emit. emitAndExit handles the event-shape dispatch
+  //    (`additionalContext` for UserPromptSubmit, `decision:'block'`
+  //    with `reason` for Stop).
   emitAndExit(lines.join('\n'));
 }
 
