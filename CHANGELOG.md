@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.21] - 2026-05-14
+
+### Fixed — `agenticmail-claudecode: command not found` after global install
+
+User report: *"npm install -g @agenticmail/cli@latest … agenticmail-claudecode install … zsh: command not found: agenticmail-claudecode"*.
+
+Root cause: `@agenticmail/cli` declared `@agenticmail/claudecode` and `@agenticmail/codex` in `optionalDependencies`, so the code was installed — but npm only symlinks bins of the **directly-installed** package into the global bin dir. Transitive deps' bins stayed buried in `<global>/node_modules/@agenticmail/cli/node_modules/@agenticmail/{claudecode,codex}/dist/cli.js` and never landed on `$PATH`.
+
+### Fix — ship wrapper bins from `@agenticmail/cli`
+
+The CLI package now declares its **own** `agenticmail-claudecode` and `agenticmail-codex` bins. Each wrapper:
+
+1. Walks up from its own location through every ancestor `node_modules/@agenticmail/{host}/package.json` (filesystem-only — no `require.resolve()`, because the host packages' `exports` block is ESM-only and CJS resolution rejects `import`-only entries).
+2. Reads `pkg.bin[binName]` to find the real bin's relative path.
+3. `spawn(process.execPath, [target, ...process.argv.slice(2)], { stdio: 'inherit' })`.
+4. Exits with the child's exit code (or echoes its signal).
+5. Forwards SIGINT / SIGTERM / SIGHUP so Ctrl+C reaches the child cleanly.
+
+UX is identical to invoking the transitive bin directly — same help, same prompts, same output, just discoverable on `$PATH` from a single `npm install -g @agenticmail/cli`.
+
+If the host package isn't installed (e.g. `--no-optional`), the wrapper prints a clear error and exits 127, pointing the user at `npm install -g @agenticmail/{host}@latest` as a direct fallback.
+
+### Files
+
+- `agenticmail/src/bin-host-shim.ts` (new) — shared `runHostBin(hostPkgName, binName)` utility.
+- `agenticmail/src/bin-claudecode.ts` (new) — wrapper entrypoint for `agenticmail-claudecode`.
+- `agenticmail/src/bin-codex.ts` (new) — wrapper entrypoint for `agenticmail-codex`.
+- `agenticmail/package.json` — adds the two new bins, updates the tsup build script.
+
 ## [0.9.20] - 2026-05-15
 
 ### Added — Per-account host ownership: `metadata.host`
