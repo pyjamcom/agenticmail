@@ -85,8 +85,23 @@ export function openReply(replyAll) {
   document.getElementById('compose-wake').value = '';
   document.getElementById('compose-subject').value =
     (msg.subject ?? '').startsWith('Re:') ? msg.subject : `Re: ${msg.subject ?? ''}`;
+  // Quote header — extend the standard "On <date>, <addr> wrote:"
+  // line with To: / Cc: lines pulled from the original message so
+  // the recipient of THIS reply can see who was on the previous
+  // round of the thread. The renderer in message-view.js parses
+  // these optional lines and surfaces them in the thread-quote
+  // header alongside the sender name.
+  const fmtAddrList = (arr) => (arr || [])
+    .map(a => (typeof a === 'string' ? a : (a?.address ?? '')))
+    .filter(Boolean)
+    .join(', ');
+  const origTo = fmtAddrList(msg.to);
+  const origCc = fmtAddrList(msg.cc);
+  const headerLines = [`On ${msg.date}, ${fromAddr} wrote:`];
+  if (origTo) headerLines.push(`To: ${origTo}`);
+  if (origCc) headerLines.push(`Cc: ${origCc}`);
   const quoted = (msg.text ?? '').split('\n').map(l => `> ${l}`).join('\n');
-  const stub = `\n\nOn ${msg.date}, ${fromAddr} wrote:\n${quoted}`;
+  const stub = `\n\n${headerLines.join('\n')}\n${quoted}`;
   document.getElementById('compose-body').value = stub;
   pendingAttachments = [];
   renderAttachmentChips();

@@ -239,6 +239,14 @@ function renderBodyWithThreading(src) {
   // angle-bracket form `<addr@host>`. Date is anything up to the
   // comma; addr is anything not whitespace + an @.
   const headerRe = /^On (.+?), <?([^\s<>]+@[^\s<>]+)>? wrote:\s*$/;
+  // Optional follow-up address lines emitted by AgenticMail's
+  // reply builders: `To: a@x, b@y` / `Cc: …` / `Bcc: …`. These
+  // sit between the `wrote:` line and the first `> ` quoted body
+  // line; the parser collects them so the rendered thread-quote
+  // header can show the previous round's full audience, not just
+  // the sender. Optional — older replies (pre-0.9.32) won't have
+  // them and degrade to sender-only.
+  const audienceRe = /^(To|Cc|Bcc):\s*(.+)$/i;
 
   while (i < lines.length) {
     const m = lines[i].match(headerRe);
@@ -251,6 +259,23 @@ function renderBodyWithThreading(src) {
     const dateRaw = m[1];
     const sender = m[2];
     i++;
+    // Collect optional audience lines (To/Cc/Bcc) immediately
+    // after the wrote: header. Stop at the first line that
+    // doesn't match; non-matching content falls through to the
+    // body-quote collection loop below.
+    let toAddrs = '';
+    let ccAddrs = '';
+    let bccAddrs = '';
+    while (i < lines.length) {
+      const a = lines[i].match(audienceRe);
+      if (!a) break;
+      const field = a[1].toLowerCase();
+      const value = a[2].trim();
+      if (field === 'to') toAddrs = value;
+      else if (field === 'cc') ccAddrs = value;
+      else if (field === 'bcc') bccAddrs = value;
+      i++;
+    }
     // Collect contiguous `>` lines (with possible blank-line gaps
     // inside the quote, which most clients tolerate). Stop at the
     // first non-quote, non-blank line.
@@ -267,13 +292,13 @@ function renderBodyWithThreading(src) {
       }
       break;
     }
-    out.push(renderThreadQuote(dateRaw, sender, quoted.join('\n')));
+    out.push(renderThreadQuote(dateRaw, sender, quoted.join('\n'), { to: toAddrs, cc: ccAddrs, bcc: bccAddrs }));
   }
   flushProse();
   return out.join('');
 }
 
-function renderThreadQuote(dateRaw, sender, quotedBody) {
+function renderThreadQuote(dateRaw, sender, quotedBody, audience = {}) {
   // Try to format the ISO date through the same helper the
   // message header uses; fall back to the raw string on parse fail.
   const friendlyDate = (() => {
@@ -282,6 +307,17 @@ function renderThreadQuote(dateRaw, sender, quotedBody) {
     return dateRaw;
   })();
   const sub = renderBodyWithThreading(quotedBody);  // recurse for nested threads
+  // Render the optional audience lines (To/Cc/Bcc) inside the
+  // thread-quote header so the reader can see who was on the
+  // previous round. Missing values are simply omitted — a quote
+  // from an older email that didn't include them degrades cleanly
+  // to the sender + date line.
+  const audienceRow = (label, value) => value
+    ? `<div class="thread-quote-audience-row"><span class="thread-quote-audience-label">${label}:</span> <span class="thread-quote-audience-value">${escapeHtml(value)}</span></div>`
+    : '';
+  const audienceBlock = (audience.to || audience.cc || audience.bcc)
+    ? `<div class="thread-quote-audience">${audienceRow('To', audience.to)}${audienceRow('Cc', audience.cc)}${audienceRow('Bcc', audience.bcc)}</div>`
+    : '';
   return `
     <div class="thread-quote">
       <div class="thread-quote-head">
@@ -290,6 +326,7 @@ function renderThreadQuote(dateRaw, sender, quotedBody) {
         <span class="thread-quote-dot">·</span>
         <span class="thread-quote-date">${escapeHtml(friendlyDate)}</span>
       </div>
+      ${audienceBlock}
       <div class="thread-quote-body">${sub}</div>
     </div>
   `;

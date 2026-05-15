@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.32] - 2026-05-15
+
+### Fixed — thread-quote in the web UI was missing original To/Cc/Bcc
+
+User report (screenshot): when reading an email thread in the web UI, the quoted previous message only showed the sender + date — no indication of who else was on the original message's To/Cc/Bcc. For multi-agent threads where five agents are CC'd and the next actor is signalled by the `wake` field, that's significant context loss.
+
+The quote header that AgenticMail's reply builders write into the body has always been the single-line standard format:
+
+```
+On Fri May 15 2026 01:36:00, marlow@localhost wrote:
+> Kepler — reviewed shared/api-contract.md...
+```
+
+Now extended to optionally carry the original audience as additional header lines BEFORE the `> ` body:
+
+```
+On Fri May 15 2026 01:36:00, marlow@localhost wrote:
+To: kepler@localhost
+Cc: codex@localhost, rivet@localhost
+> Kepler — reviewed shared/api-contract.md...
+```
+
+Three reply builders updated to emit the new shape:
+
+- `packages/mcp/src/tools.ts::reply_email`
+- `packages/openclaw/src/tools.ts` reply path
+- `packages/api/public/js/compose.js` web UI reply composer
+
+One parser updated to consume it:
+
+- `packages/api/public/js/message-view.js::renderBodyWithThreading` collects optional `To:`/`Cc:`/`Bcc:` lines after the `wrote:` header, hands them to `renderThreadQuote(..., audience)`, which surfaces them in the thread-quote chrome alongside the sender + date.
+
+New CSS classes — `.thread-quote-audience`, `.thread-quote-audience-row`, `.thread-quote-audience-label`, `.thread-quote-audience-value` — keep the rows aligned with the sender name (past the avatar) and use the small-caps label style that matches Gmail's quote-header convention.
+
+Backwards-compat: older replies (pre-0.9.32) that don't include audience lines degrade cleanly to the sender-only header. No data is lost; the UI just doesn't surface what isn't in the source.
+
+### Versions
+
+- `@agenticmail/api@0.9.23`
+- `@agenticmail/mcp@0.9.7`
+- `@agenticmail/openclaw@0.5.61`
+- `@agenticmail/claudecode@0.2.18`
+- `@agenticmail/codex@0.1.13`
+- `@agenticmail/cli@0.9.32`
+
+To see the new chrome on replies written by your agents, no action needed — the next reply emitted by any agent will carry the new header lines and the UI will render them. Older messages already in inboxes keep their existing display.
+
 ## [0.9.31] - 2026-05-15
 
 ### Fixed — `wake: []` mid-project killed coordination threads

@@ -938,6 +938,30 @@ mark.search-hl {
 .thread-quote-from { font-weight: 500; color: var(--ink-soft); }
 .thread-quote-dot { opacity: .5; }
 .thread-quote-date { color: var(--muted); }
+/* Audience block (To / Cc / Bcc) below the quote header — surfaces
+ * who was on the previous round of the thread, not just the sender.
+ * Optional: missing values are simply omitted, no row rendered. */
+.thread-quote-audience {
+  margin: -4px 0 8px;
+  padding-left: 30px;          /* line up with sender name (past avatar) */
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.thread-quote-audience-row { display: block; }
+.thread-quote-audience-label {
+  display: inline-block;
+  min-width: 28px;
+  color: var(--muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10.5px;
+}
+.thread-quote-audience-value {
+  color: var(--ink-soft);
+  word-break: break-word;
+}
 .thread-quote-body {
   color: var(--ink-soft);
 }

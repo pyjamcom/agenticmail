@@ -1529,8 +1529,22 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
       const subject = origSubject.startsWith('Re:') ? origSubject : `Re: ${origSubject}`;
       const refs = Array.isArray(original.references) ? [...original.references] : [];
       if (original.messageId) refs.push(original.messageId);
+      // Quote header — preserve the original To/Cc audience on the
+      // quoted block so a reader can see who was on the previous
+      // round of the thread, not just the sender. The web UI's
+      // message-view.js parser surfaces these lines in the thread-
+      // quote chrome alongside the sender name + friendly date.
+      const fmtAddrs = (arr: unknown): string => (Array.isArray(arr) ? arr : [])
+        .map((a: any) => (typeof a === 'string' ? a : (a?.address ?? '')))
+        .filter(Boolean)
+        .join(', ');
+      const origTo = fmtAddrs(original.to);
+      const origCc = fmtAddrs(original.cc);
+      const headerLines = [`On ${original.date}, ${replyTo} wrote:`];
+      if (origTo) headerLines.push(`To: ${origTo}`);
+      if (origCc) headerLines.push(`Cc: ${origCc}`);
       const quotedBody = (original.text || '').split('\n').map((l: string) => `> ${l}`).join('\n');
-      const fullText = `${args.text}\n\nOn ${original.date}, ${replyTo} wrote:\n${quotedBody}`;
+      const fullText = `${args.text}\n\n${headerLines.join('\n')}\n${quotedBody}`;
 
       // Reply addressing.
       //

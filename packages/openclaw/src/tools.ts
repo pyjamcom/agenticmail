@@ -783,8 +783,21 @@ export function registerTools(
         const subject = (orig.subject ?? '').startsWith('Re:') ? orig.subject : `Re: ${orig.subject}`;
         const refs = Array.isArray(orig.references) ? [...orig.references] : [];
         if (orig.messageId) refs.push(orig.messageId);
+        // Quote header — preserve original To/Cc so readers see the
+        // audience of the previous thread round. Matches the format
+        // produced by @agenticmail/mcp's reply_email and the web UI
+        // compose.js, parsed by message-view.js's `renderThreadQuote`.
+        const fmtAddrs = (arr: unknown): string => (Array.isArray(arr) ? arr : [])
+          .map((a: any) => (typeof a === 'string' ? a : (a?.address ?? '')))
+          .filter(Boolean)
+          .join(', ');
+        const origTo = fmtAddrs(orig.to);
+        const origCc = fmtAddrs(orig.cc);
+        const headerLines = [`On ${orig.date}, ${replyTo} wrote:`];
+        if (origTo) headerLines.push(`To: ${origTo}`);
+        if (origCc) headerLines.push(`Cc: ${origCc}`);
         const quoted = (orig.text || '').split('\n').map((l: string) => `> ${l}`).join('\n');
-        const fullText = `${params.text}\n\nOn ${orig.date}, ${replyTo} wrote:\n${quoted}`;
+        const fullText = `${params.text}\n\n${headerLines.join('\n')}\n${quoted}`;
         let to = replyTo;
         if (params.replyAll) {
           const all = [...(orig.to || []), ...(orig.cc || [])].map((a: any) => a.address).filter(Boolean);
