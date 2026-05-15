@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.17] - 2026-05-15
+
+### Added — `@agenticmail/codex@0.1.0` shipped to npm
+
+The OpenAI Codex CLI integration is now available on npm:
+
+```
+npm install -g @agenticmail/codex
+agenticmail-codex install
+```
+
+Same architecture as `@agenticmail/claudecode` — registers the MCP server in `~/.codex/config.toml`, enables the `multi_agent_v2` feature flag, generates one Codex subagent TOML file per AgenticMail account in `~/.codex/agents/`, wires SessionStart/UserPromptSubmit/Stop hooks into `~/.codex/hooks.json`, and runs a long-lived dispatcher daemon (`agenticmail-codex-dispatcher`) that drives Codex turns via `@openai/codex-sdk` whenever new mail or a task lands in an agent's inbox.
+
+The dispatcher's tuning knobs (`maxWakesPerThread`, `maxConcurrentWorkers`, etc.) are shared between Claude Code and Codex via `~/.agenticmail/dispatcher.json` — tune once, both dispatchers pick it up on next restart. `agenticmail-codex tune` is the same CLI surface as `agenticmail-claudecode tune`.
+
+### Added — `@agenticmail/codex` listed as an optional dep of the CLI
+
+`@agenticmail/cli` now declares `@agenticmail/codex@^0.1.0` in its `optionalDependencies`, next to `@agenticmail/claudecode`. `npm install -g @agenticmail/cli@latest` will pull in both integrations by default; users without `@openai/codex-sdk` installed will see codex skipped (optional means npm doesn't fail when a peer-dep can't resolve).
+
+### Tests
+
+79 codex tests pass (config, TOML config patcher, hooks-json patcher, subagent template, install/uninstall flow, dispatcher state, dispatcher tuning, persona loader).
+
+### Published
+
+| Package | Old | New |
+|---|---|---|
+| `@agenticmail/codex` | — | **0.1.0 (first publish)** |
+| `@agenticmail/cli` | 0.9.16 | 0.9.17 |
+
+Plugin manifest mirrored to 0.9.17. api / claudecode / core / mcp unchanged this release.
+
+### Operator install
+
+For users who only want Codex:
+
+```
+npm install -g @agenticmail/codex
+agenticmail-codex install
+```
+
+For users who want both Claude Code AND Codex side-by-side:
+
+```
+npm install -g @agenticmail/cli@latest
+# That pulls @agenticmail/claudecode + @agenticmail/codex transitively.
+agenticmail-claudecode install
+agenticmail-codex install
+```
+
+The two integrations don't conflict — each writes to its own host's config, and the AgenticMail accounts (mailboxes, contacts, tasks) are shared between them.
+
 ## [0.9.16] - 2026-05-15
 
 ### Added — Dispatcher tuning knobs are now end-user-tunable
