@@ -1019,14 +1019,41 @@ mark.search-hl {
    styled card with proper avatar + name + friendly date instead
    of leaving the raw ISO timestamp visible. Nested replies recurse
    so a 3-deep thread gets 3 nested cards. */
+/* Thread-quote: the boxed-up older email a reply quotes. Two issues
+ * users flagged on the rendered view before:
+ *
+ *   1. Huge vertical gap before the quote — was 16px margin-top here
+ *      PLUS empty <p> blocks from trailing newlines in the parent
+ *      message body (now also fixed in message-view.js by trimming
+ *      trailing whitespace before the quote). Dropped to a tight 4px
+ *      since the horizontal divider below carries the separation.
+ *   2. The pink left rule looked like a stub. We add a full-width
+ *      hairline divider on ::before so the visual break between the
+ *      parent message and the quote is unambiguous, and pin the rule
+ *      so it reads as a thread spine continuing down through the
+ *      whole quoted block.
+ *
+ * Nested quotes (replies-of-replies) get progressively warmer rule
+ * colours (pink → purple → amber) so the depth is visible at a
+ * glance without staring at indentation. */
 .thread-quote {
-  margin: 16px 0;
+  position: relative;
+  margin: 4px 0 8px;
+  padding: 14px 0 4px 16px;
   border-left: 3px solid var(--pink-rule);
-  padding: 0 0 0 16px;
+}
+.thread-quote::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -3px;
+  right: 0;
+  height: 1px;
+  background: var(--line, rgba(255,255,255,0.08));
 }
 .thread-quote .thread-quote {
   border-left-color: #c084fc;
-  margin: 12px 0;
+  margin: 4px 0 8px;
 }
 .thread-quote .thread-quote .thread-quote { border-left-color: #f59e0b; }
 .thread-quote-head {

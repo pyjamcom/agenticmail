@@ -324,6 +324,17 @@ function renderBodyWithThreading(src, audienceLookup = null) {
       i++;
       continue;
     }
+    // Strip any trailing blank lines from the prose buffer before
+    // flushing. Reply builders typically pad the new content with
+    // `\n\n` before the `On <date>, <addr> wrote:` header so the
+    // quote stands apart in plaintext clients. In the web view those
+    // blank lines render as empty <p> blocks with their own margins,
+    // producing the huge gap operators flagged between the latest
+    // message and the quoted thread. Trimming here keeps plain-text
+    // readers happy and tightens the rendered HTML at the same time.
+    while (prose.length > 0 && prose[prose.length - 1].trim() === '') {
+      prose.pop();
+    }
     flushProse();
     const dateRaw = m[1];
     const sender = m[2];
@@ -361,16 +372,27 @@ function renderBodyWithThreading(src, audienceLookup = null) {
       }
       break;
     }
-    // Fall back to cross-message lookup if the body didn't carry
-    // audience lines (older replies pre-0.9.32). The lookup uses
-    // the surrounding inbox-list messages to find the original
-    // message by sender + date and lift its To/Cc/Bcc.
-    if (!toAddrs && !ccAddrs && !bccAddrs && typeof audienceLookup === 'function') {
+    // Fall back to cross-message lookup to fill ANY missing audience
+    // field — not just the all-empty case.
+    //
+    // The previous gate (`!toAddrs && !ccAddrs && !bccAddrs`) was wrong:
+    // it treated a body that had a `To:` line but no `Cc:` line as
+    // "audience encoded, lookup not needed", silently dropping the Cc
+    // info that state.messages had. This surfaced as quoted blocks
+    // showing only `TO:` even when the original message had Cc'd
+    // multiple agents — operators correctly flagged this as "the
+    // earlier email's CCs aren't being shown".
+    //
+    // Now: run the lookup whenever any field is missing, and only
+    // backfill the fields that weren't already in the body. The
+    // body-encoded value always wins (it's authoritative); the
+    // lookup is purely a backfill.
+    if ((!toAddrs || !ccAddrs || !bccAddrs) && typeof audienceLookup === 'function') {
       const fromLookup = audienceLookup(sender, dateRaw);
       if (fromLookup) {
-        toAddrs = fromLookup.to;
-        ccAddrs = fromLookup.cc;
-        bccAddrs = fromLookup.bcc;
+        if (!toAddrs) toAddrs = fromLookup.to || '';
+        if (!ccAddrs) ccAddrs = fromLookup.cc || '';
+        if (!bccAddrs) bccAddrs = fromLookup.bcc || '';
       }
     }
     out.push(renderThreadQuote(dateRaw, sender, quoted.join('\n'), { to: toAddrs, cc: ccAddrs, bcc: bccAddrs }, audienceLookup));
