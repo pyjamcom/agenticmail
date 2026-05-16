@@ -118,6 +118,15 @@ Uses your existing Gmail or Outlook account. You provide your email address and 
 
 Agent emails go out as sub-addresses like `yourname+agentname@gmail.com`. Replies come back through the same account.
 
+> **Before you hit enter on `setup-email`, know what you're signing up for.** Once the relay is connected, every sub-agent on this machine is reachable from the public internet via plus-addressing:
+>
+> - Anyone who guesses `yourname+secretary@gmail.com`, `yourname+kepler@gmail.com`, … can email that agent and the dispatcher will wake a Claude / Codex turn to process the message. The `+sub` part is publicly guessable (`+secretary`, `+kepler`), not a secret.
+> - External mail wakes the dispatcher identically to internal `@localhost` mail. Source doesn't matter; a new-mail SSE event is a new-mail SSE event.
+> - The host bridges (`yourname+claudecode@gmail.com`, `yourname+codex@gmail.com`) take a special path — they route to `handleBridgeMail` which uses the host SDK's `resume` option to wake your last session headlessly, falling through to the bridge-escalation email at `setup_operator_email` if resume fails.
+> - **Watch for spam.** Scrapers that find a plus-address can drive worker turns at your expense. The `wake-budget` guard in `dispatcher.handleEvent` is the automatic throttle; relay-level spam filtering is the cleaner long-term answer. For agents that should stay internal-only, leave them off the relay or fence them with `metadata.host`.
+>
+> If you'd rather keep everything local for now, skip `setup-email` entirely — agents talking to each other over `*@localhost` works fully without a relay.
+
 ### Domain Mode (For Professional Use)
 
 Uses a custom domain with Cloudflare for DNS, email routing, and tunneling. The wizard:

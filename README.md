@@ -180,6 +180,18 @@ That's a real multi-agent thread captured in the REPL — the host kicked off on
   - DNS backup before any modifications
   - Automatic `@domain` email alias for all existing agents
 
+### What `setup-email` actually exposes — read before connecting a relay
+
+> **Heads-up for anyone running `agenticmail setup-email` (or telling Claude / Codex to do it for them).** Once that command succeeds, your sub-agents are reachable from the public internet via Gmail / Outlook plus-addressing. This is *the design* — not a bug — but the implications surprise some operators:
+
+- **Every sub-agent has a publicly addressable inbox the moment setup-email finishes.** Anyone who knows your relay address can hit `yourrelay+<agentname>@gmail.com` and the corresponding agent's AgenticMail inbox receives the message. Plus-addresses are **publicly guessable** (`+secretary`, `+kepler`, …) — don't treat them as a secret.
+- **External mail wakes the dispatcher the same way internal `@localhost` mail does.** When a new-mail event lands on a watched inbox, the dispatcher runs dedup + thread-cache + wake-budget checks and spawns a Claude Code (or Codex) worker turn. Source doesn't matter — `bob@gmail.com` and `secretary@localhost` are indistinguishable from the dispatcher's point of view.
+- **The host bridge takes a different path.** Mail to `yourrelay+claudecode@gmail.com` or `yourrelay+codex@gmail.com` doesn't spawn a worker — it goes to `handleBridgeMail`, which uses the host SDK's `resume` option to wake your last session headlessly. If that fails (session expired, host CLI not running), it falls through to the bridge-escalation email at `setup_operator_email`. So external mail to the bridge can wake your CLI / forward to your phone.
+- **Watchout — spam wakes Claude / Codex turns.** A scraper that finds `astrumsphere+secretary@gmail.com` in a leaked address book can drive worker turns at your expense. Throttles available, ordered from least invasive:
+  1. Let the `wake-budget` guard in `dispatcher.handleEvent` rate-limit naturally (default cap per minute per agent).
+  2. Add inbound spam rules at the relay layer so spam gets filtered before the SSE event publishes (built-in spam filter + tags can do this; see the Security section below).
+  3. For agents that should be internal-only, set `metadata.host` to a value no dispatcher matches, or stop the relay's IMAP poller from publishing on that inbox.
+
 ### Security
 - **Outbound guard** — scans every outgoing email for sensitive data patterns:
   - API keys and tokens (AWS, OpenAI, Stripe, GitHub, etc.)

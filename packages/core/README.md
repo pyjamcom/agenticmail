@@ -188,6 +188,18 @@ Uses your existing Gmail or Outlook account as a middleman. This is the easiest 
 
 **Deduplication:** The system tracks delivered messages by (message_id, agent_name) to prevent the same email from being delivered twice. Sent message tracking keeps up to 10,000 entries in memory for reply routing.
 
+### External inbox exposure — read before enabling the relay
+
+> **The RelayGateway makes every sub-agent publicly reachable from the internet** the moment relay mode is configured (typically via `agenticmail setup-email` or the `gateway/relay` POST). This is by design — agents that can email each other locally aren't very useful for talking to real people — but the implications surprise some operators:
+
+- **Plus-addresses are publicly guessable.** Anyone who knows your relay address can hit `your-relay+secretary@gmail.com`, `your-relay+kepler@gmail.com`, etc. and the corresponding agent's inbox receives the message. The `+sub` part is not a secret.
+- **External mail wakes the dispatcher identically to internal `@localhost` mail.** When an inbound message lands on a watched account, the dispatcher emits an SSE `new-mail` event and the host integration (`@agenticmail/claudecode`, `@agenticmail/codex`) spawns a worker turn. There's no source-based filter — `bob@gmail.com` and `secretary@localhost` are indistinguishable from the wake path's point of view.
+- **The host bridges take a different path.** Mail to `your-relay+claudecode@gmail.com` / `your-relay+codex@gmail.com` routes to `handleBridgeMail`, which uses the host SDK's `resume` option to wake the operator's last session headlessly, falling through to the bridge-escalation email at `setup_operator_email` if resume fails.
+- **Spam = worker turns.** A scraper that guesses a plus-address can drive Claude / Codex invocations at the operator's expense. Throttles in order of escalation:
+  1. The `wake-budget` guard in `dispatcher.handleEvent` (default cap per minute per agent — kicks in automatically).
+  2. Relay-layer spam filtering — the built-in spam filter runs on inbound mail before publishing the SSE event.
+  3. For agents that should be internal-only, set `metadata.host` to a value no dispatcher matches, so the SSE event fires but no host wakes on it.
+
 ### Domain Mode
 
 Full custom domain through Cloudflare. Agents send from `agent@yourdomain.com` with proper email authentication (DKIM, SPF, DMARC).

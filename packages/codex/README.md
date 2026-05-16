@@ -104,6 +104,18 @@ Every file we write carries a `# managed-by: @agenticmail/codex` marker. The ins
 
 Uninstall reverses everything we wrote, leaving user state untouched. By default it keeps the bridge agent in AgenticMail (an account with an inbox, contacts, etc. shouldn't disappear silently); pass `--purge-bridge` to delete it.
 
+## External inbox exposure — what `setup-email` actually does to your dispatcher
+
+> **Once the operator runs `agenticmail setup-email`, every Codex subagent on this machine becomes reachable from the public internet via Gmail / Outlook plus-addressing.** Worth surfacing before the operator connects a relay:
+
+- **Plus-addresses are publicly guessable.** Anyone can hit `your-relay+secretary@gmail.com`, `your-relay+kepler@gmail.com`, … and the matching subagent's inbox receives the mail. The `+sub` part is not a secret.
+- **External mail goes through the same `handleEvent` path as internal `@localhost` mail.** Dedup, thread-cache, and wake-budget checks all run; if they pass, the Codex dispatcher spawns a fresh worker turn via `@openai/codex-sdk` to process the message. Source doesn't matter to the wake path.
+- **The bridge takes a different path on purpose.** Mail to `your-relay+codex@gmail.com` routes to `handleBridgeMail`, which uses `codex.resumeThread(id).runStreamed(prompt)` to wake the operator's last thread headlessly rather than spawning a new worker — so external mail to the bridge can wake your interactive CLI, not just background turns. If resume fails (thread expired, no host CLI running), it falls through to the bridge-escalation email at `setup_operator_email`.
+- **Spam wakes Codex turns.** A scraper that finds a plus-address can drive billable Codex invocations. Throttles available, ordered from least invasive:
+  1. The `wake-budget` guard in `dispatcher.handleEvent` (default cap per minute per agent — automatic).
+  2. Relay-level spam filtering before the SSE event publishes.
+  3. For subagents that should stay internal-only, set `metadata.host` to a value no dispatcher matches so external mail still lands in the inbox but no worker spawns.
+
 ## See also
 
 - [`@agenticmail/claudecode`](../claudecode) — same pattern for Anthropic's Claude Code

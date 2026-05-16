@@ -356,6 +356,20 @@ Re-run `agenticmail claudecode` — your bridge agent's key may have been rotate
 
 ---
 
+## External inbox exposure — what `setup-email` actually does to your dispatcher
+
+> **Once the operator runs `agenticmail setup-email`, every Claude Code subagent on this machine becomes reachable from the public internet via Gmail / Outlook plus-addressing.** Worth surfacing before the operator connects a relay:
+
+- **Plus-addresses are publicly guessable.** Anyone can hit `your-relay+secretary@gmail.com`, `your-relay+kepler@gmail.com`, … and the matching subagent's inbox receives the mail. The `+sub` part is not a secret.
+- **External mail goes through the same `handleEvent` path as internal `@localhost` mail.** Dedup, thread-cache, and wake-budget checks all run; if they pass, the Claude Code dispatcher spawns a fresh worker turn via `@anthropic-ai/claude-agent-sdk` to process the message. Source doesn't matter to the wake path.
+- **The bridge takes a different path on purpose.** Mail to `your-relay+claudecode@gmail.com` routes to `handleBridgeMail`, which uses the SDK's `resume` option to wake the operator's last session headlessly rather than spawning a new worker — so external mail to the bridge can wake your interactive CLI, not just background turns. If resume fails (session expired, no host CLI running), it falls through to the bridge-escalation email at `setup_operator_email`.
+- **Spam wakes Claude turns.** A scraper that finds a plus-address can drive billable Claude invocations. Throttles available, ordered from least invasive:
+  1. The `wake-budget` guard in `dispatcher.handleEvent` (default cap per minute per agent — automatic).
+  2. Relay-level spam filtering before the SSE event publishes.
+  3. For subagents that should stay internal-only, set `metadata.host` to a value no dispatcher matches so external mail still lands in the inbox but no worker spawns.
+
+---
+
 ## License
 
 MIT © Ope Olatunji

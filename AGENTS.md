@@ -96,6 +96,21 @@ If the operator is already at the keyboard and you want to give them the exact l
 
 > **`setup-relay` vs `setup-email`** — `setup-email` (added in 0.9.38) is the recommended short path: two questions, auto-detected provider, supports Gmail + Outlook + custom. `setup-relay` is the older full-interactive flow with explicit provider menus, agent-naming, and retry loops. Both write the same relay config; pick whichever fits.
 
+### What the operator needs to KNOW before `setup-email` — surface this proactively
+
+The moment `agenticmail setup-email` succeeds, the operator's sub-agents become reachable from the public internet via plus-addressing. Most operators don't realize this. **Tell them before they run the command** so they can opt in deliberately:
+
+> "Heads up — once we connect this, anyone on the internet who knows the address can email `<your-relay>+<agentname>@gmail.com` and that sub-agent will wake up and process it. The plus-suffix is publicly guessable (`+secretary`, `+kepler`, etc.) so don't treat it as a secret. If that's not what you want yet, we can skip this step and your agents will just keep talking to each other locally over `*@localhost`. Otherwise I'll continue and warn you about spam wake-budgets afterward."
+
+What's actually happening under the hood (for your own model — paraphrase, don't paste):
+
+- Every sub-agent gets a publicly addressable inbox the moment setup-email finishes.
+- External mail wakes the dispatcher identically to internal `@localhost` mail — source doesn't matter; an SSE new-mail event is an SSE new-mail event.
+- The host bridges (`<relay>+claudecode@gmail.com` and `<relay>+codex@gmail.com`) take a different path — they route to `handleBridgeMail` which does headless session resume via the SDK, falling through to bridge-escalation email if resume fails.
+- Spam to any sub-agent wakes Claude / Codex turns. The `wake-budget` guard in `dispatcher.handleEvent` is the throttle; relay-level spam filtering is the cleaner long-term answer.
+
+If the operator says yes anyway (most do), continue with `setup-email`. If they say no, skip it — `*@localhost` coordination still works fully without a relay.
+
 ### Right after install — ASK THE USER for their notification email
 
 This is the SECOND thing to do after `bootstrap` finishes, before dispatcher tuning. When a sub-agent mails the host bridge (`wake: ["codex"]` / `wake: ["claudecode"]`) and the dispatcher CAN'T resume your CLI session (you closed the window, session token expired, etc.), it forwards a digest to a configured operator email so you get a phone push. Without this set, escalations are silent unless you're actively watching the web UI.

@@ -408,6 +408,17 @@ JSON parse errors (malformed request bodies) return a clear 400 error rather tha
 
 ---
 
+## External inbox exposure — what `/gateway/relay` actually opens up
+
+> **The `POST /gateway/relay` endpoint (the one `agenticmail setup-email` calls) makes every sub-agent publicly reachable from the internet via plus-addressing.** This is by design — agents that can only email each other aren't very useful for talking to real people — but the implications surprise some operators:
+
+- **Plus-addresses are publicly guessable.** Once relay is connected, anyone can hit `your-relay+secretary@gmail.com`, `your-relay+kepler@gmail.com`, etc. and the corresponding agent's AgenticMail inbox receives the message. The `+sub` part is not a secret.
+- **External mail wakes the dispatcher identically to internal `@localhost` mail.** The API publishes the same SSE `new-mail` event regardless of source; the host integration (`@agenticmail/claudecode`, `@agenticmail/codex`) spawns a worker turn either way.
+- **The host bridges take a different path.** Mail to `your-relay+claudecode@gmail.com` / `your-relay+codex@gmail.com` routes to `handleBridgeMail` in the dispatcher, which uses the host SDK's `resume` option to wake the operator's last session headlessly. If that fails it falls through to the bridge-escalation email configured via `setup_operator_email`.
+- **Spam = worker turns.** Throttles in order of escalation: the `wake-budget` guard in `dispatcher.handleEvent` (automatic, default cap per minute per agent), the built-in relay-level spam filter (runs before publishing the SSE event), and `metadata.host`-based fencing for agents that should stay internal-only.
+
+---
+
 ## License
 
 [MIT](./LICENSE) - Ope Olatunji ([@ope-olatunji](https://github.com/ope-olatunji))

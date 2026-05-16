@@ -405,6 +405,19 @@ Reply sent to john@example.com with subject "Re: Q2 Budget Review"
 
 ---
 
+## External inbox exposure — surface this before walking the operator through relay setup
+
+> **The MCP tools that configure the relay (`setup_operator_email`, plus any agent advising the operator to run `agenticmail setup-email` or `setup-relay`) open every sub-agent up to the public internet via Gmail / Outlook plus-addressing.** Operators don't always realize this — host agents should warn explicitly:
+
+- **Plus-addresses are publicly guessable.** Once relay is configured, anyone can email `your-relay+secretary@gmail.com`, `your-relay+kepler@gmail.com`, … and the corresponding AgenticMail agent receives it. The `+sub` part is not a secret.
+- **External mail wakes the host dispatcher identically to internal `@localhost` mail.** The MCP server doesn't filter by source; the API publishes an SSE `new-mail` event for any inbound, and the host integration spawns a worker turn.
+- **The host bridges take a different path.** Mail to `your-relay+claudecode@gmail.com` / `your-relay+codex@gmail.com` routes to `handleBridgeMail`, which uses the host SDK's `resume` option to wake the operator's last session headlessly. If resume fails, it falls through to the bridge-escalation email at `setup_operator_email` — exactly why that MCP tool exists.
+- **Spam = worker turns.** Throttles in order of escalation: the `wake-budget` guard in the dispatcher (automatic), the relay-level spam filter, and `metadata.host`-based fencing for agents that should stay internal-only.
+
+When a host agent is about to call any of the relay-setup tools or instruct the operator to run `setup-email`, paraphrase this for the operator first so they can opt in deliberately rather than discovering it the day they get their first spam wake.
+
+---
+
 ## License
 
 [MIT](./LICENSE) - Ope Olatunji ([@ope-olatunji](https://github.com/ope-olatunji))

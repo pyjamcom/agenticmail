@@ -425,6 +425,17 @@ Then update the path in `~/.openclaw/openclaw.json` under `plugins.load.paths`.
 
 ---
 
+## External inbox exposure — what `setup-email` actually does
+
+> **Once the operator runs `agenticmail setup-email` (or otherwise connects a Gmail / Outlook relay), every AgenticMail agent exposed through this OpenClaw plugin becomes reachable from the public internet via plus-addressing.** Worth surfacing before relay setup:
+
+- **Plus-addresses are publicly guessable.** Anyone can hit `your-relay+secretary@gmail.com`, `your-relay+kepler@gmail.com`, … and the matching agent's inbox receives the mail. The `+sub` part is not a secret.
+- **External mail wakes the OpenClaw call-agent flow identically to internal `@localhost` mail.** When inbound lands on a watched account, the API publishes an SSE `new-mail` event and any host that has claimed the agent runs through its wake path.
+- **The host bridges take a different path.** Mail to `your-relay+claudecode@gmail.com` / `your-relay+codex@gmail.com` routes to `handleBridgeMail` in the corresponding dispatcher, which uses the host SDK's `resume` option to wake the operator's last session headlessly. If resume fails it falls through to the bridge-escalation email at `setup_operator_email`.
+- **Spam = worker turns.** Throttles in order of escalation: the `wake-budget` guard in the dispatcher (automatic, default cap per minute per agent), the built-in relay-level spam filter, and `metadata.host`-based fencing for agents that should stay internal-only.
+
+---
+
 ## License
 
 [MIT](./LICENSE) - Ope Olatunji ([@ope-olatunji](https://github.com/ope-olatunji))
