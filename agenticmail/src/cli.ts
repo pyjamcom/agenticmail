@@ -501,6 +501,112 @@ function nonInteractiveDefault<T>(value: T): T | null {
   return NON_INTERACTIVE ? value : null;
 }
 
+/**
+ * `agenticmail setup-relay` — focused subcommand for adding the Gmail
+ * (or Outlook / custom) relay AFTER the initial bootstrap is done.
+ *
+ * # Why this exists separately from `agenticmail setup`
+ *
+ * `setup` re-runs the whole bootstrap (Stalwart, master key, default
+ * agent, etc) which is overkill for a returning operator who just
+ * wants to add outbound email. More importantly, the relay step
+ * needs a Gmail app password — and the SAFE way to collect that is
+ * here, in the operator's own terminal, via hidden `askSecret`
+ * stdin input. The operator never pastes the password into an LLM
+ * chat where it would land in context windows / logs / conversation
+ * history.
+ *
+ * The recommended UX is: when an operator's host agent (claude /
+ * codex) wants to set up the relay, the agent tells the operator
+ * to run this command themselves. The agent then waits for "done"
+ * and proceeds. The agent never sees the credential.
+ *
+ * # What it does
+ *
+ *   1. Loads `~/.agenticmail/config.json` (errors out if AgenticMail
+ *      isn't bootstrapped yet — directs operator to `agenticmail setup`).
+ *   2. Calls the shared `setupRelay()` helper used by the main
+ *      bootstrap, which prompts via `askSecret` (hidden) and POSTs
+ *      to `/api/agenticmail/gateway/relay`.
+ *   3. Prints the result + a pointer to `setup_operator_email` so
+ *      the operator can wire bridge-escalation forwarding next.
+ */
+async function cmdSetupRelay() {
+  const args = process.argv.slice(3);
+  if (args.some(a => a === '--help' || a === '-h' || a === 'help')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 agenticmail setup-relay ')}`);
+    log('');
+    log(`  ${c.bold('Usage:')} agenticmail setup-relay`);
+    log('');
+    log(`  Adds (or updates) the Gmail / Outlook / custom relay AgenticMail uses`);
+    log(`  to send mail to the public internet. Run this YOURSELF — never paste`);
+    log(`  the Gmail app password into an agent's chat (it would end up in the`);
+    log(`  LLM's context / logs / conversation history).`);
+    log('');
+    log(`  Password input is hidden (raw-mode stdin). The agent never sees it.`);
+    log('');
+    log(`  Prereq: AgenticMail already bootstrapped (run \`agenticmail setup\` first).`);
+    log('');
+    return;
+  }
+
+  // Load existing config — we refuse to run if AgenticMail isn't set up.
+  const configPath = join(homedir(), '.agenticmail', 'config.json');
+  if (!existsSync(configPath)) {
+    log('');
+    fail(`AgenticMail isn't set up yet — no config at ${c.dim(configPath)}`);
+    log(`  Run ${c.cyan('agenticmail setup')} first, then come back to add the relay.`);
+    log('');
+    process.exit(1);
+  }
+
+  let config: SetupConfig;
+  try {
+    config = JSON.parse(readFileSync(configPath, 'utf-8')) as SetupConfig;
+  } catch (err) {
+    log('');
+    fail(`Could not read ${configPath}: ${(err as Error).message}`);
+    log('');
+    process.exit(1);
+  }
+
+  // Heads-up banner so the operator knows the agent has no visibility.
+  log('');
+  log(`   ${c.bold('🎀 AgenticMail — set up Gmail relay')} `);
+  log('');
+  log(`  ${c.dim('This command runs entirely in your terminal. The password')}`);
+  log(`  ${c.dim('input is hidden and never leaves this process — your agent')}`);
+  log(`  ${c.dim("doesn't see it.")}`);
+  log('');
+
+  try {
+    const result = await setupRelay(config);
+    if (!result.success) {
+      log('');
+      fail('Relay setup did not complete — see messages above.');
+      process.exit(1);
+    }
+    log('');
+    ok('Gmail relay configured.');
+    log('');
+    log(`  ${c.bold('Next:')} point bridge-escalation alerts at your personal email:`);
+    log('');
+    log(`    ${c.cyan('Option A')} — tell your host agent: "set my operator notification email to <you@gmail.com>"`);
+    log(`    ${c.cyan('Option B')} — open the web UI → click your avatar → ${c.bold('Alert email')} → type, Save`);
+    log('');
+    log(`  ${c.dim('Either path writes ~/.agenticmail/operator-prefs.json — the dispatcher')}`);
+    log(`  ${c.dim("forwards a digest there when sub-agents mail your bridge and the")}`);
+    log(`  ${c.dim("dispatcher can't resume your host session.")}`);
+    log('');
+  } catch (err) {
+    log('');
+    fail(`Setup-relay failed: ${(err as Error).message}`);
+    log('');
+    process.exit(1);
+  }
+}
+
 async function cmdSetup() {
   // Parse setup-specific flags (--yes, --non-interactive, -y, --help).
   const setupArgs = process.argv.slice(3);
@@ -3428,6 +3534,10 @@ const command = process.argv[2];
 switch (command) {
   case 'setup':
     cmdSetup().catch(err => { console.error(err); process.exit(1); });
+    break;
+  case 'setup-relay':
+  case 'relay':
+    cmdSetupRelay().catch(err => { console.error(err); process.exit(1); });
     break;
   case 'start':
     cmdStart().catch(err => { console.error(err); process.exit(1); });

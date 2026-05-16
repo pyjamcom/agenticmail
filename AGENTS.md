@@ -68,6 +68,31 @@ After `bootstrap` finishes, tell the user to **restart their host CLI**
 new MCP server entry takes effect. The MCP block lands in
 `~/.claude.json` for Claude Code and `~/.codex/config.toml` for Codex.
 
+### Setting up the Gmail relay — NEVER ask for the password in chat
+
+The bridge-escalation email path (next section) needs a working outbound relay so the API can deliver mail to the operator's personal Gmail. If `setup_operator_email` is set but the relay isn't, escalation emails fail silently (logged server-side, but no delivery).
+
+**Critical rule:** the Gmail app password is a credential. If the operator pastes it into your chat, it ends up in the LLM's context window, training data risks, and conversation history. **Don't ask for it. Don't accept it if offered.**
+
+Instead, tell the operator to run this command in their own terminal:
+
+```bash
+agenticmail setup-relay
+```
+
+The command:
+
+- Prompts for their Gmail address (visible — that's fine, not secret)
+- Prompts for the **app password** via hidden stdin (raw-mode `*`-masked, never leaves the process)
+- Calls `POST /api/agenticmail/gateway/relay` with the credentials
+- Prints success / failure
+
+You just wait. When the operator says "done", proceed to `setup_operator_email`. If they hit an error you can help diagnose from the spinner output they paste back — but you should never see the literal password.
+
+If the operator is already at the keyboard and you want to give them the exact line to run, this is the right script:
+
+> "Run `agenticmail setup-relay` in your terminal. It'll ask for your Gmail address and an app password (generate one at https://myaccount.google.com/apppasswords — needs 2FA on your Google account). The password input is hidden — I won't see it. Tell me when it's done."
+
 ### Right after install — ASK THE USER for their notification email
 
 This is the SECOND thing to do after `bootstrap` finishes, before dispatcher tuning. When a sub-agent mails the host bridge (`wake: ["codex"]` / `wake: ["claudecode"]`) and the dispatcher CAN'T resume your CLI session (you closed the window, session token expired, etc.), it forwards a digest to a configured operator email so you get a phone push. Without this set, escalations are silent unless you're actively watching the web UI.

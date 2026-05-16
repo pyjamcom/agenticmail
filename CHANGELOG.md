@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.37] - 2026-05-15
+
+### Added — `agenticmail setup-relay` so operators add Gmail without exposing the password to an agent
+
+User report (correct): "will the agent see my password? thats bad..." — referring to the suggestion that an operator tell their host agent "set up the Gmail relay, password is xxx-xxx-xxx". That puts the credential into the LLM's context window, log output, and conversation history.
+
+Fix: a focused `agenticmail setup-relay` CLI subcommand the operator runs in their OWN terminal. Password is collected via hidden-input stdin (raw-mode, `*`-masked) and never leaves the process. The agent never sees it.
+
+### What it does
+
+1. Loads `~/.agenticmail/config.json` (errors out with a clear message if AgenticMail isn't bootstrapped yet).
+2. Reuses the existing `setupRelay()` helper that the main bootstrap uses, so the credential-handling code path is identical — interactive prompts for provider, email, agent name, then hidden-input password.
+3. POSTs to `/api/agenticmail/gateway/relay`. Retry loop on auth failure (3 attempts) so a typo'd app password doesn't force a full restart.
+4. Prints a pointer to `setup_operator_email` as the natural next step.
+
+### AGENTS.md updated
+
+Host-agent guidance now explicitly says **don't ask for the password**. The right script is:
+
+> "Run `agenticmail setup-relay` in your terminal. It'll ask for your Gmail address and an app password (generate one at https://myaccount.google.com/apppasswords — needs 2FA). The password input is hidden — I won't see it. Tell me when it's done."
+
+This pattern — agent suggests a CLI command, operator runs it, agent waits for "done" — is the recommended shape for any setup step that needs a credential.
+
+### Versions
+
+- `@agenticmail/cli@0.9.37`
+
+(No other package versions changed — the relay endpoint already existed; the new piece is just the operator-facing CLI surface.)
+
+### Upgrade
+
+```bash
+npm install -g @agenticmail/cli@latest
+agenticmail setup-relay
+```
+
+You'll be prompted for your Gmail address (visible) and app password (hidden). After that:
+
+- Tell your host agent: "set my operator notification email to ope@gmail.com"
+- Or open the web UI → avatar → Alert email → type, Save
+
 ## [0.9.36] - 2026-05-15
 
 ### Added — Operator email surface in the web UI
