@@ -371,8 +371,13 @@ async function main(): Promise<void> {
   const apiUrl = `http://${apiHost}:${apiPort}`;
 
   // 2. Find the bridge agent — the host's identity inside AgenticMail.
-  //    Name is configurable; we accept either "claudecode" or the
-  //    role-based marker for forward compatibility.
+  //    Two-pass lookup is critical: the name-exact match MUST win over
+  //    the role-based fallback, because multiple bridge agents can
+  //    coexist (e.g. `claudecode` and `codex` both have role=bridge).
+  //    Folding everything into a single OR'd `.find` predicate would
+  //    return whichever bridge appears first in the accounts list, so
+  //    the claudecode hook could end up reading codex's inbox (and
+  //    vice versa). The codex package fixed this; we must mirror it.
   let bridge: Account | undefined;
   try {
     const r = await fetch(`${apiUrl}/api/agenticmail/accounts`, {
@@ -381,9 +386,9 @@ async function main(): Promise<void> {
     });
     if (!r.ok) { emitAndExit(''); return; }
     const data = (await r.json()) as { agents?: Account[] };
-    bridge = (data.agents ?? []).find(
-      a => a.name === 'claudecode' || a.name === 'claude' || a.role === 'bridge',
-    );
+    const agents = data.agents ?? [];
+    bridge = agents.find(a => a.name === 'claudecode' || a.name === 'claude')
+          ?? agents.find(a => a.role === 'bridge');
   } catch { emitAndExit(''); return; }
   if (!bridge?.apiKey) { emitAndExit(''); return; }
 
