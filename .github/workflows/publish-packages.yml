@@ -1,0 +1,79 @@
+name: Publish to GitHub Packages
+
+# Mirrors every published package in this monorepo to GitHub Packages
+# (npm.pkg.github.com) whenever a GitHub Release is published. Keeps
+# the github.com/orgs/agenticmail/packages page in sync with what's on
+# npmjs.com so enterprise users who require packages from the GitHub
+# registry (compliance, security advisories tied to the repo) can pull
+# them by name.
+#
+# The job tries to publish every package; if a version is already on
+# GitHub Packages it'll fail with E409/E403, which we tolerate via
+# `continue-on-error: true` per-package step. New versions land
+# atomically; existing ones are no-ops.
+#
+# Trigger: release publish, so the workflow fires once per actual
+# customer-facing release (matches what we do for enterprise).
+on:
+  release:
+    types: [published]
+  # Manual trigger for backfilling missed releases or one-off catch-up runs.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      # Don't abort the whole matrix if one package fails — independent
+      # packages can drift in versions and a duplicate-publish on one
+      # shouldn't block the others.
+      fail-fast: false
+      matrix:
+        package:
+          - packages/core
+          - packages/api
+          - packages/mcp
+          - packages/claudecode
+          - packages/codex
+          - agenticmail   # @agenticmail/cli — lives at the monorepo root, not under packages/
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@agenticmail'
+
+      # Install dependencies at the repo root so workspace cross-deps
+      # resolve before each package's prepublish runs its `tsup` build.
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts
+
+      # Build the package being published. Each package owns its own
+      # `npm run build` script (tsup-based); we run it from inside the
+      # package directory so the build output lands in that package's
+      # dist/, not the root.
+      - name: Build ${{ matrix.package }}
+        working-directory: ${{ matrix.package }}
+        run: |
+          if [ -f package.json ] && grep -q '"build"' package.json; then
+            npm run build
+          else
+            echo "::warning::No build script in ${{ matrix.package }}, skipping build"
+          fi
+
+      # Publish. `continue-on-error` so a duplicate-version 409 from
+      # GitHub Packages doesn't fail the whole matrix — that just means
+      # this particular package wasn't bumped in this release.
+      - name: Publish ${{ matrix.package }}
+        working-directory: ${{ matrix.package }}
+        continue-on-error: true
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
