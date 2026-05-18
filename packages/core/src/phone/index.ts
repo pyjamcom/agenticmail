@@ -1,4 +1,22 @@
 export {
+  ELKS_REALTIME_AUDIO_FORMATS,
+  buildElksAudioMessage,
+  buildElksByeMessage,
+  buildElksHandshakeMessages,
+  buildElksInterruptMessage,
+  buildElksListeningMessage,
+  buildElksSendingMessage,
+  parseElksRealtimeMessage,
+} from './realtime.js';
+export type {
+  ElksRealtimeAudioFormat,
+  ElksRealtimeAudioMessage,
+  ElksRealtimeByeMessage,
+  ElksRealtimeHelloMessage,
+  ElksRealtimeInboundMessage,
+  ElksRealtimeOutboundMessage,
+} from './realtime.js';
+export {
   PhoneManager,
   buildPhoneTransportConfig,
   redactPhoneTransportConfig,
