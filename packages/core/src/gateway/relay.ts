@@ -79,10 +79,34 @@ export function formatPollError(err: unknown): string {
   // else, surface that visibly so the operator knows there's no detail
   // to chase rather than silently returning the same opaque string.
   if (parts.length === 1 && /^command failed$/i.test(head)) {
-    return `${head} (no further detail available — wrapping error did not carry stderr/code/response)`;
+    return redactCredentialTokens(`${head} (no further detail available — wrapping error did not carry stderr/code/response)`);
   }
 
-  return parts.join(' | ');
+  return redactCredentialTokens(parts.join(' | '));
+}
+
+/**
+ * Hardening — relay error formatting renders raw error fields
+ * (`response`, `command`, `stderr`, ...). If an SMTP/IMAP library ever
+ * surfaces an error whose `command` or `response` echoes an AUTH
+ * exchange, the base64-encoded credential could ride along into a log
+ * line. Mask the payload that follows an AUTH/AUTHENTICATE SASL verb so
+ * a relay-auth failure can never leak the credential to stdout/logs.
+ * Keeps the verb + mechanism visible (still useful for triage), redacts
+ * only the secret token.
+ *
+ * Scoped deliberately to `AUTH`/`AUTHENTICATE`-prefixed SASL exchanges
+ * (the real credential-bearing vectors for both SMTP and IMAP — plain
+ * `LOGIN user pass` is not used by nodemailer or imapflow). A broader
+ * bare-`LOGIN` rule was dropped because it false-matched the common
+ * prose "login failed" / "login error" in headline messages.
+ */
+function redactCredentialTokens(text: string): string {
+  return text
+    // `AUTH PLAIN <base64>`, `AUTHENTICATE XOAUTH2 <token>`, `AUTH LOGIN <base64>`, ...
+    .replace(/\b(AUTH(?:ENTICATE)?)\s+(PLAIN|LOGIN|XOAUTH2|CRAM-MD5|EXTERNAL)\s+\S+/gi, '$1 $2 [redacted]')
+    // bare `AUTH <base64-blob>` continuation lines (>=16 base64 chars)
+    .replace(/\b(AUTH(?:ENTICATE)?)\s+([A-Za-z0-9+/]{16,}={0,2})\b/gi, '$1 [redacted]');
 }
 
 export function isRelayCredentialError(err: unknown): boolean {
