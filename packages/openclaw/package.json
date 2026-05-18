@@ -34,7 +34,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@agenticmail/core": "^0.9.11"
+    "@agenticmail/core": "^0.9.12"
   },
   "devDependencies": {
     "tsup": "^8.4.0",
