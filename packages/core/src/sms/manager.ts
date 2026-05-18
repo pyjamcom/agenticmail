@@ -1,30 +1,39 @@
 /**
- * SMS Manager - Google Voice SMS integration
+ * SMS Manager - provider-backed SMS integration
  *
  * How it works:
- * 1. User sets up Google Voice with SMS-to-email forwarding
- * 2. Incoming SMS arrives at Google Voice -> forwarded to email -> lands in agent inbox
- * 3. Agent parses forwarded SMS from email body
- * 4. Outgoing SMS sent via Google Voice web interface (browser automation)
+ * 1. User chooses a provider for the agent phone number
+ * 2. Google Voice uses email forwarding/web instructions
+ * 3. 46elks uses direct API sends and inbound webhooks
+ * 4. All inbound/outbound messages are stored in the SMS table
  *
  * SMS config is stored in agent metadata under the "sms" key.
  */
 
 import type { Database } from '../storage/db.js';
+import { encryptSecret, decryptSecret, isEncryptedSecret } from '../crypto/secrets.js';
 
 export interface SmsConfig {
   /** Whether SMS is enabled for this agent */
   enabled: boolean;
-  /** Google Voice phone number (e.g. +12125551234) */
+  /** Phone number in E.164 format where possible */
   phoneNumber: string;
   /** The email address Google Voice forwards SMS to (the Gmail used for GV signup) */
-  forwardingEmail: string;
+  forwardingEmail?: string;
   /** App password for forwarding email (only needed if different from relay email) */
   forwardingPassword?: string;
   /** Whether the GV Gmail is the same as the relay email */
   sameAsRelay?: boolean;
-  /** Provider (currently only google_voice) */
-  provider: 'google_voice';
+  /** SMS provider */
+  provider: 'google_voice' | '46elks';
+  /** 46elks API username */
+  username?: string;
+  /** 46elks API password */
+  password?: string;
+  /** Provider API base URL override */
+  apiUrl?: string;
+  /** Secret required on inbound provider webhooks */
+  webhookSecret?: string;
   /** When SMS was configured */
   configuredAt: string;
 }
@@ -45,6 +54,192 @@ export interface SmsMessage {
   status: 'pending' | 'sent' | 'delivered' | 'failed' | 'received';
   createdAt: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface SendSmsInput {
+  to: string;
+  body: string;
+  dryRun?: boolean;
+}
+
+export interface SendSmsResult {
+  provider: SmsConfig['provider'];
+  id?: string;
+  status: string;
+  from: string;
+  to: string;
+  body: string;
+  raw?: unknown;
+}
+
+export interface InboundSmsEvent {
+  provider: SmsConfig['provider'];
+  id?: string;
+  from: string;
+  to: string;
+  body: string;
+  timestamp: string;
+  raw?: unknown;
+}
+
+export interface SmsProvider {
+  id: SmsConfig['provider'];
+  sendSms(config: SmsConfig, input: SendSmsInput): Promise<SendSmsResult>;
+  parseInboundSms(payload: Record<string, unknown>): InboundSmsEvent | null;
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function defaultApiUrl(config: SmsConfig): string {
+  const url = (config.apiUrl || 'https://api.46elks.com/a1').replace(/\/+$/, '');
+  // Defense-in-depth — the outbound call attaches Basic-Auth credentials,
+  // so the endpoint MUST be https. The /sms/setup route already rejects
+  // non-https overrides, but enforce it again at the point of use in case
+  // a config was persisted before that validation existed.
+  if (!/^https:\/\//i.test(url)) {
+    throw new Error('46elks apiUrl must use https:// — refusing to send credentials over a non-TLS connection');
+  }
+  return url;
+}
+
+function basicAuth(username: string, password: string): string {
+  return Buffer.from(`${username}:${password}`, 'utf8').toString('base64');
+}
+
+export function redactSmsConfig(config: SmsConfig): SmsConfig {
+  return {
+    ...config,
+    forwardingPassword: config.forwardingPassword ? '***' : undefined,
+    password: config.password ? '***' : undefined,
+    webhookSecret: config.webhookSecret ? '***' : undefined,
+  };
+}
+
+class GoogleVoiceSmsProvider implements SmsProvider {
+  id = 'google_voice' as const;
+
+  async sendSms(config: SmsConfig, input: SendSmsInput): Promise<SendSmsResult> {
+    const to = normalizePhoneNumber(input.to);
+    const from = normalizePhoneNumber(config.phoneNumber);
+    if (!to) throw new Error('Invalid recipient phone number');
+    if (!from) throw new Error('Invalid configured Google Voice phone number');
+
+    return {
+      provider: this.id,
+      status: 'pending',
+      from,
+      to,
+      body: input.body,
+      raw: {
+        delivery: 'manual_google_voice_web',
+        url: 'https://voice.google.com',
+      },
+    };
+  }
+
+  parseInboundSms(): InboundSmsEvent | null {
+    return null;
+  }
+}
+
+class FortySixElksSmsProvider implements SmsProvider {
+  id = '46elks' as const;
+
+  async sendSms(config: SmsConfig, input: SendSmsInput): Promise<SendSmsResult> {
+    const username = asString(config.username);
+    const password = asString(config.password);
+    if (!username || !password) {
+      throw new Error('46elks username and password are required');
+    }
+
+    const to = normalizePhoneNumber(input.to);
+    const from = normalizePhoneNumber(config.phoneNumber);
+    if (!to) throw new Error('Invalid recipient phone number');
+    if (!from) throw new Error('Invalid configured 46elks phone number');
+
+    const form = new URLSearchParams();
+    form.set('to', to);
+    form.set('from', from);
+    form.set('message', input.body);
+    if (input.dryRun) form.set('dryrun', 'yes');
+
+    const response = await fetch(`${defaultApiUrl(config)}/sms`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basicAuth(username, password)}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: form,
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    const text = await response.text();
+    let raw: unknown = text;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      // Keep raw provider response as text.
+    }
+
+    if (!response.ok) {
+      const message = typeof raw === 'object' && raw && ('message' in raw || 'error' in raw)
+        ? String((raw as { message?: unknown; error?: unknown }).message ?? (raw as { error?: unknown }).error)
+        : text.slice(0, 200);
+      throw new Error(`46elks SMS failed (${response.status}): ${message}`);
+    }
+
+    const providerId = typeof raw === 'object' && raw && 'id' in raw ? String((raw as { id?: unknown }).id) : undefined;
+    const providerStatus = typeof raw === 'object' && raw && 'status' in raw ? String((raw as { status?: unknown }).status) : 'sent';
+
+    return {
+      provider: this.id,
+      id: providerId,
+      status: providerStatus,
+      from,
+      to,
+      body: input.body,
+      raw,
+    };
+  }
+
+  parseInboundSms(payload: Record<string, unknown>): InboundSmsEvent | null {
+    const direction = asString(payload.direction).toLowerCase();
+    if (direction && direction !== 'incoming') return null;
+
+    const from = normalizePhoneNumber(asString(payload.from));
+    const to = normalizePhoneNumber(asString(payload.to));
+    const body = asString(payload.message);
+    if (!from || !to || !body) return null;
+
+    return {
+      provider: this.id,
+      id: asString(payload.id) || undefined,
+      from,
+      to,
+      body,
+      timestamp: asString(payload.created) || new Date().toISOString(),
+      raw: payload,
+    };
+  }
+}
+
+const PROVIDERS: Record<SmsConfig['provider'], SmsProvider> = {
+  google_voice: new GoogleVoiceSmsProvider(),
+  '46elks': new FortySixElksSmsProvider(),
+};
+
+export function getSmsProvider(provider: SmsConfig['provider']): SmsProvider {
+  return PROVIDERS[provider];
+}
+
+export function mapProviderSmsStatus(status: string): SmsMessage['status'] {
+  const normalized = status.toLowerCase();
+  if (normalized === 'delivered') return 'delivered';
+  if (normalized === 'failed' || normalized === 'error') return 'failed';
+  if (normalized === 'created' || normalized === 'queued' || normalized === 'sent') return 'sent';
+  return 'sent';
 }
 
 /** Normalize a phone number to E.164-ish format (+1XXXXXXXXXX) */
@@ -232,11 +427,59 @@ export function extractVerificationCode(smsBody: string): string | null {
   return null;
 }
 
+/**
+ * Credential fields on SmsConfig that must never sit in plaintext at rest.
+ * The 46elks API password, the inbound-webhook shared secret, and the
+ * Google Voice forwarding-mailbox app password are all live credentials —
+ * a leaked SQLite file should not hand an attacker a working account.
+ */
+const SMS_SECRET_FIELDS = ['password', 'webhookSecret', 'forwardingPassword'] as const;
+
 export class SmsManager {
   private initialized = false;
 
-  constructor(private db: Database) {
+  /**
+   * Optional master key used to encrypt SMS credentials at rest (same
+   * AES-256-GCM scheme GatewayManager uses for relay/domain secrets).
+   * When absent (e.g. tests, or a deployment with no master key) configs
+   * are stored as-is and reads tolerate plaintext — so upgrades and
+   * downgrades both stay safe.
+   */
+  constructor(private db: Database, private encryptionKey?: string) {
     this.ensureTable();
+  }
+
+  /** Encrypt the credential fields of an SMS config before persisting. */
+  private encryptConfig(config: SmsConfig): SmsConfig {
+    if (!this.encryptionKey) return config;
+    const out: SmsConfig = { ...config };
+    for (const field of SMS_SECRET_FIELDS) {
+      const value = out[field];
+      // Only encrypt non-empty plaintext — never double-encrypt.
+      if (typeof value === 'string' && value && !isEncryptedSecret(value)) {
+        out[field] = encryptSecret(value, this.encryptionKey);
+      }
+    }
+    return out;
+  }
+
+  /** Decrypt the credential fields of an SMS config after loading. */
+  private decryptConfig(config: SmsConfig): SmsConfig {
+    if (!this.encryptionKey) return config;
+    const out: SmsConfig = { ...config };
+    for (const field of SMS_SECRET_FIELDS) {
+      const value = out[field];
+      if (typeof value === 'string' && isEncryptedSecret(value)) {
+        try {
+          out[field] = decryptSecret(value, this.encryptionKey);
+        } catch {
+          // Wrong key / corrupt blob — leave the ciphertext in place
+          // rather than crashing; the caller's auth check will simply
+          // fail closed.
+        }
+      }
+    }
+    return out;
   }
 
   private ensureTable(): void {
@@ -265,19 +508,20 @@ export class SmsManager {
     }
   }
 
-  /** Get SMS config from agent metadata */
+  /** Get SMS config from agent metadata (credential fields decrypted). */
   getSmsConfig(agentId: string): SmsConfig | null {
     const row = this.db.prepare('SELECT metadata FROM agents WHERE id = ?').get(agentId) as { metadata: string } | undefined;
     if (!row) return null;
     try {
       const meta = JSON.parse(row.metadata || '{}');
-      return meta.sms && meta.sms.enabled !== undefined ? meta.sms : null;
+      if (!meta.sms || meta.sms.enabled === undefined) return null;
+      return this.decryptConfig(meta.sms as SmsConfig);
     } catch {
       return null;
     }
   }
 
-  /** Save SMS config to agent metadata */
+  /** Save SMS config to agent metadata (credential fields encrypted). */
   saveSmsConfig(agentId: string, config: SmsConfig): void {
     const row = this.db.prepare('SELECT metadata FROM agents WHERE id = ?').get(agentId) as { metadata: string } | undefined;
     if (!row) throw new Error(`Agent ${agentId} not found`);
@@ -288,7 +532,7 @@ export class SmsManager {
     } catch {
       meta = {};
     }
-    meta.sms = config;
+    meta.sms = this.encryptConfig(config);
     this.db.prepare("UPDATE agents SET metadata = ?, updated_at = datetime('now') WHERE id = ?")
       .run(JSON.stringify(meta), agentId);
   }
@@ -332,20 +576,45 @@ export class SmsManager {
       .run(JSON.stringify(meta), agentId);
   }
 
-  /** Record an inbound SMS (parsed from email) */
-  recordInbound(agentId: string, parsed: ParsedSms): SmsMessage {
+  /** Find the agent whose SMS config owns a phone number. */
+  findAgentBySmsNumber(phoneNumber: string, provider?: SmsConfig['provider']): { agentId: string; config: SmsConfig } | null {
+    const normalized = normalizePhoneNumber(phoneNumber);
+    if (!normalized) return null;
+
+    const rows = this.db.prepare('SELECT id, metadata FROM agents').all() as { id: string; metadata: string }[];
+    for (const row of rows) {
+      try {
+        const meta = JSON.parse(row.metadata || '{}');
+        const cfg = meta.sms as SmsConfig | undefined;
+        if (!cfg?.enabled) continue;
+        if (provider && cfg.provider !== provider) continue;
+        if (normalizePhoneNumber(cfg.phoneNumber) === normalized) {
+          // Decrypt before returning so callers (e.g. the webhook secret
+          // check) compare against the real plaintext, not ciphertext.
+          return { agentId: row.id, config: this.decryptConfig(cfg) };
+        }
+      } catch {
+        // Ignore malformed agent metadata.
+      }
+    }
+
+    return null;
+  }
+
+  /** Record an inbound SMS (parsed from email or provider webhook) */
+  recordInbound(agentId: string, parsed: ParsedSms, metadata?: Record<string, unknown>): SmsMessage {
     const id = `sms_in_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const createdAt = parsed.timestamp || new Date().toISOString();
 
     this.db.prepare(
-      'INSERT INTO sms_messages (id, agent_id, direction, phone_number, body, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, agentId, 'inbound', parsed.from, parsed.body, 'received', createdAt);
+      'INSERT INTO sms_messages (id, agent_id, direction, phone_number, body, status, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, agentId, 'inbound', parsed.from, parsed.body, 'received', createdAt, JSON.stringify(metadata ?? {}));
 
-    return { id, agentId, direction: 'inbound', phoneNumber: parsed.from, body: parsed.body, status: 'received', createdAt };
+    return { id, agentId, direction: 'inbound', phoneNumber: parsed.from, body: parsed.body, status: 'received', createdAt, metadata };
   }
 
   /** Record an outbound SMS attempt */
-  recordOutbound(agentId: string, phoneNumber: string, body: string, status: 'pending' | 'sent' | 'failed' = 'pending'): SmsMessage {
+  recordOutbound(agentId: string, phoneNumber: string, body: string, status: 'pending' | 'sent' | 'failed' = 'pending', metadata?: Record<string, unknown>): SmsMessage {
     const id = `sms_out_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
 
@@ -353,14 +622,20 @@ export class SmsManager {
     const normalized = normalizePhoneNumber(phoneNumber) || phoneNumber;
 
     this.db.prepare(
-      'INSERT INTO sms_messages (id, agent_id, direction, phone_number, body, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, agentId, 'outbound', normalized, body, status, now);
+      'INSERT INTO sms_messages (id, agent_id, direction, phone_number, body, status, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, agentId, 'outbound', normalized, body, status, now, JSON.stringify(metadata ?? {}));
 
-    return { id, agentId, direction: 'outbound', phoneNumber: normalized, body, status, createdAt: now };
+    return { id, agentId, direction: 'outbound', phoneNumber: normalized, body, status, createdAt: now, metadata };
   }
 
-  /** Update SMS status */
-  updateStatus(id: string, status: SmsMessage['status']): void {
+  /** Update SMS status and optional provider metadata */
+  updateStatus(id: string, status: SmsMessage['status'], metadata?: Record<string, unknown>): void {
+    if (metadata) {
+      this.db.prepare('UPDATE sms_messages SET status = ?, metadata = ? WHERE id = ?')
+        .run(status, JSON.stringify(metadata), id);
+      return;
+    }
+
     this.db.prepare('UPDATE sms_messages SET status = ? WHERE id = ?').run(status, id);
   }
 

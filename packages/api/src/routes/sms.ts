@@ -1,14 +1,91 @@
 import { Router, type Request, type Response } from 'express';
+import { timingSafeEqual } from 'node:crypto';
 import {
   SmsManager,
   parseGoogleVoiceSms,
   extractVerificationCode,
   normalizePhoneNumber,
   isValidPhoneNumber,
+  getSmsProvider,
+  mapProviderSmsStatus,
+  redactSmsConfig,
   type AccountManager,
   type AgenticMailConfig,
   type SmsConfig,
 } from '@agenticmail/core';
+
+function requestString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readWebhookSecret(req: Request): string {
+  return requestString(req.get('x-agenticmail-webhook-secret'))
+    || requestString(req.get('x-46elks-secret'))
+    || requestString(req.query.secret)
+    || requestString((req.body as Record<string, unknown> | undefined)?.secret);
+}
+
+function secretMatches(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export function createSmsWebhookRoutes(
+  db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
+  config: AgenticMailConfig,
+): Router {
+  const router = Router();
+  // Pass the master key so the webhook can decrypt the stored
+  // per-agent webhook secret for the timing-safe comparison below.
+  const smsManager = new SmsManager(db as any, config.masterKey);
+
+  // POST /sms/webhook/46elks — Receive inbound SMS from 46elks without bearer auth.
+  router.post('/sms/webhook/46elks', (req: Request, res: Response) => {
+    try {
+      const event = getSmsProvider('46elks').parseInboundSms(req.body ?? {});
+      if (!event) {
+        return res.status(400).json({ error: 'Invalid 46elks SMS webhook payload' });
+      }
+
+      // Security hardening — an unauthenticated caller must not be able to
+      // tell "no agent owns this number" (404) apart from "wrong secret"
+      // (403): that difference is a phone-number enumeration oracle.
+      // Resolve the agent and verify the secret, then return ONE uniform
+      // 403 for every failure mode (no match / no configured secret /
+      // missing or wrong provided secret). Only a fully valid, secret-
+      // authenticated request gets past this block.
+      const match = smsManager.findAgentBySmsNumber(event.to, '46elks');
+      const expectedSecret = match ? requestString(match.config.webhookSecret) : '';
+      const providedSecret = readWebhookSecret(req);
+      if (!match || !expectedSecret || !providedSecret
+          || !secretMatches(providedSecret, expectedSecret)) {
+        return res.status(403).json({ error: 'Invalid SMS webhook secret' });
+      }
+
+      const sms = smsManager.recordInbound(
+        match.agentId,
+        {
+          from: event.from,
+          body: event.body,
+          timestamp: event.timestamp,
+          raw: JSON.stringify(event.raw ?? event),
+        },
+        {
+          provider: event.provider,
+          providerMessageId: event.id,
+          to: event.to,
+        },
+      );
+
+      res.json({ success: true, sms });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  return router;
+}
 
 export function createSmsRoutes(
   db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
@@ -17,7 +94,10 @@ export function createSmsRoutes(
   gatewayManager?: any,
 ): Router {
   const router = Router();
-  const smsManager = new SmsManager(db as any);
+  // Master key threads through so SMS provider credentials
+  // (46elks API password, webhook secret, GV forwarding password)
+  // are encrypted at rest in agent metadata, not stored plaintext.
+  const smsManager = new SmsManager(db as any, config.masterKey);
 
   /** Helper: get authenticated agent or return 401 */
   function getAgent(req: Request, res: Response): { id: string; email: string } | null {
@@ -38,32 +118,96 @@ export function createSmsRoutes(
       const smsConfig = smsManager.getSmsConfig(agent.id);
       res.json({
         configured: !!smsConfig,
-        sms: smsConfig ?? null,
+        sms: smsConfig ? redactSmsConfig(smsConfig) : null,
       });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
   });
 
-  // POST /sms/setup — Configure SMS (Google Voice)
+  // POST /sms/setup — Configure SMS provider
   router.post('/sms/setup', (req: Request, res: Response) => {
     try {
       const agent = getAgent(req, res);
       if (!agent) return;
 
-      const { phoneNumber, forwardingEmail, forwardingPassword } = req.body;
+      const {
+        phoneNumber,
+        forwardingEmail,
+        forwardingPassword,
+        provider = 'google_voice',
+        username,
+        password,
+        webhookSecret,
+        apiUrl,
+      } = req.body;
 
       if (!phoneNumber || typeof phoneNumber !== 'string') {
         return res.status(400).json({ error: 'phoneNumber is required (string)' });
       }
 
+      if (provider !== 'google_voice' && provider !== '46elks') {
+        return res.status(400).json({ error: 'provider must be "google_voice" or "46elks"' });
+      }
+
       if (!isValidPhoneNumber(phoneNumber)) {
         return res.status(400).json({
-          error: 'Invalid phone number. Provide a US number like +12125551234 or (212) 555-1234.',
+          error: 'Invalid phone number. Provide an E.164 number like +46701234567 or +12125551234.',
         });
       }
 
       const normalized = normalizePhoneNumber(phoneNumber)!;
+
+      if (provider === '46elks') {
+        if (!requestString(username) || !requestString(password)) {
+          return res.status(400).json({ error: 'username and password are required for provider "46elks"' });
+        }
+        if (!requestString(webhookSecret)) {
+          return res.status(400).json({ error: 'webhookSecret is required for provider "46elks"' });
+        }
+        // Security hardening — the outbound SMS call sends the 46elks
+        // Basic-Auth credentials in the request header. If apiUrl were
+        // allowed to be a plaintext-http or arbitrary-scheme URL, those
+        // credentials could be exfiltrated over the wire or pointed at
+        // an internal host (SSRF). Require an https:// URL when an
+        // override is supplied; the built-in default is already https.
+        const apiUrlValue = requestString(apiUrl);
+        if (apiUrlValue) {
+          let parsedApiUrl: URL;
+          try {
+            parsedApiUrl = new URL(apiUrlValue);
+          } catch {
+            return res.status(400).json({ error: 'apiUrl must be a valid URL' });
+          }
+          if (parsedApiUrl.protocol !== 'https:') {
+            return res.status(400).json({ error: 'apiUrl must use https:// — credentials are sent on every request' });
+          }
+        }
+
+        const smsConfig: SmsConfig = {
+          enabled: true,
+          phoneNumber: normalized,
+          provider: '46elks',
+          username: requestString(username),
+          password: requestString(password),
+          webhookSecret: requestString(webhookSecret),
+          apiUrl: apiUrlValue || undefined,
+          configuredAt: new Date().toISOString(),
+        };
+
+        smsManager.saveSmsConfig(agent.id, smsConfig);
+
+        return res.json({
+          success: true,
+          sms: redactSmsConfig(smsConfig),
+          nextSteps: [
+            'Configure the inbound SMS webhook in 46elks for this number.',
+            'Point sms_url at /api/agenticmail/sms/webhook/46elks on this AgenticMail API host.',
+            'Authenticate the webhook by sending the secret in the "x-46elks-secret" request header (preferred — keeps it out of access logs). If your provider can only append query params, ?secret=<webhookSecret> also works.',
+            'Outbound SMS will be sent directly through the configured 46elks API credentials.',
+          ],
+        });
+      }
 
       // Validate forwarding email if provided
       if (forwardingEmail && typeof forwardingEmail === 'string') {
@@ -117,7 +261,7 @@ export function createSmsRoutes(
 
       res.json({
         success: true,
-        sms: { ...smsConfig, forwardingPassword: smsConfig.forwardingPassword ? '***' : undefined },
+        sms: redactSmsConfig(smsConfig),
         nextSteps,
       });
     } catch (err) {
@@ -163,7 +307,7 @@ export function createSmsRoutes(
   });
 
   // POST /sms/send — Record an outbound SMS
-  router.post('/sms/send', (req: Request, res: Response) => {
+  router.post('/sms/send', async (req: Request, res: Response) => {
     try {
       const agent = getAgent(req, res);
       if (!agent) return;
@@ -172,7 +316,7 @@ export function createSmsRoutes(
       if (!smsConfig?.enabled) {
         return res.status(400).json({
           error: 'SMS not configured or disabled. Use sms_setup first.',
-          hint: 'Call agenticmail_sms_setup with your Google Voice phone number.',
+          hint: 'Call agenticmail_sms_setup with provider "46elks" or "google_voice".',
         });
       }
 
@@ -191,7 +335,48 @@ export function createSmsRoutes(
         return res.status(400).json({ error: 'Invalid "to" phone number' });
       }
 
-      const smsRecord = smsManager.recordOutbound(agent.id, to, body, 'pending');
+      if (smsConfig.provider === '46elks') {
+        const smsRecord = smsManager.recordOutbound(agent.id, to, body, 'pending', {
+          provider: smsConfig.provider,
+        });
+
+        try {
+          const result = await getSmsProvider('46elks').sendSms(smsConfig, { to, body });
+          const status = mapProviderSmsStatus(result.status);
+          const metadata = {
+            ...smsRecord.metadata,
+            provider: smsConfig.provider,
+            providerMessageId: result.id,
+          };
+          smsManager.updateStatus(smsRecord.id, status, metadata);
+          return res.json({
+            success: true,
+            sms: { ...smsRecord, status, metadata },
+            providerResult: {
+              provider: result.provider,
+              id: result.id,
+              status: result.status,
+            },
+            delivery: 'direct_provider_api',
+          });
+        } catch (err) {
+          const metadata = {
+            ...smsRecord.metadata,
+            provider: smsConfig.provider,
+            providerError: (err as Error).message,
+          };
+          smsManager.updateStatus(smsRecord.id, 'failed', metadata);
+          return res.status(502).json({
+            success: false,
+            sms: { ...smsRecord, status: 'failed', metadata },
+            error: (err as Error).message,
+          });
+        }
+      }
+
+      const smsRecord = smsManager.recordOutbound(agent.id, to, body, 'pending', {
+        provider: smsConfig.provider,
+      });
 
       res.json({
         success: true,
