@@ -160,6 +160,10 @@ Check the status of pending outbound emails that were blocked by the outbound gu
 
 ## Setup & Configuration
 
+### Plugin configuration
+
+The plugin reads configuration from the OpenClaw plugin entry. `spawnMinTimeoutSeconds` controls whether the `before_tool_call` hook raises low `sessions_spawn` timeouts. The default is `600` seconds for compatibility; set a lower positive value to allow quick sub-agent calls, or `0` to disable timeout changes.
+
 ### `agenticmail_setup_guide`
 Get a comparison of email setup modes (Relay vs Domain) with difficulty levels, requirements, and step-by-step instructions. Show this to users who want to set up real internet email to help them choose the right mode..
 

@@ -10,8 +10,42 @@ import {
 } from './src/inbox-injection.js';
 import { setTelemetryVersion } from '@agenticmail/core';
 
-/** Minimum timeout (seconds) for sub-agents that have email capability */
-const MIN_SUBAGENT_TIMEOUT_S = 600; // 10 minutes
+/** Default minimum timeout (seconds) for sub-agents that have email capability */
+export const DEFAULT_SUBAGENT_MIN_TIMEOUT_SECONDS = 600; // 10 minutes
+
+export function resolveSpawnMinTimeoutSeconds(config: Record<string, unknown> | undefined): number {
+  const raw = config?.spawnMinTimeoutSeconds;
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_SUBAGENT_MIN_TIMEOUT_SECONDS;
+  }
+
+  const parsed = typeof raw === 'number'
+    ? raw
+    : typeof raw === 'string' && raw.trim() !== ''
+      ? Number(raw.trim())
+      : Number.NaN;
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_SUBAGENT_MIN_TIMEOUT_SECONDS;
+  }
+
+  return Math.floor(parsed);
+}
+
+export function applySpawnMinTimeout(
+  params: Record<string, unknown>,
+  minTimeoutSeconds: number,
+): Record<string, unknown> | undefined {
+  if (minTimeoutSeconds <= 0) return undefined;
+
+  const currentTimeout = Number(params.runTimeoutSeconds) || 0;
+  if (currentTimeout >= minTimeoutSeconds) return undefined;
+
+  return {
+    ...params,
+    runTimeoutSeconds: minTimeoutSeconds,
+  };
+}
 
 /**
  * Sub-agent email account registry.
@@ -192,6 +226,7 @@ function activate(api: any): void {
   const config = api?.getConfig?.() ?? {};
   const pluginConfig = api?.pluginConfig ?? config;
   const inboxInjectionConfig = resolveInboxInjectionConfig(pluginConfig);
+  const spawnMinTimeoutSeconds = resolveSpawnMinTimeoutSeconds(pluginConfig);
 
   // Resolve OpenClaw agent identity for email From header
   let ownerName: string | undefined;
@@ -997,7 +1032,7 @@ function activate(api: any): void {
       return;
     }
 
-    // --- Capture spawn info & increase timeout for sub-agent spawns ---
+    // --- Capture spawn info & optionally increase timeout for sub-agent spawns ---
     // 1. Capture label + task so before_agent_start can use the label as the email
     //    account name and include the task in the auto-intro email
     // 2. Sub-agents with email need more time for waiting on responses
@@ -1009,14 +1044,9 @@ function activate(api: any): void {
       const task = typeof params.task === 'string' ? params.task : '';
       pendingSpawns.push({ label, task });
 
-      const currentTimeout = Number(params.runTimeoutSeconds) || 0;
-      if (currentTimeout < MIN_SUBAGENT_TIMEOUT_S) {
-        return {
-          params: {
-            ...params,
-            runTimeoutSeconds: MIN_SUBAGENT_TIMEOUT_S,
-          },
-        };
+      const timeoutParams = applySpawnMinTimeout(params, spawnMinTimeoutSeconds);
+      if (timeoutParams) {
+        return { params: timeoutParams };
       }
     }
   });

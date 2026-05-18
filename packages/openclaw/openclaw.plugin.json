@@ -42,6 +42,12 @@
         "type": "boolean",
         "description": "Include a short body preview in unread message summaries",
         "default": false
+      },
+      "spawnMinTimeoutSeconds": {
+        "type": "integer",
+        "description": "Minimum runTimeoutSeconds to enforce for sessions_spawn calls; set to 0 to disable timeout changes",
+        "minimum": 0,
+        "default": 600
       }
     },
     "required": ["apiKey"]
