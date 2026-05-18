@@ -1,6 +1,6 @@
 {
   "name": "@agenticmail/api",
-  "version": "0.9.32",
+  "version": "0.9.33",
   "description": "REST API server for AgenticMail — email and SMS endpoints for AI agents",
   "type": "module",
   "main": "dist/index.js",
@@ -28,7 +28,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@agenticmail/core": "^0.9.10",
+    "@agenticmail/core": "^0.9.12",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.0",
@@ -36,7 +36,7 @@
     "uuid": "^11.1.0"
   },
   "optionalDependencies": {
-    "@agenticmail/claudecode": "^0.2.4"
+    "@agenticmail/claudecode": "^0.2.25"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

@@ -219,6 +219,8 @@ These tools require the master key (`AGENTICMAIL_MASTER_KEY`):
 |------|-------------|
 | `create_account` | Create a new agent with name and role |
 | `delete_agent` | Delete an agent (archives emails, records report) |
+| `stop_agent` | Soft-stop an agent mid-task — dispatcher refuses to wake it, mail still lands in the inbox (audit trail preserved) |
+| `resume_agent` | Reverse `stop_agent` — dispatcher resumes waking the agent; mail received while stopped is in the inbox and picked up on next wake |
 | `cleanup_agents` | List inactive agents, clean up, set persistent |
 | `deletion_reports` | View past agent deletion reports |
 | `update_metadata` | Update agent metadata (display name, owner, etc.) |

@@ -36,6 +36,12 @@ function rowToAgent(row: AgentRow): Agent {
     // treat that as the default-true (respect sender's wake list
     // as-is). Only explicit 0 disables CC wakes for this agent.
     wakeOnCc: row.wake_on_cc !== undefined ? row.wake_on_cc !== 0 : true,
+    // Pre-migration-017 rows have undefined `stopped`; treat as
+    // not-stopped. The dispatcher only blocks wakes when this is
+    // explicitly truthy, so the default mirrors back-compat.
+    stopped: row.stopped !== undefined ? row.stopped !== 0 : false,
+    stoppedAt: row.stopped_at ?? null,
+    stoppedReason: row.stopped_reason ?? null,
   };
 }
 

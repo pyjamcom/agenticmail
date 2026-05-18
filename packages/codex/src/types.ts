@@ -17,6 +17,12 @@ export interface AgenticMailAccount {
    *  drops wakes where this agent was on Cc/Bcc but not To,
    *  regardless of the sender's wake list. Defaults to true. */
   wakeOnCc?: boolean;
+  /** Soft-stop flag. When true, the dispatcher refuses to wake
+   *  this agent for any reason. Mail still lands in the mailbox
+   *  so the thread's audit trail is preserved. Toggle via the
+   *  stop_agent / resume_agent MCP tools or the
+   *  POST /accounts/:id/stop / POST /accounts/:id/resume API. */
+  stopped?: boolean;
 }
 
 /** Resolved configuration for everything the package does. */

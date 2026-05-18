@@ -1448,6 +1448,19 @@ export class Dispatcher {
       // to "no native done signal" — works on any mail client, costs
       // zero round trips, and pairs cleanly with the wake-budget
       // circuit breaker below.
+
+      // Soft-stop. If the agent was stopped via the stop_agent MCP
+      // tool (POST /accounts/:id/stop), drop the wake unconditionally.
+      // Mail still made it to the inbox via the IMAP delivery — we
+      // just refuse to spawn a Codex turn. This is the
+      // non-destructive answer to "stop this agent mid-task without
+      // losing the email thread". Resume via POST /accounts/:id/resume.
+      if ((account as { stopped?: boolean }).stopped === true) {
+        this.log('info', `[dispatcher] "${account.name}" is soft-stopped — skipping wake (uid=${event.uid})`);
+        this.postSkipped(account, event, 'stopped', `"${account.name}" is soft-stopped; resume via POST /accounts/:id/resume`);
+        return;
+      }
+
       if (isThreadClosedSubject(subject)) {
         this.log('info', `[dispatcher] thread closed (subject="${subject ?? ''}") — skipping wake for "${account.name}" uid=${event.uid}`);
         this.postSkipped(account, event, 'thread-closed', `subject contains a thread-close marker: "${subject ?? ''}"`);
@@ -1517,6 +1530,12 @@ export class Dispatcher {
       // Task events broadcast to all watchers — only act if WE are the assignee.
       if (typeof event.assignee === 'string'
           && event.assignee.toLowerCase() !== account.name.toLowerCase()) return;
+      // Soft-stop also gates task-event wakes: a stopped agent
+      // shouldn't be spawned by a fresh TaskCreate either.
+      if ((account as { stopped?: boolean }).stopped === true) {
+        this.log('info', `[dispatcher] "${account.name}" is soft-stopped — skipping task spawn (taskId=${event.taskId})`);
+        return;
+      }
       const ch = this.channels.get(account.id);
       if (ch?.seenTaskIds.has(event.taskId)) return;
       if (ch) {
@@ -1737,6 +1756,20 @@ export class Dispatcher {
       try { ch.controller?.abort(); } catch { /* ignore */ }
       this.channels.delete(event.accountId);
       this.log('info', `[dispatcher] account_deleted "${ch.account.name}" — closed SSE channel`);
+      return;
+    }
+    // Soft-stop / resume: flip the in-memory flag immediately so the
+    // wake gate picks it up before the next 30s syncAccounts cycle.
+    // The SSE channel STAYS OPEN — mail keeps landing in the inbox,
+    // we just refuse to spawn workers for it. That preserves the
+    // thread's audit trail, which is the whole point of soft-stop
+    // vs. account_deleted.
+    if ((type === 'account_stopped' || type === 'account_resumed') && typeof event.accountId === 'string') {
+      const ch = this.channels.get(event.accountId);
+      if (!ch) return;
+      const nextStopped = type === 'account_stopped';
+      (ch.account as { stopped?: boolean }).stopped = nextStopped;
+      this.log('info', `[dispatcher] ${type} "${ch.account.name}" — in-memory stopped=${nextStopped}`);
       return;
     }
     // type === 'connected' or unknown — no action

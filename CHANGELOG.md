@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.48] - 2026-05-18
+
+### Added
+
+- **Soft-stop / resume for agents (`stop_agent`, `resume_agent`).** Two
+  new MCP tools and matching REST endpoints
+  (`POST /accounts/:id/stop`, `POST /accounts/:id/resume`) let an
+  operator halt an agent mid-task *without deleting it*. The
+  dispatcher then refuses to wake the agent for ANY reason — wake
+  allowlists, To/Cc routing, task events all silently no-op — while
+  mail keeps landing in the agent's mailbox so the thread's audit
+  trail stays intact. This is the non-destructive counterpart to
+  `delete_agent`: stops a churning sub-agent without losing its inbox
+  or the thread history.
+
+  Implementation:
+
+  - Schema migration `017_agent_stopped.sql` adds `stopped`,
+    `stopped_at`, `stopped_reason` columns to `agents` (additive,
+    back-compat; pre-017 rows default to not-stopped).
+  - `KnowledgeBaseEngine`/dispatcher-style wake gate fires *before*
+    the thread-closed and wake-allowlist gates in both the
+    `@agenticmail/claudecode` and `@agenticmail/codex` dispatchers.
+    The mail SSE channel stays open while stopped, so resuming
+    immediately picks up any mail that arrived during the pause.
+  - The dispatcher also subscribes to `account_stopped` /
+    `account_resumed` system events so the in-memory flag flips
+    sub-second after the API call — no need to wait for the 30 s
+    account-sync poll.
+  - `list_agents` now shows a `[STOPPED]` tag on soft-stopped
+    accounts so the state is visible without a separate fetch.
+  - Both tools are master-key scoped (same authority as
+    `delete_agent`) and respect host ownership — a Claude Code host
+    cannot stop a Codex-owned teammate and vice versa.
+
+  Use `stop_agent({ name, reason? })` to pause; use
+  `resume_agent({ name })` to clear the flag. The `stopped_at` and
+  `stopped_reason` audit fields are preserved across resume so
+  operators can see the most-recent stop history on the agent row.
+
 ## [0.9.47] - 2026-05-18
 
 ### Changed

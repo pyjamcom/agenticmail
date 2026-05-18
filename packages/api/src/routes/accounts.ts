@@ -153,7 +153,12 @@ export function createAccountRoutes(accountManager: AccountManager, db: Database
       const directory = agents.map(a => {
         const meta = (a.metadata ?? {}) as { host?: unknown };
         const host = typeof meta.host === 'string' ? meta.host : null;
-        return { name: a.name, email: a.email, role: a.role, host };
+        // Surface the soft-stop flag so callers can render the
+        // "stopped" badge in list_agents without a master-key
+        // fetch. The reason/timestamp stay on the master-key
+        // GET /accounts path; the directory only carries the
+        // boolean status.
+        return { name: a.name, email: a.email, role: a.role, host, stopped: a.stopped === true };
       });
       res.json({ agents: directory });
     } catch (err) {
@@ -326,6 +331,58 @@ export function createAccountRoutes(accountManager: AccountManager, db: Database
       const result = db.prepare('UPDATE agents SET wake_on_cc = ? WHERE id = ?').run(wakeOnCc, req.params.id);
       if (result.changes === 0) { res.status(404).json({ error: 'Agent not found' }); return; }
       res.json({ ok: true, wakeOnCc: wakeOnCc === 1 });
+    } catch (err) { next(err); }
+  });
+
+  /**
+   * Soft-stop an agent mid-task.
+   *
+   *   POST /accounts/:id/stop  body: { reason?: string }
+   *
+   * Sets `stopped = 1` on the agent. The dispatcher gates every
+   * wake on this flag, so once stopped the agent will not be
+   * spawned for any reason — allowlists, To/Cc, task events all
+   * silently no-op. Mail STILL lands in the mailbox, preserving
+   * the thread's audit trail. This is the non-destructive
+   * counterpart to `DELETE /accounts/:id`: stops a churning agent
+   * without losing its inbox or the thread history.
+   *
+   * Master-key scoped — the same authority that can create or
+   * delete agents controls the soft-stop switch.
+   */
+  router.post('/accounts/:id/stop', requireMaster, async (req, res, next) => {
+    try {
+      const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
+        ? req.body.reason.trim()
+        : null;
+      const stoppedAt = new Date().toISOString();
+      const result = db.prepare(
+        'UPDATE agents SET stopped = 1, stopped_at = ?, stopped_reason = ? WHERE id = ?'
+      ).run(stoppedAt, reason, req.params.id);
+      if (result.changes === 0) { res.status(404).json({ error: 'Agent not found' }); return; }
+      pushSystemEvent({ type: 'account_stopped', accountId: req.params.id, stoppedAt, reason });
+      res.json({ ok: true, stopped: true, stoppedAt, reason });
+    } catch (err) { next(err); }
+  });
+
+  /**
+   * Resume a previously soft-stopped agent.
+   *
+   *   POST /accounts/:id/resume
+   *
+   * Clears `stopped`. Leaves `stopped_at` and `stopped_reason` in
+   * place as a most-recent-stop audit trail so operators can see
+   * "this agent was stopped at T for reason R, then resumed" by
+   * inspecting the row. (If you need a full stop/resume ledger,
+   * promote it to its own table — for now we deliberately keep
+   * the schema flat.)
+   */
+  router.post('/accounts/:id/resume', requireMaster, async (req, res, next) => {
+    try {
+      const result = db.prepare('UPDATE agents SET stopped = 0 WHERE id = ?').run(req.params.id);
+      if (result.changes === 0) { res.status(404).json({ error: 'Agent not found' }); return; }
+      pushSystemEvent({ type: 'account_resumed', accountId: req.params.id });
+      res.json({ ok: true, stopped: false });
     } catch (err) { next(err); }
   });
 

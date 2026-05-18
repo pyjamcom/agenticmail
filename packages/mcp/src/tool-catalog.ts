@@ -151,6 +151,8 @@ export const TOOL_SETS = {
     'delete_agent',
     'deletion_reports',
     'cleanup_agents',
+    'stop_agent',
+    'resume_agent',
   ],
 
   /** Storage of arbitrary files for an agent. */
@@ -189,7 +191,7 @@ export const SET_DESCRIPTIONS: Record<ToolSetName, string> = {
   agent_coord: 'Beyond-basic coordination — push wait, task lifecycle (claim/submit), check_messages',
   contacts: 'Address book and your own metadata',
   sms: 'SMS / voice — send/read/setup/parse/record',
-  account_admin: 'Account admin — create/delete agents, cleanup (master key required)',
+  account_admin: 'Account admin — create/delete/stop/resume agents, cleanup (master key required)',
   storage: 'File storage for an agent',
   setup: 'Mail-server onboarding wizards (one-time setup)',
   system: 'System health and gateway status checks',

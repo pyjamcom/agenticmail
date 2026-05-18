@@ -723,6 +723,29 @@ export const toolDefinitions = [
     },
   },
   {
+    name: 'stop_agent',
+    description: 'Soft-stop an agent mid-task WITHOUT deleting it. Sets the agent\'s `stopped` flag — the dispatcher then refuses to wake the agent for any reason (allowlists, To/Cc, task events all silently no-op). Mail STILL lands in the mailbox, so the email-thread audit trail is preserved. Use this instead of `delete_agent` when you want to halt a churning sub-agent partway through a task and keep the option to read the thread later or resume it. Resume with `resume_agent`. Requires master API key.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Name of the agent to stop' },
+        reason: { type: 'string', description: 'Optional free-form reason (e.g. "task superseded", "user requested halt") — stored on the agent row for later audit.' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'resume_agent',
+    description: 'Reverse a previous `stop_agent` call. Clears the `stopped` flag so the dispatcher resumes waking this agent on incoming mail and task events. The agent\'s inbox is exactly as it was during the pause — any mail that arrived while stopped is still there and will be picked up on the next natural wake. Requires master API key.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Name of the agent to resume' },
+      },
+      required: ['name'],
+    },
+  },
+  {
     name: 'deletion_reports',
     description: 'List past agent deletion reports or retrieve a specific report by ID. Shows archived email summaries from deleted agents. Requires master API key.',
     inputSchema: {
@@ -1223,6 +1246,7 @@ const MASTER_KEY_TOOLS = new Set([
   'setup_guide', 'setup_gmail_alias', 'setup_payment',
   'purchase_domain', 'check_gateway_status', 'send_test_email',
   'delete_agent', 'deletion_reports', 'cleanup_agents',
+  'stop_agent', 'resume_agent',
 ]);
 
 // ─── Inline Inbound Security Advisory ─────────────────────────────────
@@ -2055,7 +2079,8 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
       }
       const lines = agents.map((a: any) => {
         const hostTag = a.host ? ` · host=${a.host}` : '';
-        return `  ${a.name} (${a.email}) — ${a.role}${hostTag}`;
+        const stoppedTag = a.stopped === true ? ' · [STOPPED]' : '';
+        return `  ${a.name} (${a.email}) — ${a.role}${hostTag}${stoppedTag}`;
       });
       const header = MCP_HOST
         ? `Agents on host "${MCP_HOST}" (+ unclaimed):`
@@ -2135,6 +2160,55 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
         lines.push(`  Top correspondents: ${report.summary.topCorrespondents.map((c: any) => c.address).join(', ')}`);
       }
       return lines.join('\n');
+    }
+
+    case 'stop_agent': {
+      const agentName = String(args.name ?? '').trim();
+      if (!agentName) throw new Error('name is required');
+      // Refuse to stop an agent belonging to a different host — same
+      // ownership rule we apply to delete_agent. Soft-stop is just
+      // as scoped to the calling host's teammates.
+      await assertHostOwnsAgent(agentName);
+
+      const agents = await apiRequest('GET', '/accounts', undefined, true);
+      const fullAgent = agents?.agents?.find((a: any) => a.name === agentName);
+      if (!fullAgent) throw new Error(`Agent "${agentName}" not found`);
+      if (fullAgent.stopped === true) {
+        return `Agent "${agentName}" is already stopped. Use resume_agent to reactivate.`;
+      }
+
+      const body: Record<string, unknown> = {};
+      if (args.reason) body.reason = String(args.reason);
+      const result = await apiRequest('POST', `/accounts/${fullAgent.id}/stop`, body, true);
+      const lines = [
+        `Agent "${agentName}" stopped successfully.`,
+        '  The dispatcher will no longer wake this agent.',
+        '  Incoming mail still lands in the mailbox (audit trail preserved).',
+        '  Resume with: resume_agent({ name: "' + agentName + '" })',
+      ];
+      if (result?.stoppedAt) lines.push(`  Stopped at: ${result.stoppedAt}`);
+      if (result?.reason) lines.push(`  Reason: ${result.reason}`);
+      return lines.join('\n');
+    }
+
+    case 'resume_agent': {
+      const agentName = String(args.name ?? '').trim();
+      if (!agentName) throw new Error('name is required');
+      await assertHostOwnsAgent(agentName);
+
+      const agents = await apiRequest('GET', '/accounts', undefined, true);
+      const fullAgent = agents?.agents?.find((a: any) => a.name === agentName);
+      if (!fullAgent) throw new Error(`Agent "${agentName}" not found`);
+      if (fullAgent.stopped !== true) {
+        return `Agent "${agentName}" is not stopped. No action taken.`;
+      }
+
+      await apiRequest('POST', `/accounts/${fullAgent.id}/resume`, {}, true);
+      return [
+        `Agent "${agentName}" resumed.`,
+        '  The dispatcher will now wake this agent on new mail / task events.',
+        '  Any mail that arrived while stopped is in the inbox; it will be picked up on the next natural wake.',
+      ].join('\n');
     }
 
     case 'deletion_reports': {

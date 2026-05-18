@@ -33,6 +33,24 @@ export interface Agent {
    *  including them never wastes a Claude turn. Defaults to true
    *  (preserves the 0.9.0 wake-list-respecting behaviour). */
   wakeOnCc?: boolean;
+  /** Soft-stop flag. When true, the dispatcher refuses to wake
+   *  this agent for ANY reason (allowlist, To/Cc, task events).
+   *  Mail still lands in the mailbox so the audit trail of the
+   *  thread is preserved — only Claude/Codex turns are blocked.
+   *  This is the non-destructive counterpart to delete_agent for
+   *  stopping a churning agent mid-task without losing context. */
+  stopped?: boolean;
+  /** ISO timestamp of when `stopped` was set to true. NULL when
+   *  the agent has never been stopped (or has since been resumed
+   *  — `resume_agent` clears both `stopped` and the audit fields
+   *  is a policy decision; the current implementation clears
+   *  `stopped` only and leaves the timestamp / reason in place so
+   *  operators can see the most-recent stop history). */
+  stoppedAt?: string | null;
+  /** Optional free-form reason supplied by the caller when the
+   *  agent was stopped (e.g. "task superseded by new requirements"
+   *  or "stop all sub-agents — user request 2025-12-09"). */
+  stoppedReason?: string | null;
 }
 
 export interface CreateAgentOptions {
@@ -55,4 +73,7 @@ export interface AgentRow {
   metadata: string;
   role: string;
   wake_on_cc?: number;
+  stopped?: number;
+  stopped_at?: string | null;
+  stopped_reason?: string | null;
 }

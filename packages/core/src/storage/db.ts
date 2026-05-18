@@ -389,6 +389,22 @@ ALTER TABLE drafts ADD COLUMN attachments TEXT;
 -- Defaults to 1 (respect the senders wake list as-is).
 ALTER TABLE agents ADD COLUMN wake_on_cc INTEGER NOT NULL DEFAULT 1;
 `,
+  '017_agent_stopped.sql': `
+-- Soft-stop for an agent mid-task. When 1, the dispatcher refuses
+-- to wake this agent for ANY reason — allowlists, To/Cc, task
+-- notifications, all of it. Mail still gets delivered to the
+-- mailbox so the audit trail of the thread stays intact. This
+-- is the non-destructive counterpart to delete_agent: stops an
+-- agent that's currently churning without losing its inbox or
+-- the thread history.
+--
+-- Companion columns capture WHEN it was stopped and the OPTIONAL
+-- reason the caller passed (e.g. "task superseded", "budget
+-- exhausted") so an operator can audit later.
+ALTER TABLE agents ADD COLUMN stopped INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agents ADD COLUMN stopped_at TEXT;
+ALTER TABLE agents ADD COLUMN stopped_reason TEXT;
+`,
 };
 
 function runMigrations(database: Database): void {

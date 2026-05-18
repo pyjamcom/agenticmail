@@ -62,6 +62,12 @@ Create a new agent email account (requires master API key).
 ### `delete_agent`
 Delete an agent account. Archives all emails and generates a deletion report before removing the account permanently.
 
+### `stop_agent`
+Soft-stop an agent mid-task WITHOUT deleting it. The dispatcher refuses to wake the agent (allowlists, To/Cc, task events all silently no-op) but mail keeps landing in the mailbox so the email-thread audit trail is preserved. Use this instead of `delete_agent` when you want to halt a churning sub-agent and keep the option to read the thread later or resume it. Master-key scoped; respects host ownership.
+
+### `resume_agent`
+Reverse a previous `stop_agent` call. Clears the `stopped` flag so the dispatcher resumes waking the agent. Mail that arrived during the pause is in the inbox and gets picked up on the next natural wake. Master-key scoped; respects host ownership.
+
 ### `deletion_reports`
 List past agent deletion reports or retrieve a specific report by ID. Shows archived email summaries from deleted agents.
 
