@@ -119,7 +119,7 @@ Plugin configuration lives in `~/.openclaw/openclaw.json` (user config), not in 
 
 ---
 
-## Tools (61 total)
+## Tools (63 total)
 
 ### Core Email (8 tools)
 
@@ -199,7 +199,7 @@ Plugin configuration lives in `~/.openclaw/openclaw.json` (user config), not in 
 | `agenticmail_check_tasks` | Check incoming tasks (assigned to me) or outgoing tasks (I assigned) |
 | `agenticmail_claim_task` | Claim a pending task |
 | `agenticmail_submit_result` | Submit result for a claimed task |
-| `agenticmail_call_agent` | Synchronous RPC — waits for result (up to 5 minutes, polls every 2 seconds) |
+| `agenticmail_complete_task` | Claim and submit a task result in one call |
 
 ### Account Management (6 tools)
 
@@ -222,7 +222,7 @@ Plugin configuration lives in `~/.openclaw/openclaw.json` (user config), not in 
 | `agenticmail_setup_domain` | Configure custom domain with Cloudflare (master key required) |
 | `agenticmail_setup_gmail_alias` | Get Gmail "Send mail as" alias instructions |
 | `agenticmail_setup_payment` | Get Cloudflare payment setup instructions |
-| `agenticmail_purchase_domain` | Search for domains via Cloudflare Registrar |
+| `agenticmail_purchase_domain` | Search Cloudflare Registrar domain availability; purchase must be completed manually |
 | `agenticmail_gateway_status` | Check current gateway mode (relay, domain, or none) |
 | `agenticmail_test_email` | Send a test email to verify gateway configuration |
 
@@ -297,6 +297,12 @@ Self-messaging is also prevented — an agent cannot send a message to itself.
 | `agenticmail_sms_parse_email` | Parse SMS from forwarded Google Voice email (fallback) |
 | `agenticmail_sms_config` | Get current SMS configuration |
 
+### Database Storage (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `agenticmail_storage` | Manage persistent agent tables, rows, indexes, imports, exports, and raw SQL access |
+
 The plugin includes a skill at `skill/SKILL.md` that gets injected into the agent's system prompt. It covers:
 
 ### Email Rules
@@ -335,11 +341,11 @@ The `openclaw.plugin.json` file registers the plugin with OpenClaw:
 
 ```json
 {
-  "id": "agenticmail",
+  "id": "openclaw",
+  "name": "agenticmail",
   "displayName": "AgenticMail",
-  "version": "0.2.0",
+  "version": "0.5.61",
   "description": "Full email channel + tools for AI agents",
-  "channels": ["mail"],
   "configSchema": {
     "apiUrl": { "type": "string", "default": "http://127.0.0.1:3829" },
     "apiKey": { "type": "string", "required": true },
@@ -405,7 +411,7 @@ plugins.entries.agenticmail: plugin agenticmail: plugin id mismatch
 (manifest uses "agenticmail", entry hints "openclaw")
 ```
 
-This is a harmless warning. OpenClaw infers the expected plugin ID from the npm package name (`@agenticmail/openclaw`) and sees "openclaw", but the plugin manifest declares its ID as `"agenticmail"`. The plugin loads and works correctly — you can safely ignore this warning.
+Older plugin versions used a manifest ID that did not match the package entry hint. Current releases use `"id": "openclaw"` and `"name": "agenticmail"`. If this warning still appears after upgrading, check that OpenClaw is loading the current package path and not an older global install.
 
 ### Plugin path not found
 
