@@ -41,6 +41,11 @@
  * Tests live in `__tests__/bridge-wake.test.ts` with the SDK stubbed.
  */
 
+import {
+  bridgeWakeErrorMessage,
+  classifyResumeError,
+  type BridgeWakeResult,
+} from '@agenticmail/core';
 import type { AgenticMailAccount } from './types.js';
 import type { QueryFn } from './dispatcher.js';
 
@@ -58,17 +63,6 @@ export interface BridgeWakeInput {
   mcpEnv: Record<string, string>;
   /** Wall-clock cap for the headless turn. */
   timeoutMs?: number;
-}
-
-export interface BridgeWakeResult {
-  ok: boolean;
-  /** Captured assistant text (for logs / system-event preview). */
-  text?: string;
-  /** Error class — drives fallback routing. */
-  error?: 'session-expired' | 'sdk-missing' | 'timeout' | 'other';
-  errorMessage?: string;
-  /** Duration in ms — surfaces in dispatcher activity. */
-  durationMs?: number;
 }
 
 /**
@@ -146,63 +140,9 @@ export async function resumeBridgeSession(
     log('info', `[bridge-wake] resumed session ok (${result.durationMs}ms, ${assistantText.length} chars)`);
     return result;
   } catch (err) {
-    const msg = (err as Error)?.message ?? String(err);
-    // Heuristic error-class detection — both Anthropic and the CLI
-    // surface "session not found" / "invalid session" / "session
-    // expired" phrasing for an evicted session. Any of those means
-    // "give up, forget the record, escalate via SMS".
-    const m = msg.toLowerCase();
-    const expired = m.includes('session not found')
-      || m.includes('invalid session')
-      || m.includes('session expired')
-      || m.includes('no such session')
-      || m.includes('unknown session');
-    const sdkMissing = m.includes('cannot find module')
-      || m.includes("could not be found")
-      || m.includes('command not found');
-    const error: BridgeWakeResult['error'] = expired
-      ? 'session-expired'
-      : sdkMissing
-        ? 'sdk-missing'
-        : 'other';
+    const msg = bridgeWakeErrorMessage(err);
+    const error = classifyResumeError(err);
     log('warn', `[bridge-wake] resume failed (${error}): ${msg.slice(0, 200)}`);
     return { ok: false, error, errorMessage: msg, durationMs: Date.now() - startMs };
   }
-}
-
-/**
- * Build the prompt the resumed session sees on wake. The bridge
- * mail's metadata is interpolated into a short context block so
- * the resumed session can decide what to do without re-reading the
- * full thread.
- */
-export function composeBridgeWakePrompt(args: {
-  bridgeName: string;
-  uid: number;
-  subject?: string;
-  from?: string;
-  preview?: string;
-}): string {
-  const subject = args.subject ?? '(no subject)';
-  const from = args.from ?? 'unknown';
-  const preview = (args.preview ?? '').slice(0, 600);
-  return [
-    `🎀 Bridge mail arrived — headless wake.`,
-    '',
-    `You are being resumed against your last session because new mail landed in your bridge inbox (${args.bridgeName}@localhost) and you weren't actively at the keyboard.`,
-    '',
-    `Trigger:`,
-    `  UID:     ${args.uid}`,
-    `  From:    ${from}`,
-    `  Subject: ${subject}`,
-    `  Preview: ${preview}`,
-    '',
-    `Read it with mcp__agenticmail__read_email({ uid: ${args.uid} }) and decide:`,
-    `  · Does it need a reply from YOU (the operator's session)? Reply via mcp__agenticmail__reply_email.`,
-    `  · Does it need a teammate to act? Forward / re-route by replying with wake: ["<teammate>"].`,
-    `  · Is it [NEEDS OPERATOR] / [BLOCKED]? Then it's actually for the human — mark it unread, and the operator will see it on their next keystroke.`,
-    `  · Is it FYI noise? mark_read and exit.`,
-    '',
-    `Keep this turn SHORT. You're being resumed to handle ONE piece of mail, not to continue the prior conversation.`,
-  ].join('\n');
 }

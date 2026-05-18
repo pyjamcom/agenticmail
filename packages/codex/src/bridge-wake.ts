@@ -15,6 +15,11 @@
  * picks up where the operator left off.
  */
 
+import {
+  bridgeWakeErrorMessage,
+  classifyResumeError,
+  type BridgeWakeResult,
+} from '@agenticmail/core';
 import type { AgenticMailAccount } from './types.js';
 
 export interface BridgeWakeInput {
@@ -28,14 +33,6 @@ export interface BridgeWakeInput {
   sandboxMode?: 'workspace-write' | 'read-only' | 'danger-full-access';
   approvalPolicy?: 'never' | 'on-request' | 'untrusted';
   timeoutMs?: number;
-}
-
-export interface BridgeWakeResult {
-  ok: boolean;
-  text?: string;
-  error?: 'session-expired' | 'sdk-missing' | 'timeout' | 'other';
-  errorMessage?: string;
-  durationMs?: number;
 }
 
 /**
@@ -56,7 +53,7 @@ export async function resumeBridgeThread(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     sdk = await import('@openai/codex-sdk' as any) as typeof import('@openai/codex-sdk');
   } catch (err) {
-    const msg = (err as Error)?.message ?? String(err);
+    const msg = bridgeWakeErrorMessage(err);
     log('warn', `[bridge-wake] @openai/codex-sdk not available: ${msg.slice(0, 200)}`);
     return { ok: false, error: 'sdk-missing', errorMessage: msg, durationMs: Date.now() - startMs };
   }
@@ -122,50 +119,9 @@ export async function resumeBridgeThread(
     log('info', `[bridge-wake] resumed thread ok (${result.durationMs}ms, ${assistantText.length} chars)`);
     return result;
   } catch (err) {
-    const msg = (err as Error)?.message ?? String(err);
-    const m = msg.toLowerCase();
-    const expired = m.includes('thread not found')
-      || m.includes('invalid thread')
-      || m.includes('thread expired')
-      || m.includes('no such thread')
-      || m.includes('unknown thread')
-      || m.includes('session not found');
-    const error: BridgeWakeResult['error'] = expired ? 'session-expired' : 'other';
+    const msg = bridgeWakeErrorMessage(err);
+    const error = classifyResumeError(err, { sdkMissingMarkers: [] });
     log('warn', `[bridge-wake] resume failed (${error}): ${msg.slice(0, 200)}`);
     return { ok: false, error, errorMessage: msg, durationMs: Date.now() - startMs };
   }
-}
-
-/** Same prompt composer as the Claude Code variant — shape-identical
- *  so a future @agenticmail/host-toolkit refactor can pull this into
- *  a single shared implementation. */
-export function composeBridgeWakePrompt(args: {
-  bridgeName: string;
-  uid: number;
-  subject?: string;
-  from?: string;
-  preview?: string;
-}): string {
-  const subject = args.subject ?? '(no subject)';
-  const from = args.from ?? 'unknown';
-  const preview = (args.preview ?? '').slice(0, 600);
-  return [
-    `🎀 Bridge mail arrived — headless wake.`,
-    '',
-    `You are being resumed against your last session because new mail landed in your bridge inbox (${args.bridgeName}@localhost) and you weren't actively at the keyboard.`,
-    '',
-    `Trigger:`,
-    `  UID:     ${args.uid}`,
-    `  From:    ${from}`,
-    `  Subject: ${subject}`,
-    `  Preview: ${preview}`,
-    '',
-    `Read it with mcp__agenticmail__read_email({ uid: ${args.uid} }) and decide:`,
-    `  · Does it need a reply from YOU (the operator's session)? Reply via mcp__agenticmail__reply_email.`,
-    `  · Does it need a teammate to act? Forward / re-route by replying with wake: ["<teammate>"].`,
-    `  · Is it [NEEDS OPERATOR] / [BLOCKED]? Then it's actually for the human — mark it unread, and the operator will see it on their next keystroke.`,
-    `  · Is it FYI noise? mark_read and exit.`,
-    '',
-    `Keep this turn SHORT. You're being resumed to handle ONE piece of mail, not to continue the prior conversation.`,
-  ].join('\n');
 }

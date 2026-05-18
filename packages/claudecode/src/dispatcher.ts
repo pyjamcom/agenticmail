@@ -46,8 +46,18 @@ import { DispatcherState } from './dispatcher-state.js';
 import { mkdirSync, createWriteStream, rmSync, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { ThreadCache, AgentMemoryStore, threadIdFor, normalizeSubject, loadHostSession, forgetHostSession } from '@agenticmail/core';
-import { resumeBridgeSession, composeBridgeWakePrompt } from './bridge-wake.js';
+import {
+  ThreadCache,
+  AgentMemoryStore,
+  bridgeWakeLastSeenAgeMs,
+  composeBridgeWakePrompt,
+  forgetHostSession,
+  loadHostSession,
+  normalizeSubject,
+  shouldSkipBridgeWakeForLiveOperator,
+  threadIdFor,
+} from '@agenticmail/core';
+import { resumeBridgeSession } from './bridge-wake.js';
 
 /** Event shape we accept off the SSE stream. */
 interface SSEEvent {
@@ -1939,8 +1949,10 @@ export class Dispatcher {
       ?? '';
     try {
       const saved = loadHostSession('claudecode');
-      if (saved && Date.now() - saved.lastSeenMs < 30_000) {
-        this.log('info', `[bridge-wake] skip — operator is live (lastSeen=${Date.now() - saved.lastSeenMs}ms ago); their hook will surface uid=${event.uid}`);
+      const nowMs = Date.now();
+      if (shouldSkipBridgeWakeForLiveOperator(saved, nowMs)) {
+        const ageMs = bridgeWakeLastSeenAgeMs(saved, nowMs) ?? 0;
+        this.log('info', `[bridge-wake] skip — operator is live (lastSeen=${ageMs}ms ago); their hook will surface uid=${event.uid}`);
         this.postActivity('/dispatcher/bridge-skipped', {
           uid: event.uid, agentName: account.name, reason: 'operator-live',
         });

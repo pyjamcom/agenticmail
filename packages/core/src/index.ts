@@ -161,6 +161,19 @@ export {
   type HostSessionResumeMode,
 } from './host-sessions.js';
 
+export {
+  BRIDGE_OPERATOR_LIVE_WINDOW_MS,
+  bridgeWakeErrorMessage,
+  bridgeWakeLastSeenAgeMs,
+  classifyResumeError,
+  composeBridgeWakePrompt,
+  shouldSkipBridgeWakeForLiveOperator,
+  type BridgeWakeError,
+  type BridgeWakePromptArgs,
+  type BridgeWakeResult,
+  type ResumeErrorClassificationOptions,
+} from './host-bridge.js';
+
 // SSRF-safe URL validation for the master API base URL — used by
 // every host integration to bound where its fetch requests can go.
 // See util/safe-url.ts for the blocklist (cloud metadata, file://,
