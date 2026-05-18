@@ -1,7 +1,7 @@
 {
   "id": "openclaw",
   "name": "agenticmail",
-  "version": "0.2.0",
+  "version": "0.5.61",
   "displayName": "🎀 AgenticMail",
   "description": "🎀 AgenticMail — 63 tools for email, SMS, storage & multi-agent coordination",
   "author": "agenticmail",
@@ -105,7 +105,17 @@
     "agenticmail_gateway_status",
     "agenticmail_test_email",
     "agenticmail_setup_guide",
-    "agenticmail_setup_gmail_alias"
+    "agenticmail_setup_gmail_alias",
+    "agenticmail_setup_payment",
+    "agenticmail_sms_setup",
+    "agenticmail_sms_send",
+    "agenticmail_sms_messages",
+    "agenticmail_sms_check_code",
+    "agenticmail_sms_read_voice",
+    "agenticmail_sms_record",
+    "agenticmail_sms_parse_email",
+    "agenticmail_sms_config",
+    "agenticmail_storage"
   ],
   "requires": {
     "bins": ["docker"]

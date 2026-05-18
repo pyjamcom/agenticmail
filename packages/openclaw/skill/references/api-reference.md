@@ -15,7 +15,7 @@ Authorization: Bearer <api_key>
 ## Endpoints
 
 ### Health
-- `GET /health` — Server status (no auth required)
+- `GET /health` — Server status under the base URL, i.e. full path `/api/agenticmail/health` (no auth required)
 
 ### Accounts
 
