@@ -148,9 +148,19 @@ describe('PhoneManager', () => {
     const voiceStart = manager.handleVoiceStartWebhook(mission.id, 'hook-secret', { callid: 'call123' });
     expect(voiceStart.mission.status).toBe('connected');
     expect(voiceStart.action.play).toContain('AgenticMail');
+    const voiceStartTranscriptLength = voiceStart.mission.transcript.length;
+
+    const duplicateVoiceStart = manager.handleVoiceStartWebhook(mission.id, 'hook-secret', { callid: 'call123' });
+    expect(duplicateVoiceStart.mission.transcript).toHaveLength(voiceStartTranscriptLength);
 
     const hangup = manager.handleHangupWebhook(mission.id, 'hook-secret', { callid: 'call123' });
     expect(hangup.status).toBe('failed');
     expect(hangup.metadata.hangupReason).toBe('call-ended-before-conversation-runtime');
+    expect(hangup.metadata.phoneWebhookEvents).toHaveLength(2);
+    const hangupTranscriptLength = hangup.transcript.length;
+
+    const duplicateHangup = manager.handleHangupWebhook(mission.id, 'hook-secret', { callid: 'call123' });
+    expect(duplicateHangup.transcript).toHaveLength(hangupTranscriptLength);
+    expect(duplicateHangup.metadata.phoneWebhookEvents).toHaveLength(2);
   });
 });

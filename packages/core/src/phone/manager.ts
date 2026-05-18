@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Database } from '../storage/db.js';
 import { encryptSecret, decryptSecret, isEncryptedSecret } from '../crypto/secrets.js';
 import { normalizePhoneNumber } from '../sms/manager.js';
@@ -70,6 +70,7 @@ export interface PhoneWebhookResult {
 }
 
 const PHONE_SECRET_FIELDS = ['password', 'webhookSecret'] as const;
+const MAX_PHONE_WEBHOOK_EVENT_KEYS = 50;
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -128,6 +129,30 @@ function redactProviderRequest(request: { url: string; body: Record<string, stri
       whenhangup: redactWebhookUrl(request.body.whenhangup),
     },
   };
+}
+
+function stableFlatJson(value: Record<string, unknown>): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))));
+}
+
+function phoneWebhookEventKey(kind: 'voice_start' | 'hangup', payload: Record<string, unknown>): string {
+  const callId = asString(payload.callid) || asString(payload.id) || asString(payload.call_id);
+  const result = asString(payload.result) || asString(payload.status) || asString(payload.why);
+  const fingerprint = createHash('sha256').update(stableFlatJson(payload)).digest('hex').slice(0, 16);
+  return [kind, callId || fingerprint, result].filter(Boolean).join(':');
+}
+
+function processedWebhookEventKeys(mission: PhoneCallMission): string[] {
+  const value = mission.metadata.phoneWebhookEvents;
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function hasProcessedWebhookEvent(mission: PhoneCallMission, eventKey: string): boolean {
+  return processedWebhookEventKeys(mission).includes(eventKey);
+}
+
+function appendProcessedWebhookEvent(mission: PhoneCallMission, eventKey: string): string[] {
+  return [...processedWebhookEventKeys(mission), eventKey].slice(-MAX_PHONE_WEBHOOK_EVENT_KEYS);
 }
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
@@ -380,8 +405,17 @@ export class PhoneManager {
       throw new Error('Invalid phone webhook secret');
     }
 
+    const eventKey = phoneWebhookEventKey('voice_start', payload);
+    if (hasProcessedWebhookEvent(mission, eventKey)) {
+      return {
+        mission,
+        action: this.buildVoiceStartAction(),
+      };
+    }
+
     const updated = this.updateMissionStatus(mission.id, 'connected', {
       lastVoiceStartPayload: payload,
+      phoneWebhookEvents: appendProcessedWebhookEvent(mission, eventKey),
     }, [{
       at: new Date().toISOString(),
       source: 'provider',
@@ -391,9 +425,7 @@ export class PhoneManager {
 
     return {
       mission: updated,
-      action: {
-        play: 'AgenticMail has received this call mission. The live voice runtime is not connected yet; the operator will follow up.',
-      },
+      action: this.buildVoiceStartAction(),
     };
   }
 
@@ -405,11 +437,17 @@ export class PhoneManager {
       throw new Error('Invalid phone webhook secret');
     }
 
+    const eventKey = phoneWebhookEventKey('hangup', payload);
+    if (hasProcessedWebhookEvent(mission, eventKey)) {
+      return mission;
+    }
+
     const terminal: PhoneMissionState[] = ['completed', 'failed', 'cancelled'];
     const nextStatus: PhoneMissionState = terminal.includes(mission.status) ? mission.status : 'failed';
     return this.updateMissionStatus(mission.id, nextStatus, {
       lastHangupPayload: payload,
       hangupReason: nextStatus === 'failed' ? 'call-ended-before-conversation-runtime' : undefined,
+      phoneWebhookEvents: appendProcessedWebhookEvent(mission, eventKey),
     }, [{
       at: new Date().toISOString(),
       source: 'provider',
@@ -418,6 +456,12 @@ export class PhoneManager {
         : '46elks hangup webhook received.',
       metadata: { payload },
     }]);
+  }
+
+  private buildVoiceStartAction(): Record<string, unknown> {
+    return {
+      play: 'AgenticMail has received this call mission. The live voice runtime is not connected yet; the operator will follow up.',
+    };
   }
 
   cancelMission(agentId: string, missionId: string): PhoneCallMission {
