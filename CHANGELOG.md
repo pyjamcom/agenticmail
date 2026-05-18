@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.46] - 2026-05-18
+
+### Security — GHSA-wjjv-3mj2-39hf (HIGH)
+
+API/storage and outbound-relay hardening. Reported and patched by
+@benediktkraus via private vulnerability disclosure; maintainer
+hardening folded in on merge. **All deployments should upgrade.**
+
+- **Hardcoded outbound-relay secret removed** (CWE-798). The Cloudflare
+  outbound worker shipped `OUTBOUND_SECRET = "outbound_2sabi_secret_key"`
+  in `metadata.json`, and `outbound.js` used the same literal as a
+  fallback — so anyone who read the public repo held the relay secret.
+  The binding and the fallback are gone; the worker now refuses to
+  start (HTTP 500) unless `OUTBOUND_SECRET` is configured. **Operators
+  who deployed the worker must rotate `OUTBOUND_SECRET`.**
+- **SQL injection in the storage routes closed** (CWE-89). Raw
+  identifier interpolation in `where` keys, `groupBy`, `orderBy`, and
+  index/column/conflict identifiers is now strictly validated against
+  `^[A-Za-z_][A-Za-z0-9_]{0,63}$`. The `having` clause — the one query
+  clause still interpolated raw — is now length-bounded and rejects
+  stacked statements, comment markers, and DDL/DML keywords.
+- **Cross-agent storage access closed** (CWE-284). Raw `/storage/sql`
+  now resolves every referenced table against the storage-metadata
+  ownership records (comma-joins included) and denies tables owned by
+  other agents; direct access to the metadata table itself is blocked.
+- **TLS certificate verification on by default** (CWE-319).
+  `MailSender` previously set `rejectUnauthorized: false`
+  unconditionally — every SMTP connection accepted any certificate.
+  Verification is now the default, with an explicit
+  `tlsRejectUnauthorized: false` opt-out for local development.
+- **SMTP envelope/header injection blocked** (CWE-20). The outbound
+  worker now rejects CR/LF and control characters in envelope
+  addresses and headers before building SMTP commands.
+- **Inactive-agent hour filtering validated** (CWE-20). `/accounts/inactive`
+  and `/accounts/cleanup` now validate the `hours` parameter as a
+  positive integer and bind it as a query parameter.
+
+Patched versions: `@agenticmail/api@0.9.32`, `@agenticmail/core@0.9.10`
+(and the packages that depend on them).
+
+### Changed
+
+- **Host session registry widened** (#36, @benediktkraus) — `HostName`
+  now covers `openclaw`/`gemini`/`hermes`; `HostSession` gains optional
+  `resumeMode` and `hostMetadata` fields.
+- **Bridge wake primitives shared** (#37, @benediktkraus) — the
+  duplicated bridge-wake logic in the Claude Code and Codex adapters
+  (`composeBridgeWakePrompt`, error classification, the live-operator
+  window) is consolidated into a shared `@agenticmail/core` module.
+  Pure refactor, no behavior change.
+
 ## [0.9.45] - 2026-05-18
 
 ### Added — EU SMS provider registry + 46elks
