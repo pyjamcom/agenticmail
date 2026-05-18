@@ -113,6 +113,7 @@ The plugin registers email as an OpenClaw channel, which means:
 | `apiUrl` | No | `http://127.0.0.1:3829` | AgenticMail API URL |
 | `apiKey` | Yes | — | Agent API key (`ak_...`). Determines which agent this plugin acts as. |
 | `masterKey` | No | — | Master key (`mk_...`). Required for admin operations. |
+| `spawnMinTimeoutSeconds` | No | `600` | Minimum `runTimeoutSeconds` enforced for `sessions_spawn`; set `0` to disable timeout changes. |
 
 Plugin configuration lives in `~/.openclaw/openclaw.json` (user config), not in OpenClaw's source directory. Updating OpenClaw does not affect your AgenticMail plugin setup.
 
@@ -349,7 +350,8 @@ The `openclaw.plugin.json` file registers the plugin with OpenClaw:
       "default": "summary"
     },
     "inboxInjectionMaxItems": { "type": "integer", "default": 5 },
-    "inboxInjectionIncludePreview": { "type": "boolean", "default": false }
+    "inboxInjectionIncludePreview": { "type": "boolean", "default": false },
+    "spawnMinTimeoutSeconds": { "type": "integer", "minimum": 0, "default": 600 }
   },
   "requires": { "bins": ["docker"] }
 }
@@ -364,6 +366,7 @@ Unread inbox context is configurable:
 - `inboxInjectionMode: "summary"` injects sender, subject, and UID metadata
 - `inboxInjectionMode: "required"` preserves proactive read-first behavior
 - `inboxInjectionIncludePreview: true` adds a short message body preview
+- `spawnMinTimeoutSeconds: 60` allows short `sessions_spawn` calls; `0` disables timeout changes entirely
 
 ---
 
@@ -382,7 +385,7 @@ The plugin registers three OpenClaw lifecycle hooks:
 ### before_tool_call
 - Injects sub-agent API keys for `agenticmail_*` tools
 - Pushes pending email notifications from SSE watchers
-- Captures spawn info from `sessions_spawn` (enforces minimum 10-minute timeout)
+- Captures spawn info from `sessions_spawn` and applies the configured minimum timeout
 
 ### agent_end
 - Cancels all pending follow-up reminders
