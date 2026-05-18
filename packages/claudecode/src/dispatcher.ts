@@ -49,12 +49,10 @@ import { homedir } from 'node:os';
 import {
   ThreadCache,
   AgentMemoryStore,
-  bridgeWakeLastSeenAgeMs,
-  composeBridgeWakePrompt,
   forgetHostSession,
   loadHostSession,
   normalizeSubject,
-  shouldSkipBridgeWakeForLiveOperator,
+  planBridgeWake,
   threadIdFor,
 } from '@agenticmail/core';
 import { resumeBridgeSession } from './bridge-wake.js';
@@ -1949,32 +1947,31 @@ export class Dispatcher {
       ?? '';
     try {
       const saved = loadHostSession('claudecode');
-      const nowMs = Date.now();
-      if (shouldSkipBridgeWakeForLiveOperator(saved, nowMs)) {
-        const ageMs = bridgeWakeLastSeenAgeMs(saved, nowMs) ?? 0;
-        this.log('info', `[bridge-wake] skip — operator is live (lastSeen=${ageMs}ms ago); their hook will surface uid=${event.uid}`);
+      const route = planBridgeWake({
+        session: saved,
+        mail: { bridgeName: account.name, uid: event.uid, subject, from, preview },
+      });
+      if (route.action === 'skip-live') {
+        this.log('info', `[bridge-wake] skip — operator is live (lastSeen=${route.ageMs}ms ago); their hook will surface uid=${event.uid}`);
         this.postActivity('/dispatcher/bridge-skipped', {
-          uid: event.uid, agentName: account.name, reason: 'operator-live',
+          uid: event.uid, agentName: account.name, reason: route.reason,
         });
         return;
       }
-      if (!saved) {
+      if (route.action === 'escalate') {
         this.log('warn', `[bridge-wake] no fresh Claude Code session recorded — bridge mail uid=${event.uid} cannot resume. Escalating via system-event.`);
         this.postActivity('/dispatcher/bridge-escalation', {
           uid: event.uid, agentName: account.name, subject, from, preview,
-          reason: 'no-fresh-session',
+          reason: route.reason,
         });
         return;
       }
       const mcpEnv = await this.buildMcpEnv();
-      const prompt = composeBridgeWakePrompt({
-        bridgeName: account.name, uid: event.uid, subject, from, preview,
-      });
       const result = await resumeBridgeSession(this.query, {
         bridge: account,
-        sessionId: saved.sessionId,
-        cwd: saved.workspace,
-        prompt,
+        sessionId: route.session.sessionId,
+        cwd: route.session.workspace,
+        prompt: route.prompt,
         mcpEnv,
       }, this.log);
       if (result.ok) {

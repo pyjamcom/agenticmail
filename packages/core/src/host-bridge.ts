@@ -18,6 +18,34 @@ export interface BridgeWakePromptArgs {
   preview?: string;
 }
 
+export interface BridgeMailContext extends BridgeWakePromptArgs {}
+
+export type BridgeWakeRoute =
+  | {
+      action: 'skip-live';
+      reason: 'operator-live';
+      ageMs: number;
+      mail: BridgeMailContext;
+    }
+  | {
+      action: 'escalate';
+      reason: 'no-fresh-session';
+      mail: BridgeMailContext;
+    }
+  | {
+      action: 'resume';
+      session: HostSession;
+      prompt: string;
+      mail: BridgeMailContext;
+    };
+
+export interface PlanBridgeWakeArgs {
+  session: HostSession | null;
+  mail: BridgeMailContext;
+  nowMs?: number;
+  liveWindowMs?: number;
+}
+
 export interface ResumeErrorClassificationOptions {
   expiredMarkers?: readonly string[];
   sdkMissingMarkers?: readonly string[];
@@ -75,6 +103,33 @@ export function shouldSkipBridgeWakeForLiveOperator(
 ): boolean {
   const ageMs = bridgeWakeLastSeenAgeMs(session, nowMs);
   return ageMs !== null && ageMs < liveWindowMs;
+}
+
+export function planBridgeWake(args: PlanBridgeWakeArgs): BridgeWakeRoute {
+  const nowMs = args.nowMs ?? Date.now();
+  const liveWindowMs = args.liveWindowMs ?? BRIDGE_OPERATOR_LIVE_WINDOW_MS;
+  const ageMs = bridgeWakeLastSeenAgeMs(args.session, nowMs);
+  if (ageMs !== null && ageMs < liveWindowMs) {
+    return {
+      action: 'skip-live',
+      reason: 'operator-live',
+      ageMs,
+      mail: args.mail,
+    };
+  }
+  if (!args.session) {
+    return {
+      action: 'escalate',
+      reason: 'no-fresh-session',
+      mail: args.mail,
+    };
+  }
+  return {
+    action: 'resume',
+    session: args.session,
+    prompt: composeBridgeWakePrompt(args.mail),
+    mail: args.mail,
+  };
 }
 
 /**

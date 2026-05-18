@@ -4,6 +4,7 @@ import {
   bridgeWakeLastSeenAgeMs,
   classifyResumeError,
   composeBridgeWakePrompt,
+  planBridgeWake,
   shouldSkipBridgeWakeForLiveOperator,
 } from '../host-bridge.js';
 
@@ -65,5 +66,45 @@ describe('host-bridge', () => {
     expect(shouldSkipBridgeWakeForLiveOperator(live, nowMs)).toBe(true);
     expect(shouldSkipBridgeWakeForLiveOperator(stale, nowMs)).toBe(false);
     expect(shouldSkipBridgeWakeForLiveOperator(null, nowMs)).toBe(false);
+  });
+
+  it('plans bridge wake routing decisions', () => {
+    const nowMs = 1_000_000;
+    const mail = {
+      bridgeName: 'claudecode',
+      uid: 123,
+      subject: 'Bridge request',
+      from: 'teammate@example.com',
+      preview: 'Please handle this.',
+    };
+
+    expect(planBridgeWake({
+      session: { sessionId: 'live', lastSeenMs: nowMs - 1_000 },
+      mail,
+      nowMs,
+    })).toMatchObject({
+      action: 'skip-live',
+      reason: 'operator-live',
+      ageMs: 1_000,
+      mail,
+    });
+
+    expect(planBridgeWake({ session: null, mail, nowMs })).toMatchObject({
+      action: 'escalate',
+      reason: 'no-fresh-session',
+      mail,
+    });
+
+    const resume = planBridgeWake({
+      session: { sessionId: 'stale-enough', workspace: '/tmp/project', lastSeenMs: nowMs - 60_000 },
+      mail,
+      nowMs,
+    });
+    expect(resume).toMatchObject({
+      action: 'resume',
+      session: { sessionId: 'stale-enough', workspace: '/tmp/project' },
+      mail,
+    });
+    expect(resume.action === 'resume' ? resume.prompt : '').toContain('Bridge request');
   });
 });

@@ -167,10 +167,14 @@ export {
   bridgeWakeLastSeenAgeMs,
   classifyResumeError,
   composeBridgeWakePrompt,
+  planBridgeWake,
   shouldSkipBridgeWakeForLiveOperator,
   type BridgeWakeError,
+  type BridgeMailContext,
   type BridgeWakePromptArgs,
   type BridgeWakeResult,
+  type BridgeWakeRoute,
+  type PlanBridgeWakeArgs,
   type ResumeErrorClassificationOptions,
 } from './host-bridge.js';
 
