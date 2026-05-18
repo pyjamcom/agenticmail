@@ -209,7 +209,40 @@ function extractTableRefs(sql: string): string[] {
   const refs = new Set<string>();
   const refPattern = /\b(?:FROM|INTO|UPDATE|TABLE|JOIN)\s+["`[]?([A-Za-z_][A-Za-z0-9_]{0,63})["`\]]?/gi;
   for (const match of sql.matchAll(refPattern)) refs.add(match[1]);
+  // Hardening — the FROM/JOIN-anchored scan above misses tables in a
+  // comma-join list (`FROM agt_mine, agt_victim` only captures the
+  // first). Catch EVERY storage-table-shaped token anywhere in the
+  // query as a backstop: any agt_*/shared_*/metadata token must be
+  // ownership-checked by verifySqlAccess, comma-join or not.
+  const storageTokenPattern = /\b(agt_[A-Za-z0-9_]+|shared_[A-Za-z0-9_]+|agenticmail_storage_meta)\b/gi;
+  for (const match of sql.matchAll(storageTokenPattern)) refs.add(match[1]);
   return [...refs];
+}
+
+/**
+ * Hardening — `having` was the one query clause still interpolated raw
+ * into SQL after the #GHSA storage patch validated `groupBy`/`orderBy`.
+ * HAVING legitimately needs aggregate expressions (`COUNT(*) > 5`), so
+ * it can't be identifier-validated like the others. Instead: bound the
+ * length and reject statement-breaking constructs (stacked statements,
+ * comment markers) and any DDL/DML keyword. The caller already owns the
+ * table and is authenticated, so a HAVING expression that can't escape
+ * the SELECT or run DDL/DML has no meaningful blast radius.
+ */
+function sanitizeHavingClause(having: string): string {
+  if (typeof having !== 'string') {
+    throw new StorageRouteError('having must be a string');
+  }
+  if (having.length > 200) {
+    throw new StorageRouteError('having clause is too long (max 200 chars)');
+  }
+  if (/;|--|\/\*|\*\//.test(having)) {
+    throw new StorageRouteError('having clause contains a forbidden token');
+  }
+  if (/\b(DROP|DELETE|INSERT|UPDATE|UNION|ATTACH|DETACH|PRAGMA|CREATE|ALTER|REPLACE|EXEC|VACUUM)\b/i.test(having)) {
+    throw new StorageRouteError('having clause contains a forbidden keyword');
+  }
+  return having;
 }
 
 function nowExpr(dialect: string): string {
@@ -900,7 +933,7 @@ export function createStorageRoutes(
       }
 
       if (groupBy) sql += ` GROUP BY ${buildGroupBy(groupBy)}`;
-      if (having) sql += ` HAVING ${having}`;
+      if (having) sql += ` HAVING ${sanitizeHavingClause(having)}`;
       if (orderBy) sql += ` ORDER BY ${buildOrderBy(orderBy)}`;
       if (limit) { sql += ' LIMIT ?'; params.push(limit); }
       if (offset) { sql += ' OFFSET ?'; params.push(offset); }
