@@ -22,6 +22,7 @@ import {
   forgetHostSession,
   hostSessionStoragePath,
   DEFAULT_SESSION_MAX_AGE_MS,
+  type HostName,
 } from '../host-sessions.js';
 
 beforeEach(() => {
@@ -33,6 +34,8 @@ afterEach(() => {
 });
 
 describe('saveHostSession / loadHostSession', () => {
+  const knownHosts: HostName[] = ['claudecode', 'codex', 'openclaw', 'gemini', 'hermes'];
+
   it('round-trips a session', () => {
     saveHostSession('claudecode', {
       sessionId: 'abc-123',
@@ -47,11 +50,40 @@ describe('saveHostSession / loadHostSession', () => {
     expect(got!.lastSeenMs).toBeGreaterThan(0);
   });
 
-  it('keeps the two hosts isolated', () => {
+  it('supports all known host names without changing the on-disk shape', () => {
+    for (const host of knownHosts) {
+      saveHostSession(host, { sessionId: `${host}-session` });
+    }
+
+    for (const host of knownHosts) {
+      expect(loadHostSession(host)!.sessionId).toBe(`${host}-session`);
+    }
+
+    const raw = JSON.parse(readFileSync(hostSessionStoragePath(), 'utf-8'));
+    expect(raw.version).toBe(1);
+    expect(Object.keys(raw.sessions).sort()).toEqual([...knownHosts].sort());
+  });
+
+  it('keeps hosts isolated', () => {
     saveHostSession('claudecode', { sessionId: 'c-1' });
     saveHostSession('codex', { sessionId: 'x-1' });
+    saveHostSession('openclaw', { sessionId: 'o-1' });
     expect(loadHostSession('claudecode')!.sessionId).toBe('c-1');
     expect(loadHostSession('codex')!.sessionId).toBe('x-1');
+    expect(loadHostSession('openclaw')!.sessionId).toBe('o-1');
+  });
+
+  it('preserves optional resume mode and host metadata', () => {
+    saveHostSession('openclaw', {
+      sessionId: 'oc-session',
+      resumeMode: 'wake',
+      hostMetadata: { sessionKey: 'oc-session', surface: 'operator' },
+    });
+
+    const got = loadHostSession('openclaw');
+    expect(got).not.toBeNull();
+    expect(got!.resumeMode).toBe('wake');
+    expect(got!.hostMetadata).toEqual({ sessionKey: 'oc-session', surface: 'operator' });
   });
 
   it('overwrites the same host on second save (last wins)', () => {
@@ -127,9 +159,11 @@ describe('forgetHostSession', () => {
   it('removes only the named host', () => {
     saveHostSession('claudecode', { sessionId: 'c' });
     saveHostSession('codex', { sessionId: 'x' });
+    saveHostSession('openclaw', { sessionId: 'o' });
     forgetHostSession('codex');
     expect(loadHostSession('claudecode')).not.toBeNull();
     expect(loadHostSession('codex')).toBeNull();
+    expect(loadHostSession('openclaw')).not.toBeNull();
   });
 
   it('is a no-op when no record exists', () => {

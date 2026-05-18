@@ -3,8 +3,8 @@
  *
  * # What this is for
  *
- * When a sub-agent replies into the host bridge inbox
- * (`claudecode@localhost` / `codex@localhost`), the dispatcher
+ * When a sub-agent replies into a host bridge inbox
+ * (`claudecode@localhost` / `codex@localhost` / etc.), the dispatcher
  * historically had no way to react: bridges are skipped by
  * `shouldWatch` because they belong to the human operator's host CLI,
  * not to an automated worker. The mail would sit unread until the
@@ -37,6 +37,12 @@
  *       "sessionId": "019a2b3c-…",
  *       "workspace": "/Users/ope/Desktop/facebook-project",
  *       "lastSeenMs": 1778905100000
+ *     },
+ *     "openclaw": {
+ *       "sessionId": "openclaw-session-key",
+ *       "workspace": "/Users/ope/Desktop/facebook-project",
+ *       "lastSeenMs": 1778905000000,
+ *       "resumeMode": "wake"
  *     }
  *   }
  * }
@@ -72,7 +78,18 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 /** Canonical names for the host integrations that own bridge inboxes. */
-export type HostName = 'claudecode' | 'codex';
+export type HostName = 'claudecode' | 'codex' | 'openclaw' | 'gemini' | 'hermes';
+
+/**
+ * How a host can be woken from a persisted session record.
+ *
+ * - `resume`: the host can resume a durable prior conversation/thread.
+ * - `wake`: the host can target a live or recently known session key, but does
+ *   not guarantee full headless resume semantics.
+ * - `wake-only`: the host can receive a wake notification, but the dispatcher
+ *   must not treat it as a resumed worker turn.
+ */
+export type HostSessionResumeMode = 'resume' | 'wake' | 'wake-only';
 
 /**
  * A snapshot of one host CLI's last-known session. Persisted to disk
@@ -80,7 +97,7 @@ export type HostName = 'claudecode' | 'codex';
  * bridge mail arrives so a resume can be attempted.
  */
 export interface HostSession {
-  /** Stable session_id from the host CLI (Claude Code or Codex). */
+  /** Stable session_id/thread_id/session key from the host CLI/runtime. */
   sessionId: string;
   /** Wall-clock timestamp of the last hook fire on this session. */
   lastSeenMs: number;
@@ -90,6 +107,10 @@ export interface HostSession {
   /** Optional: model name the host session was using, surfaced
    *  in logs for diagnostic context. */
   model?: string;
+  /** Optional: describes whether this host supports true resume or only wake. */
+  resumeMode?: HostSessionResumeMode;
+  /** Optional host-specific metadata. Must not contain secrets. */
+  hostMetadata?: Record<string, unknown>;
 }
 
 interface OnDiskShape {

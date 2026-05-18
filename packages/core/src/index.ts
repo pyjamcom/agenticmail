@@ -158,6 +158,7 @@ export {
   DEFAULT_SESSION_MAX_AGE_MS,
   type HostName,
   type HostSession,
+  type HostSessionResumeMode,
 } from './host-sessions.js';
 
 // SSRF-safe URL validation for the master API base URL — used by
