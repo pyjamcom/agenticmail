@@ -105,6 +105,35 @@ export type {
   SmsProvider,
 } from './sms/index.js';
 
+// Phone Mission Policy
+export {
+  PHONE_MISSION_STATES,
+  PHONE_REGION_SCOPES,
+  TELEPHONY_TRANSPORT_CAPABILITIES,
+  classifyPhoneNumberRisk,
+  inferPhoneRegion,
+  isPhoneRegionAllowed,
+  validatePhoneMissionPolicy,
+  validatePhoneMissionStart,
+  validatePhoneTransportProfile,
+} from './phone/index.js';
+export type {
+  OpenClawPhoneMissionPolicy,
+  PhoneAlternativePolicy,
+  PhoneConfirmPolicy,
+  PhoneMissionState,
+  PhoneMissionStartValidationResult,
+  PhoneTransportValidationResult,
+  PhoneMissionValidationIssue,
+  PhoneMissionValidationResult,
+  PhoneNumberRisk,
+  PhoneRegionScope,
+  PhoneTransportProfile,
+  StartPhoneMissionInput,
+  TelephonyTransportCapability,
+  ValidatedPhoneMissionStart,
+} from './phone/index.js';
+
 // Telemetry
 export { recordToolCall, setTelemetryVersion, flushTelemetry } from './telemetry.js';
 
