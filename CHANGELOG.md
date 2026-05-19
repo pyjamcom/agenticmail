@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.59] - 2026-05-19
+
+### Fixed
+
+- `/telegram`, `/call`, `/sms`, and `/update` shell commands crashed
+  with `ReferenceError: heading is not defined` on entry. The
+  `heading()` helper was referenced by every command that opened with
+  a titled section but had never been defined. Defined it once next
+  to `hr()` so all four commands work.
+
 ## [0.9.58] - 2026-05-19
 
 ### Added — `/telegram` and `/call` shell commands

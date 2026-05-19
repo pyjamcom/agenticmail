@@ -51,6 +51,12 @@ function boxTop(): string { return c.dim('╭' + '─'.repeat(Math.max(0, tw() -
 function boxBot(): string { return c.dim('╰' + '─'.repeat(Math.max(0, tw() - 2)) + '╯'); }
 
 function log(msg: string) { console.log(msg); }
+// Section header — bold magenta line used as the top label for a command's
+// output. Used by /sms, /telegram, /call, /update; previously each call site
+// referenced an undefined `heading` symbol and crashed the shell on entry.
+function heading(text: string): void {
+  log(`  ${c.bold(c.cyan(text))}`);
+}
 function ok(msg: string) { log(`  ${c.green('✓')} ${msg}`); }
 function fail(msg: string) { log(`  ${c.red('✗')} ${msg}`); }
 function info(msg: string) { log(`  ${c.dim(msg)}`); }
