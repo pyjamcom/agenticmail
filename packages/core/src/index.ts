@@ -18,7 +18,7 @@ export { AgentDeletionService } from './accounts/deletion.js';
 export type { DeletionReport, DeletionSummary, ArchivedEmail, ArchiveAndDeleteOptions } from './accounts/deletion.js';
 
 // Mail Operations
-export { MailSender, type MailSenderOptions, type SendResultWithRaw } from './mail/sender.js';
+export { MailSender, isLoopbackMailHost, resolveTlsRejectUnauthorized, type MailSenderOptions, type SendResultWithRaw } from './mail/sender.js';
 export { MailReceiver, type MailReceiverOptions, type FolderInfo } from './mail/receiver.js';
 export { parseEmail } from './mail/parser.js';
 export type {

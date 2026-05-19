@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.49] - 2026-05-19
+
+### Fixed
+
+- **Local mail sending broke under the v0.9.46 TLS hardening.**
+  GHSA-wjjv-3mj2-39hf made `MailSender` TLS certificate verification
+  the default. Correct for remote servers — but the bundled local
+  mail server (Stalwart on `127.0.0.1`) presents a self-signed
+  certificate, so verification always failed and local agent-to-agent
+  mail stopped working out of the box on self-hosted deployments
+  (`API error 500: self-signed certificate`). `MailSender` now
+  resolves `rejectUnauthorized` per host: loopback hosts
+  (`localhost`, `127.0.0.0/8`, `::1`, `*.localhost`) default to
+  verification OFF — a self-signed cert on a loopback address is not a
+  meaningful MITM surface — while remote hosts still verify by
+  default. An explicit `tlsRejectUnauthorized` option overrides either
+  way. Exposed as `resolveTlsRejectUnauthorized` / `isLoopbackMailHost`
+  for reuse.
+
 ## [0.9.48] - 2026-05-18
 
 ### Added

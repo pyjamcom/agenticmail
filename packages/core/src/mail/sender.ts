@@ -18,6 +18,36 @@ export interface SendResultWithRaw extends SendResult {
   raw: Buffer;
 }
 
+/** True for loopback hosts — the bundled local mail server lives here. */
+export function isLoopbackMailHost(host: string | undefined): boolean {
+  const h = (host ?? '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return h === 'localhost'
+    || h === '::1'
+    || h.endsWith('.localhost')
+    || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * Resolve the effective TLS `rejectUnauthorized` for a mail connection.
+ *
+ * GHSA-wjjv-3mj2-39hf made certificate verification the default — but
+ * the bundled local mail server (Stalwart on 127.0.0.1) presents a
+ * self-signed certificate, so verifying it always fails and breaks
+ * local agent-to-agent mail out of the box. A self-signed cert on a
+ * loopback address is not a meaningful MITM surface, so for loopback
+ * hosts verification defaults OFF. Remote hosts still verify by
+ * default. An explicit `tlsRejectUnauthorized` option always wins
+ * either way, so a deployment can still force-verify localhost or
+ * opt a remote host out if it really needs to.
+ */
+export function resolveTlsRejectUnauthorized(
+  host: string | undefined,
+  explicit: boolean | undefined,
+): boolean {
+  if (explicit !== undefined) return explicit;
+  return !isLoopbackMailHost(host);
+}
+
 export class MailSender {
   private transporter: Transporter;
   private email: string;
@@ -33,7 +63,7 @@ export class MailSender {
         pass: options.password,
       },
       tls: {
-        rejectUnauthorized: options.tlsRejectUnauthorized ?? true,
+        rejectUnauthorized: resolveTlsRejectUnauthorized(options.host, options.tlsRejectUnauthorized),
       },
       connectionTimeout: 10_000, // 10s to establish TCP connection
       greetingTimeout: 10_000,   // 10s for SMTP greeting
