@@ -170,6 +170,14 @@ export const TOOL_SETS = {
     'storage',
   ],
 
+  /** Persistent per-agent memory — long-term knowledge that survives every conversation. */
+  memory: [
+    'memory',
+    'memory_reflect',
+    'memory_context',
+    'memory_stats',
+  ],
+
   /** Mail-server setup / onboarding wizards. */
   setup: [
     'setup_guide',
@@ -204,6 +212,7 @@ export const SET_DESCRIPTIONS: Record<ToolSetName, string> = {
   phone: 'Phone call-control — setup/capabilities/start/status/transcript/cancel',
   account_admin: 'Account admin — create/delete/stop/resume agents, cleanup (master key required)',
   storage: 'File storage for an agent',
+  memory: 'Persistent agent memory — remember/recall/reflect, ranked context digest, stats',
   setup: 'Mail-server onboarding wizards (one-time setup)',
   system: 'System health and gateway status checks',
 };

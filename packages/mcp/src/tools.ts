@@ -1274,6 +1274,58 @@ export const toolDefinitions = [
       required: ['id'],
     },
   },
+  // ─── Persistent agent memory ───────────────────────────────────────
+  {
+    name: 'memory',
+    description: 'Your persistent, long-term memory — knowledge that survives across every conversation, like a human employee learning on the job. Use `set` to remember something durable (a preference, a fact, a correction, a learned skill); `search` to recall by topic; `list` to browse; `get` to read one entry; `delete` to forget. Memory is private to you and persists forever unless it decays from disuse or you delete it. Store things you would want to still know weeks from now — not transient task state.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['set', 'get', 'search', 'list', 'delete'], description: 'set | get | search | list | delete' },
+        content: { type: 'string', description: 'set: the thing to remember (plain text).' },
+        title: { type: 'string', description: 'set: a short title/label for the memory (optional — derived from content if omitted).' },
+        category: { type: 'string', enum: ['knowledge', 'interaction_pattern', 'preference', 'correction', 'skill', 'context', 'reflection', 'session_learning', 'system_notice'], description: 'set: memory category (default: context).' },
+        importance: { type: 'string', enum: ['critical', 'high', 'normal', 'low'], description: 'set: how important this is (default: normal). critical entries never decay.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'set: optional tags.' },
+        query: { type: 'string', description: 'search: the topic to recall.' },
+        id: { type: 'string', description: 'get | delete: the memory entry id.' },
+        limit: { type: 'number', description: 'search | list: max entries to return (default 50).' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'memory_reflect',
+    description: 'Record a self-reflection into your persistent memory — an insight or lesson you want to carry forward (stored as a high-confidence `reflection` entry). Use this at the end of a task or conversation to capture what you learned.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        content: { type: 'string', description: 'The reflection / insight to remember.' },
+        title: { type: 'string', description: 'Optional short title.' },
+        importance: { type: 'string', enum: ['critical', 'high', 'normal', 'low'], description: 'Default: normal.' },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'memory_context',
+    description: 'Get a ranked markdown digest of your most relevant persistent memory — what you would want loaded into your working context right now. Optionally pass a `query` to bias the digest toward a topic. This is the same memory block a voice/phone session injects so you act with full continuity.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        query: { type: 'string', description: 'Optional topic to focus the digest on.' },
+        maxTokens: { type: 'number', description: 'Approximate size budget (default 1500).' },
+      },
+    },
+  },
+  {
+    name: 'memory_stats',
+    description: 'Get aggregate statistics about your persistent memory — total entries, breakdown by category / importance / source, and average confidence.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
   // ─── Meta-tools for tiered tool loading ────────────────────────────
   // These exist so a Claude Code subagent (or any host that wants to keep
   // its spawn context small) can load this MCP server with only a handful
@@ -3168,6 +3220,70 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
     case 'call_cancel': {
       if (!args.id) throw new Error('id is required');
       const result = await apiRequest('POST', `/calls/${encodeURIComponent(String(args.id))}/cancel`);
+      return JSON.stringify(result, null, 2);
+    }
+
+    // ─── Persistent agent memory ─────────────────────────────────────
+    case 'memory': {
+      const action = String(args.action || '');
+      if (action === 'set') {
+        if (!args.content) throw new Error('content is required for action "set"');
+        const result = await apiRequest('POST', '/memory', {
+          content: args.content,
+          title: args.title,
+          category: args.category,
+          importance: args.importance,
+          tags: args.tags,
+        });
+        return JSON.stringify(result, null, 2);
+      }
+      if (action === 'get') {
+        if (!args.id) throw new Error('id is required for action "get"');
+        const result = await apiRequest('GET', `/memory/${encodeURIComponent(String(args.id))}`);
+        return JSON.stringify(result, null, 2);
+      }
+      if (action === 'delete') {
+        if (!args.id) throw new Error('id is required for action "delete"');
+        const result = await apiRequest('DELETE', `/memory/${encodeURIComponent(String(args.id))}`);
+        return JSON.stringify(result, null, 2);
+      }
+      if (action === 'search' || action === 'list') {
+        const query = new URLSearchParams();
+        if (action === 'search') {
+          if (!args.query) throw new Error('query is required for action "search"');
+          query.set('query', String(args.query));
+        }
+        if (args.category) query.set('category', String(args.category));
+        if (args.importance) query.set('importance', String(args.importance));
+        if (args.limit) query.set('limit', String(args.limit));
+        const suffix = query.toString() ? `?${query.toString()}` : '';
+        const result = await apiRequest('GET', `/memory${suffix}`);
+        return JSON.stringify(result, null, 2);
+      }
+      throw new Error('Invalid action. Use: set | get | search | list | delete');
+    }
+
+    case 'memory_reflect': {
+      if (!args.content) throw new Error('content is required');
+      const result = await apiRequest('POST', '/memory/reflect', {
+        content: args.content,
+        title: args.title,
+        importance: args.importance,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'memory_context': {
+      const query = new URLSearchParams();
+      if (args.query) query.set('query', String(args.query));
+      if (args.maxTokens) query.set('maxTokens', String(args.maxTokens));
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      const result = await apiRequest('GET', `/memory/context${suffix}`);
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'memory_stats': {
+      const result = await apiRequest('GET', '/memory/stats');
       return JSON.stringify(result, null, 2);
     }
 

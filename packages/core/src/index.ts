@@ -265,3 +265,13 @@ export type {
   ThreadIdInput, ThreadCacheEntry, CachedMessage, ThreadCacheOptions,
   AgentMemoryFields, AgentMemoryRead, AgentMemoryOptions,
 } from './threading/index.js';
+
+// Persistent per-agent memory — categorised, confidence-decaying,
+// BM25F-searchable knowledge store. See packages/core/src/memory/*.
+export {
+  AgentMemoryManager, MEMORY_CATEGORIES, MemorySearchIndex, stem, tokenize,
+} from './memory/index.js';
+export type {
+  AgentMemoryEntry, MemoryCategory, MemoryImportance, MemorySource,
+  MemoryStats, CreateMemoryInput, UpdateMemoryInput, MemoryQueryOptions,
+} from './memory/index.js';

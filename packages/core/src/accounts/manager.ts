@@ -204,6 +204,13 @@ export class AccountManager {
     // Delete from SQLite
     const stmt = this.db.prepare('DELETE FROM agents WHERE id = ?');
     const result = stmt.run(id);
+
+    // Purge per-agent data that keys on agent_id so a deleted agent
+    // leaves nothing orphaned behind. agent_memory is the persistent
+    // memory store; the table may not exist yet on installs that never
+    // initialised it, so the delete is best-effort.
+    try { this.db.prepare('DELETE FROM agent_memory WHERE agent_id = ?').run(id); } catch { /* table may not exist */ }
+
     return result.changes > 0;
   }
 

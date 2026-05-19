@@ -27,6 +27,7 @@ import { createTaskRoutes } from './routes/tasks.js';
 import { createSmsRoutes, createSmsWebhookRoutes } from './routes/sms.js';
 import { createPhoneRoutes, createPhoneWebhookRoutes } from './routes/phone.js';
 import { createStorageRoutes } from './routes/storage.js';
+import { createMemoryRoutes } from './routes/memory.js';
 import { createSystemEventRoutes } from './routes/system-events.js';
 import { createDispatcherActivityRoutes } from './routes/dispatcher-activity.js';
 import { createAgentMemoryRoutes } from './routes/agent-memory.js';
@@ -253,6 +254,7 @@ export function createApp(configOverrides?: Partial<AgenticMailConfig>): {
   app.use('/api/agenticmail', createTaskRoutes(db, accountManager, config));
   app.use('/api/agenticmail', createSmsRoutes(db, accountManager, config, gatewayManager));
   app.use('/api/agenticmail', createPhoneRoutes(db, config));
+  app.use('/api/agenticmail', createMemoryRoutes(db as any));
   app.use('/api/agenticmail', createStorageRoutes(db as any, accountManager, config));
   app.use('/api/agenticmail', createSystemEventRoutes());
   app.use('/api/agenticmail', createDispatcherActivityRoutes({
