@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { createStorageRoutes } from '../routes/storage.js';
 
 vi.mock('@agenticmail/core', () => ({
@@ -44,7 +44,7 @@ async function request(baseUrl: string, path: string, init?: RequestInit): Promi
   return { status: res.status, body: await res.json() };
 }
 
-function createAccountApp(db: Database.Database): express.Express {
+function createAccountApp(db: DatabaseSync): express.Express {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -55,7 +55,7 @@ function createAccountApp(db: Database.Database): express.Express {
   return app;
 }
 
-function createStorageDb(db: Database.Database) {
+function createStorageDb(db: DatabaseSync) {
   return {
     run(sql: string, params?: any[]) {
       db.prepare(sql).run(...(params ?? []));
@@ -69,7 +69,7 @@ function createStorageDb(db: Database.Database) {
   };
 }
 
-function createStorageApp(db: Database.Database): express.Express {
+function createStorageApp(db: DatabaseSync): express.Express {
   const agents: Record<string, TestAgent> = {
     owner: { id: 'owneragent000001', email: 'owner@example.com' },
     intruder: { id: 'intruderagent001', email: 'intruder@example.com' },
@@ -86,7 +86,7 @@ function createStorageApp(db: Database.Database): express.Express {
 
 describe('account route security validation', () => {
   it('rejects non-integer inactive-hours input before building SQL', async () => {
-    const db = new Database(':memory:');
+    const db = new DatabaseSync(':memory:');
     db.exec(`
       CREATE TABLE agents (
         id TEXT PRIMARY KEY,
@@ -113,7 +113,7 @@ describe('account route security validation', () => {
 
 describe('storage route SQL guards', () => {
   it('rejects unsafe filter identifiers and allows valid filters', async () => {
-    const db = new Database(':memory:');
+    const db = new DatabaseSync(':memory:');
     const baseUrl = await listen(createStorageApp(db));
 
     const created = await request(baseUrl, '/storage/tables', {
@@ -151,7 +151,7 @@ describe('storage route SQL guards', () => {
   });
 
   it('denies raw SQL access to another agent private table', async () => {
-    const db = new Database(':memory:');
+    const db = new DatabaseSync(':memory:');
     const baseUrl = await listen(createStorageApp(db));
 
     const created = await request(baseUrl, '/storage/tables', {

@@ -1,4 +1,5 @@
 import { recordInboundAgentMessage, type ToolContext } from './tools.js';
+import { handleOpenClawBridgeWake, isOpenClawBridgeAccount, type OpenClawBridgeIdentity } from './bridge-wake.js';
 
 /** Resolved mail account from OpenClaw channel config */
 export interface ResolvedMailAccount {
@@ -264,15 +265,17 @@ export function mailChannelPlugin(ctx: ToolContext): any {
           lastError: null,
         });
 
-        // Resolve our own name/address for rate limiter
-        let myName = '';
+        // Resolve our own name/address for rate limiting and bridge wake routing.
+        const myIdentity: OpenClawBridgeIdentity = {};
         try {
           const me = await mailApi(account, 'GET', '/accounts/me');
-          myName = me?.name ?? '';
+          myIdentity.name = me?.name ?? '';
+          myIdentity.email = me?.email ?? '';
         } catch { /* ignore */ }
 
         // Set of UIDs we've already dispatched (prevents re-processing)
         const processedUids = new Set<number>();
+        const inFlightBridgeWakes = new Set<number>();
 
         // Dispatch function from OpenClaw runtime
         const dispatch = runtime?.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
@@ -283,7 +286,7 @@ export function mailChannelPlugin(ctx: ToolContext): any {
 
         // Process any unseen emails that arrived before we connected
         try {
-          await pollAndDispatch(account, cfg, dispatch, log, processedUids, myName);
+          await pollAndDispatch(account, cfg, runtime, dispatch, log, processedUids, inFlightBridgeWakes, myIdentity);
         } catch (err) {
           log?.warn?.(`[agenticmail] Initial poll error: ${(err as Error).message}`);
         }
@@ -310,7 +313,7 @@ export function mailChannelPlugin(ctx: ToolContext): any {
                     const email = await mailApi(account, 'GET', `/mail/messages/${event.uid}`);
                     if (!email) return;
 
-                    await dispatchEmail(account, cfg, dispatch, log, email, event.uid, myName);
+                    await dispatchEmail(account, cfg, runtime, dispatch, log, email, event.uid, inFlightBridgeWakes, myIdentity);
                   } catch (err) {
                     log?.warn?.(`[agenticmail] Failed to process SSE email UID ${event.uid}: ${(err as Error).message}`);
                   }
@@ -341,7 +344,7 @@ export function mailChannelPlugin(ctx: ToolContext): any {
                 const reconnectAt = Date.now() + reconnectDelay;
                 while (!abortSignal?.aborted && Date.now() < reconnectAt) {
                   try {
-                    await pollAndDispatch(account, cfg, dispatch, log, processedUids, myName);
+                    await pollAndDispatch(account, cfg, runtime, dispatch, log, processedUids, inFlightBridgeWakes, myIdentity);
                   } catch (pollErr) {
                     log?.warn?.(`[agenticmail] Poll error: ${(pollErr as Error).message}`);
                   }
@@ -387,11 +390,13 @@ export function mailChannelPlugin(ctx: ToolContext): any {
   async function dispatchEmail(
     account: ResolvedMailAccount,
     cfg: any,
+    runtime: any,
     dispatch: Function,
     log: any,
     email: any,
     uid: number,
-    myName: string,
+    inFlightBridgeWakes: Set<number>,
+    myIdentity: OpenClawBridgeIdentity,
   ): Promise<void> {
     const senderAddr: string = email.from?.[0]?.address ?? '';
     const senderName: string = email.from?.[0]?.name ?? senderAddr;
@@ -401,10 +406,21 @@ export function mailChannelPlugin(ctx: ToolContext): any {
 
     log?.info?.(`[agenticmail] ${isInterAgent ? 'Inter-agent' : 'New'} email from ${senderAddr}: ${subject}`);
 
+    if (isOpenClawBridgeAccount(myIdentity)) {
+      await handleOpenClawBridgeWake({
+        email,
+        uid,
+        runtime,
+        log,
+        inFlightUids: inFlightBridgeWakes,
+      });
+      return;
+    }
+
     // Reset rate limiter for agents who have messaged us
-    if (isInterAgent && myName) {
+    if (isInterAgent && myIdentity.name) {
       const senderLocal = senderAddr.split('@')[0] ?? '';
-      if (senderLocal) recordInboundAgentMessage(senderLocal, myName);
+      if (senderLocal) recordInboundAgentMessage(senderLocal, myIdentity.name);
     }
 
     // Build session key from thread (root message ID)
@@ -505,10 +521,12 @@ export function mailChannelPlugin(ctx: ToolContext): any {
   async function pollAndDispatch(
     account: ResolvedMailAccount,
     cfg: any,
+    runtime: any,
     dispatch: Function,
     log: any,
     processedUids: Set<number>,
-    myName: string,
+    inFlightBridgeWakes: Set<number>,
+    myIdentity: OpenClawBridgeIdentity,
   ): Promise<void> {
     const searchResult = await mailApi(account, 'POST', '/mail/search', { seen: false });
     const uids: number[] = searchResult?.uids ?? [];
@@ -522,7 +540,7 @@ export function mailChannelPlugin(ctx: ToolContext): any {
         const email = await mailApi(account, 'GET', `/mail/messages/${uid}`);
         if (!email) continue;
 
-        await dispatchEmail(account, cfg, dispatch, log, email, uid, myName);
+        await dispatchEmail(account, cfg, runtime, dispatch, log, email, uid, inFlightBridgeWakes, myIdentity);
       } catch (err) {
         log?.warn?.(`[agenticmail] Failed to process email UID ${uid}: ${(err as Error).message}`);
       }
