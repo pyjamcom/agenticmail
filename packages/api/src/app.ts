@@ -25,6 +25,7 @@ import { createGatewayRoutes } from './routes/gateway.js';
 import { createFeatureRoutes } from './routes/features.js';
 import { createTaskRoutes } from './routes/tasks.js';
 import { createSmsRoutes, createSmsWebhookRoutes } from './routes/sms.js';
+import { createPhoneRoutes, createPhoneWebhookRoutes } from './routes/phone.js';
 import { createStorageRoutes } from './routes/storage.js';
 import { createSystemEventRoutes } from './routes/system-events.js';
 import { createDispatcherActivityRoutes } from './routes/dispatcher-activity.js';
@@ -216,6 +217,9 @@ export function createApp(configOverrides?: Partial<AgenticMailConfig>): {
   // Inbound SMS provider webhooks (use provider-specific secrets, before bearer auth)
   app.use('/api/agenticmail', createSmsWebhookRoutes(db, config));
 
+  // Phone provider webhooks (use provider-specific secrets, before bearer auth)
+  app.use('/api/agenticmail', createPhoneWebhookRoutes(db, config));
+
   // Integration bootstrap routes — mounted BEFORE bearer auth so a fresh
   // AI agent (Claude Code, etc.) can self-install without having to first
   // know the master key. The factory was resolved at module load (see
@@ -248,6 +252,7 @@ export function createApp(configOverrides?: Partial<AgenticMailConfig>): {
   app.use('/api/agenticmail', createFeatureRoutes(db, accountManager, config, gatewayManager));
   app.use('/api/agenticmail', createTaskRoutes(db, accountManager, config));
   app.use('/api/agenticmail', createSmsRoutes(db, accountManager, config, gatewayManager));
+  app.use('/api/agenticmail', createPhoneRoutes(db, config));
   app.use('/api/agenticmail', createStorageRoutes(db as any, accountManager, config));
   app.use('/api/agenticmail', createSystemEventRoutes());
   app.use('/api/agenticmail', createDispatcherActivityRoutes({

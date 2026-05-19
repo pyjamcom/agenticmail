@@ -1,0 +1,177 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import express from 'express';
+import { createServer, type Server } from 'node:http';
+import { once } from 'node:events';
+import { createTestDatabase, type AgenticMailConfig } from '@agenticmail/core';
+import { createPhoneRoutes, createPhoneWebhookRoutes } from '../routes/phone.js';
+
+const policy = {
+  policyVersion: 1,
+  regionAllowlist: ['AT', 'DE'],
+  maxCallDurationSeconds: 300,
+  maxCostPerMission: 5,
+  maxAttempts: 1,
+  transcriptEnabled: true,
+  recordingEnabled: false,
+  confirmPolicy: {
+    paymentDetails: 'never',
+    contractCommitment: 'never',
+    costOverLimit: 'needs_operator',
+    sensitivePersonalData: 'needs_operator',
+    unclearAlternative: 'needs_operator',
+  },
+  alternativePolicy: { maxTimeShiftMinutes: 30 },
+};
+
+const config = { masterKey: 'mk_test_key' } as AgenticMailConfig;
+const servers: Server[] = [];
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+});
+
+async function listen(app: express.Express): Promise<string> {
+  const server = createServer(app);
+  servers.push(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Unexpected server address');
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function request(baseUrl: string, path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers || {}),
+    },
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+function createDb() {
+  const db = createTestDatabase();
+  db.prepare(`
+    INSERT INTO agents (id, name, email, api_key, stalwart_principal, metadata)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('agent1', 'ralf', 'ralf@example.com', 'ak_test', 'principal1', '{}');
+  return db;
+}
+
+function createPhoneApp(db: ReturnType<typeof createTestDatabase>): express.Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.agent = { id: 'agent1', email: 'ralf@example.com' };
+    next();
+  });
+  app.use(createPhoneWebhookRoutes(db, config));
+  app.use(createPhoneRoutes(db, config));
+  return app;
+}
+
+async function setupTransport(baseUrl: string) {
+  return request(baseUrl, '/phone/transport/setup', {
+    method: 'POST',
+    body: JSON.stringify({
+      provider: '46elks',
+      phoneNumber: '+43123456789',
+      username: 'user',
+      password: 'api-password-secret',
+      webhookBaseUrl: 'https://agenticmail.example.com',
+      webhookSecret: 'hook-secret',
+      supportedRegions: ['AT', 'DE'],
+    }),
+  });
+}
+
+describe('phone routes', () => {
+  it('configures phone transport without leaking secrets', async () => {
+    const db = createDb();
+    const baseUrl = await listen(createPhoneApp(db));
+
+    const setup = await setupTransport(baseUrl);
+    expect(setup.status).toBe(200);
+    expect(setup.body.transport).toMatchObject({
+      provider: '46elks',
+      phoneNumber: '+43123456789',
+      password: '***',
+      webhookSecret: '***',
+    });
+
+    const capabilities = await request(baseUrl, '/phone/capabilities');
+    expect(capabilities.body).toMatchObject({
+      provider: '46elks',
+      capabilities: ['call_control'],
+      supportedRegions: ['AT', 'DE'],
+      realtimeReady: false,
+    });
+
+    db.close();
+  });
+
+  it('starts a dry-run mission and exposes status/transcript/cancel endpoints', async () => {
+    const db = createDb();
+    const baseUrl = await listen(createPhoneApp(db));
+    await setupTransport(baseUrl);
+
+    const started = await request(baseUrl, '/calls/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        to: '+436641234567',
+        task: 'Reserve dinner',
+        policy,
+        dryRun: true,
+      }),
+    });
+    expect(started.status).toBe(200);
+    expect(started.body.mission.status).toBe('dialing');
+    expect(started.body.providerRequest.body.voice_start).toBe('[redacted-url]');
+
+    const missionId = started.body.mission.id;
+    const loaded = await request(baseUrl, `/calls/${missionId}`);
+    expect(loaded.body.mission.id).toBe(missionId);
+
+    const transcript = await request(baseUrl, `/calls/${missionId}/transcript`);
+    expect(transcript.body.transcript.length).toBeGreaterThan(0);
+
+    const cancelled = await request(baseUrl, `/calls/${missionId}/cancel`, { method: 'POST' });
+    expect(cancelled.body.mission.status).toBe('cancelled');
+
+    db.close();
+  });
+
+  it('authenticates 46elks voice-start and hangup webhooks', async () => {
+    const db = createDb();
+    const baseUrl = await listen(createPhoneApp(db));
+    await setupTransport(baseUrl);
+    const started = await request(baseUrl, '/calls/start', {
+      method: 'POST',
+      body: JSON.stringify({ to: '+436641234567', task: 'Reserve dinner', policy, dryRun: true }),
+    });
+    const missionId = started.body.mission.id;
+
+    const forged = await request(baseUrl, `/calls/webhook/46elks/voice-start?missionId=${missionId}&secret=wrong`, {
+      method: 'POST',
+      body: JSON.stringify({ callid: 'call123' }),
+    });
+    expect(forged.status).toBe(403);
+
+    const voiceStart = await request(baseUrl, `/calls/webhook/46elks/voice-start?missionId=${missionId}&secret=hook-secret`, {
+      method: 'POST',
+      body: JSON.stringify({ callid: 'call123' }),
+    });
+    expect(voiceStart.status).toBe(200);
+    expect(voiceStart.body.play).toContain('AgenticMail');
+
+    const hangup = await request(baseUrl, `/calls/webhook/46elks/hangup?missionId=${missionId}&secret=hook-secret`, {
+      method: 'POST',
+      body: JSON.stringify({ callid: 'call123' }),
+    });
+    expect(hangup.body.mission.status).toBe('failed');
+
+    db.close();
+  });
+});
