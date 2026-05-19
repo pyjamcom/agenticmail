@@ -1,6 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import {
   PhoneManager,
+  PhoneWebhookAuthError,
+  PhoneRateLimitError,
   buildPhoneTransportConfig,
   redactPhoneTransportConfig,
   type AgenticMailConfig,
@@ -11,11 +13,16 @@ function requestString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function readWebhookSecret(req: Request): string {
-  return requestString(req.get('x-agenticmail-webhook-secret'))
-    || requestString(req.get('x-46elks-secret'))
-    || requestString(req.query.secret)
-    || requestString((req.body as Record<string, unknown> | undefined)?.secret);
+/**
+ * Read the per-mission webhook token (#43-H7). 46elks calls our webhook
+ * URL back with `?token=<HMAC>`; a header form is also accepted for
+ * manual testing / a future provider that can set headers.
+ */
+function readWebhookToken(req: Request): string {
+  return requestString(req.query.token)
+    || requestString(req.get('x-agenticmail-webhook-token'))
+    || requestString(req.get('x-46elks-token'))
+    || requestString((req.body as Record<string, unknown> | undefined)?.token);
 }
 
 function readMissionId(req: Request): string {
@@ -34,11 +41,43 @@ function getAgent(req: Request, res: Response): { id: string; email: string } | 
   return agent;
 }
 
+function isPhoneWebhookAuthError(err: unknown): boolean {
+  return err instanceof PhoneWebhookAuthError || (err as { isPhoneWebhookAuthError?: boolean })?.isPhoneWebhookAuthError === true;
+}
+
+function isPhoneRateLimitError(err: unknown): boolean {
+  return err instanceof PhoneRateLimitError || (err as { isPhoneRateLimitError?: boolean })?.isPhoneRateLimitError === true;
+}
+
 function errorStatus(err: unknown): number {
   const msg = (err as Error)?.message ?? String(err);
   if (msg.includes('not found')) return 404;
-  if (msg.includes('Invalid') || msg.includes('required') || msg.includes('not configured')) return 400;
+  // Client input-validation errors → 400. buildPhoneTransportConfig and
+  // the mission validators phrase every input error with one of these.
+  if (msg.includes('Invalid') || msg.includes('required') || msg.includes('not configured')
+      || msg.includes('must use') || msg.includes('must be') || msg.includes('must contain')) {
+    return 400;
+  }
   return 500;
+}
+
+/**
+ * Centralised phone error responder. Typed errors are mapped to fixed
+ * statuses BEFORE any message-substring heuristic runs:
+ *   - PhoneWebhookAuthError -> a uniform 403 + generic body. No 404-vs-403
+ *     branch on mission existence, so no enumeration oracle (#43-H3).
+ *   - PhoneRateLimitError   -> 429 (the message is operator-safe).
+ */
+function sendPhoneError(res: Response, err: unknown): void {
+  if (isPhoneWebhookAuthError(err)) {
+    res.status(403).json({ error: 'Invalid phone webhook request' });
+    return;
+  }
+  if (isPhoneRateLimitError(err)) {
+    res.status(429).json({ error: (err as Error).message });
+    return;
+  }
+  res.status(errorStatus(err)).json({ error: (err as Error).message });
 }
 
 export function createPhoneWebhookRoutes(
@@ -48,31 +87,29 @@ export function createPhoneWebhookRoutes(
   const router = Router();
   const phoneManager = new PhoneManager(db as any, config.masterKey);
 
+  // Webhook routes are mounted before bearer auth (the provider must
+  // reach them). A missing/unknown missionId or a bad token all funnel
+  // into a single uniform 403 via PhoneWebhookAuthError — no early
+  // missionId branch, so there is no 404-vs-403 enumeration oracle.
   router.post('/calls/webhook/46elks/voice-start', (req: Request, res: Response) => {
     try {
-      const missionId = readMissionId(req);
-      const secret = readWebhookSecret(req);
-      if (!missionId) return res.status(400).json({ error: 'missionId is required' });
-
-      const result = phoneManager.handleVoiceStartWebhook(missionId, secret, req.body ?? {});
+      const result = phoneManager.handleVoiceStartWebhook(
+        readMissionId(req), readWebhookToken(req), req.body ?? {},
+      );
       res.json(result.action);
     } catch (err) {
-      const status = (err as Error).message.includes('secret') ? 403 : errorStatus(err);
-      res.status(status).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
   router.post('/calls/webhook/46elks/hangup', (req: Request, res: Response) => {
     try {
-      const missionId = readMissionId(req);
-      const secret = readWebhookSecret(req);
-      if (!missionId) return res.status(400).json({ error: 'missionId is required' });
-
-      const mission = phoneManager.handleHangupWebhook(missionId, secret, req.body ?? {});
+      const mission = phoneManager.handleHangupWebhook(
+        readMissionId(req), readWebhookToken(req), req.body ?? {},
+      );
       res.json({ success: true, mission });
     } catch (err) {
-      const status = (err as Error).message.includes('secret') ? 403 : errorStatus(err);
-      res.status(status).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -97,7 +134,7 @@ export function createPhoneRoutes(
         transport: cfg ? redactPhoneTransportConfig(cfg) : null,
       });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -118,7 +155,7 @@ export function createPhoneRoutes(
         ],
       });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -137,7 +174,7 @@ export function createPhoneRoutes(
         realtimeReady: !!cfg?.capabilities.includes('realtime_media'),
       });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -164,7 +201,7 @@ export function createPhoneRoutes(
         providerResponse: result.providerResponse,
       });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -179,7 +216,7 @@ export function createPhoneRoutes(
       const missions = phoneManager.listMissions(agent.id, { limit, offset, status });
       res.json({ missions, count: missions.length });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -192,7 +229,7 @@ export function createPhoneRoutes(
       if (!mission) return res.status(404).json({ error: 'Phone mission not found' });
       res.json({ mission });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -205,7 +242,7 @@ export function createPhoneRoutes(
       if (!mission) return res.status(404).json({ error: 'Phone mission not found' });
       res.json({ missionId: mission.id, transcript: mission.transcript });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 
@@ -217,7 +254,7 @@ export function createPhoneRoutes(
       const mission = phoneManager.cancelMission(agent.id, req.params.id);
       res.json({ success: true, mission });
     } catch (err) {
-      res.status(errorStatus(err)).json({ error: (err as Error).message });
+      sendPhoneError(res, err);
     }
   });
 

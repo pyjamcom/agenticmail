@@ -1,9 +1,10 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Database } from '../storage/db.js';
 import { encryptSecret, decryptSecret, isEncryptedSecret } from '../crypto/secrets.js';
 import { normalizePhoneNumber } from '../sms/manager.js';
 import {
   PHONE_MISSION_STATES,
+  PHONE_SERVER_MAX_CALL_DURATION_SECONDS,
   validatePhoneMissionStart,
   validatePhoneTransportProfile,
   type OpenClawPhoneMissionPolicy,
@@ -14,6 +15,44 @@ import {
 } from './mission.js';
 
 export type PhoneTransportProvider = '46elks';
+
+/**
+ * Abuse / cost controls for the call-control surface. A phone mission
+ * places a real, billed outbound call, so /calls/start needs hard limits
+ * that the caller cannot raise (see #43-H1).
+ */
+export const PHONE_RATE_LIMIT_PER_MINUTE = 5;
+export const PHONE_RATE_LIMIT_PER_HOUR = 30;
+export const PHONE_MAX_CONCURRENT_MISSIONS = 3;
+/** Minimum entropy for an agent-supplied webhook secret (#43-H8). */
+export const PHONE_MIN_WEBHOOK_SECRET_LENGTH = 24;
+
+/** Terminal mission states — no further status transition is permitted. */
+const TERMINAL_MISSION_STATES: readonly PhoneMissionState[] = ['completed', 'failed', 'cancelled'];
+
+/**
+ * Thrown by the webhook handlers for ANY authentication failure —
+ * unknown mission, missing token, or wrong token alike. Uniform on
+ * purpose: the route maps it to a single 403 + generic body so an
+ * unauthenticated caller cannot tell a real missionId from a fake one
+ * (#43-H3 — the 404-vs-403 enumeration oracle).
+ */
+export class PhoneWebhookAuthError extends Error {
+  readonly isPhoneWebhookAuthError = true;
+  constructor() {
+    super('Invalid phone webhook request');
+    this.name = 'PhoneWebhookAuthError';
+  }
+}
+
+/** Thrown when /calls/start is refused by a rate/concurrency limit (#43-H1). */
+export class PhoneRateLimitError extends Error {
+  readonly isPhoneRateLimitError = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'PhoneRateLimitError';
+  }
+}
 
 export interface PhoneTransportConfig extends PhoneTransportProfile {
   provider: PhoneTransportProvider;
@@ -103,16 +142,32 @@ function apiBaseUrl(webhookBaseUrl: string): string {
   return root.endsWith('/api/agenticmail') ? root : `${root}/api/agenticmail`;
 }
 
+/**
+ * Per-mission webhook token (#43-H7). The webhook URL we hand to 46elks
+ * carries `token = HMAC-SHA256(webhookSecret, missionId)` instead of the
+ * raw shared `webhookSecret`. Two wins over carrying the secret directly:
+ *   1. The shared secret never appears in a URL / provider logs / proxies.
+ *   2. A leaked webhook URL exposes exactly ONE mission's token — it can't
+ *      be used to forge webhooks for any other mission of that agent.
+ * The webhook handler recomputes the token from the mission's config
+ * secret + the mission id and compares it timing-safe.
+ */
+function webhookToken(webhookSecret: string, missionId: string): string {
+  return createHmac('sha256', webhookSecret).update(missionId).digest('hex');
+}
+
 function buildWebhookUrl(config: PhoneTransportConfig, path: string, missionId: string): string {
   const url = new URL(`${apiBaseUrl(config.webhookBaseUrl)}${path}`);
   url.searchParams.set('missionId', missionId);
-  url.searchParams.set('secret', config.webhookSecret);
+  url.searchParams.set('token', webhookToken(config.webhookSecret, missionId));
   return url.toString();
 }
 
 function redactWebhookUrl(value: string): string {
   try {
     const url = new URL(value);
+    // Redact both the per-mission token and any legacy `secret` param.
+    if (url.searchParams.has('token')) url.searchParams.set('token', '***');
     if (url.searchParams.has('secret')) url.searchParams.set('secret', '***');
     return url.toString();
   } catch {
@@ -193,9 +248,46 @@ export function redactPhoneTransportConfig(config: PhoneTransportConfig): PhoneT
 
 export class PhoneManager {
   private initialized = false;
+  /** Per-agent outbound-call timestamps (ms) for the in-memory rate limiter. */
+  private readonly callTimestamps = new Map<string, number[]>();
 
   constructor(private db: Database, private encryptionKey?: string) {
     this.ensureTables();
+  }
+
+  /**
+   * Abuse / cost gate for /calls/start (#43-H1). Each non-dry-run call is
+   * a real billed outbound call, so before dialing we enforce:
+   *   - a hard cap on concurrently-active (non-terminal) missions, and
+   *   - a per-agent token-bucket rate limit (per-minute + per-hour).
+   * Throws {@link PhoneRateLimitError} (-> HTTP 429) when a limit is hit.
+   * Call only on the real path — dry runs place no call and are exempt.
+   */
+  private enforceCallLimits(agentId: string, nowMs: number): void {
+    const activeRow = this.db.prepare(
+      `SELECT COUNT(*) AS cnt FROM phone_missions
+       WHERE agent_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')`,
+    ).get(agentId) as { cnt: number } | undefined;
+    if ((activeRow?.cnt ?? 0) >= PHONE_MAX_CONCURRENT_MISSIONS) {
+      throw new PhoneRateLimitError(
+        `Too many active phone missions (max ${PHONE_MAX_CONCURRENT_MISSIONS}). Wait for an active call to end before starting another.`,
+      );
+    }
+
+    const recent = (this.callTimestamps.get(agentId) ?? []).filter((ts) => nowMs - ts < 3_600_000);
+    const lastMinute = recent.filter((ts) => nowMs - ts < 60_000).length;
+    if (lastMinute >= PHONE_RATE_LIMIT_PER_MINUTE) {
+      throw new PhoneRateLimitError(
+        `Phone call rate limit reached (max ${PHONE_RATE_LIMIT_PER_MINUTE}/minute). Try again shortly.`,
+      );
+    }
+    if (recent.length >= PHONE_RATE_LIMIT_PER_HOUR) {
+      throw new PhoneRateLimitError(
+        `Phone call rate limit reached (max ${PHONE_RATE_LIMIT_PER_HOUR}/hour). Try again later.`,
+      );
+    }
+    recent.push(nowMs);
+    this.callTimestamps.set(agentId, recent);
   }
 
   private encryptConfig(config: PhoneTransportConfig): PhoneTransportConfig {
@@ -321,6 +413,14 @@ export class PhoneManager {
     }
 
     const now = options.now ?? new Date();
+
+    // Abuse / cost gate (#43-H1) — a real (non-dry-run) call must pass
+    // the concurrency cap + per-agent rate limit BEFORE a mission row is
+    // created or the carrier is dialled. Dry runs place no call: exempt.
+    if (!options.dryRun) {
+      this.enforceCallLimits(agentId, now.getTime());
+    }
+
     const missionId = `call_${randomUUID()}`;
     const transcript: PhoneMissionTranscriptEntry[] = [{
       at: now.toISOString(),
@@ -331,6 +431,9 @@ export class PhoneManager {
       voiceRuntimeRef: validation.mission.voiceRuntimeRef,
       targetRegion: validation.mission.targetRegion,
       dryRun: !!options.dryRun,
+      // Attempt counter (#43-H2) — wired for breach detection; there is
+      // no automatic retry loop today, so a fresh mission is attempt 1.
+      attempts: 1,
     };
 
     const mission: PhoneCallMission = {
@@ -361,15 +464,34 @@ export class PhoneManager {
     }
 
     const fetchFn = options.fetchFn ?? fetch;
-    const response = await fetchFn(providerRequest.url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${basicAuth(config.username, config.password)}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams(providerRequest.body),
-      signal: AbortSignal.timeout(15_000),
-    });
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetchFn(providerRequest.url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${basicAuth(config.username, config.password)}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams(providerRequest.body),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (err) {
+      // Fail-closed (#43-H4) — the row was inserted as `dialing` before
+      // the provider call. A thrown fetch (network error, DNS failure,
+      // the 15s AbortSignal timeout) would otherwise leave the mission
+      // stuck in `dialing` forever. Transition it to `failed` before
+      // rethrowing so the mission state always reflects reality.
+      const message = (err as Error)?.message ?? String(err);
+      this.updateMissionStatus(missionId, 'failed', {
+        providerError: message,
+      }, [{
+        at: new Date().toISOString(),
+        source: 'provider',
+        text: '46elks call start failed — the provider request threw before any response.',
+        metadata: { error: message },
+      }]);
+      throw err;
+    }
 
     const text = await response.text();
     let raw: unknown = text;
@@ -397,12 +519,30 @@ export class PhoneManager {
     return { mission: updated, providerRequest, providerResponse: raw };
   }
 
-  handleVoiceStartWebhook(missionId: string, providedSecret: string, payload: Record<string, unknown> = {}): PhoneWebhookResult {
-    const mission = this.getMission(missionId);
-    if (!mission) throw new Error('Phone mission not found');
-    const config = this.getPhoneTransportConfig(mission.agentId);
-    if (!config || !providedSecret || !secretMatches(providedSecret, config.webhookSecret)) {
-      throw new Error('Invalid phone webhook secret');
+  /**
+   * Verify a webhook request and return the mission, or throw a uniform
+   * {@link PhoneWebhookAuthError} for ANY failure (unknown mission, no
+   * token, wrong token). Uniform on purpose — no 404-vs-403 oracle.
+   */
+  private authenticateWebhook(missionId: string, providedToken: string): PhoneCallMission {
+    const mission = missionId ? this.getMission(missionId) : null;
+    const config = mission ? this.getPhoneTransportConfig(mission.agentId) : null;
+    if (!mission || !config || !providedToken
+        || !secretMatches(providedToken, webhookToken(config.webhookSecret, mission.id))) {
+      throw new PhoneWebhookAuthError();
+    }
+    return mission;
+  }
+
+  handleVoiceStartWebhook(missionId: string, providedToken: string, payload: Record<string, unknown> = {}): PhoneWebhookResult {
+    const mission = this.authenticateWebhook(missionId, providedToken);
+
+    // Terminal-state guard (#43-H5) — a late or replayed voice_start must
+    // not resurrect a mission that already reached completed/failed/
+    // cancelled. handleHangupWebhook already guards terminal states;
+    // voice_start did not. Acknowledge the provider, change nothing.
+    if (TERMINAL_MISSION_STATES.includes(mission.status)) {
+      return { mission, action: this.buildVoiceStartAction() };
     }
 
     const eventKey = phoneWebhookEventKey('voice_start', payload);
@@ -429,33 +569,64 @@ export class PhoneManager {
     };
   }
 
-  handleHangupWebhook(missionId: string, providedSecret: string, payload: Record<string, unknown> = {}): PhoneCallMission {
-    const mission = this.getMission(missionId);
-    if (!mission) throw new Error('Phone mission not found');
-    const config = this.getPhoneTransportConfig(mission.agentId);
-    if (!config || !providedSecret || !secretMatches(providedSecret, config.webhookSecret)) {
-      throw new Error('Invalid phone webhook secret');
-    }
+  handleHangupWebhook(missionId: string, providedToken: string, payload: Record<string, unknown> = {}): PhoneCallMission {
+    const mission = this.authenticateWebhook(missionId, providedToken);
 
     const eventKey = phoneWebhookEventKey('hangup', payload);
     if (hasProcessedWebhookEvent(mission, eventKey)) {
       return mission;
     }
 
-    const terminal: PhoneMissionState[] = ['completed', 'failed', 'cancelled'];
-    const nextStatus: PhoneMissionState = terminal.includes(mission.status) ? mission.status : 'failed';
-    return this.updateMissionStatus(mission.id, nextStatus, {
-      lastHangupPayload: payload,
-      hangupReason: nextStatus === 'failed' ? 'call-ended-before-conversation-runtime' : undefined,
-      phoneWebhookEvents: appendProcessedWebhookEvent(mission, eventKey),
-    }, [{
+    // Cost accumulation (#43-H2) — 46elks reports the call cost on hangup.
+    // Record it against the mission and flag if it breached the policy cap.
+    const costPatch = this.buildCostMetadataPatch(mission, payload);
+
+    const nextStatus: PhoneMissionState = TERMINAL_MISSION_STATES.includes(mission.status)
+      ? mission.status
+      : 'failed';
+    const transcript: PhoneMissionTranscriptEntry[] = [{
       at: new Date().toISOString(),
       source: 'provider',
       text: nextStatus === 'failed'
         ? '46elks hangup webhook received before a conversation runtime completed the mission.'
         : '46elks hangup webhook received.',
       metadata: { payload },
-    }]);
+    }];
+    if (costPatch.costExceeded) {
+      transcript.push({
+        at: new Date().toISOString(),
+        source: 'system',
+        text: `Mission cost ${costPatch.totalCost} exceeded the policy cap of ${mission.policy.maxCostPerMission}.`,
+      });
+    }
+    return this.updateMissionStatus(mission.id, nextStatus, {
+      lastHangupPayload: payload,
+      hangupReason: nextStatus === 'failed' ? 'call-ended-before-conversation-runtime' : undefined,
+      phoneWebhookEvents: appendProcessedWebhookEvent(mission, eventKey),
+      ...costPatch,
+    }, transcript);
+  }
+
+  /**
+   * Read the call cost off a 46elks hangup payload, add it to the
+   * mission's running total, and flag a policy-cap breach (#43-H2).
+   * Cost is only knowable post-call from the provider — the preventive
+   * cost controls are the duration ceiling, rate limit, and concurrency
+   * cap; this is the after-the-fact accounting + alerting.
+   */
+  private buildCostMetadataPatch(
+    mission: PhoneCallMission,
+    payload: Record<string, unknown>,
+  ): { totalCost: number; costExceeded: boolean } {
+    const rawCost = payload.cost;
+    const callCost = typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0
+      ? rawCost
+      : Number.parseFloat(asString(rawCost)) || 0;
+    const priorCost = typeof mission.metadata.totalCost === 'number' ? mission.metadata.totalCost : 0;
+    const totalCost = Math.round((priorCost + callCost) * 1e6) / 1e6;
+    const cap = mission.policy?.maxCostPerMission;
+    const costExceeded = typeof cap === 'number' && totalCost > cap;
+    return { totalCost, costExceeded };
   }
 
   private buildVoiceStartAction(): Record<string, unknown> {
@@ -475,7 +646,11 @@ export class PhoneManager {
   }
 
   private build46ElksCallRequest(config: PhoneTransportConfig, mission: PhoneCallMission): { url: string; body: Record<string, string> } {
-    const timeout = Math.min(Math.max(mission.policy.maxCallDurationSeconds, 1), 86_400);
+    // Duration ceiling (#43-H6) — clamp the carrier call `timeout` to the
+    // server hard cap (1h), not 24h. validatePhoneMissionPolicy already
+    // clamps the policy value; this re-clamps at the point of use as
+    // defence-in-depth in case a mission row predates that validation.
+    const timeout = Math.min(Math.max(mission.policy.maxCallDurationSeconds, 1), PHONE_SERVER_MAX_CALL_DURATION_SECONDS);
     return {
       url: `${defaultApiUrl(config)}/calls`,
       body: {
@@ -571,6 +746,13 @@ export function buildPhoneTransportConfig(input: {
   if (!username || !password) throw new Error('username and password are required for provider "46elks"');
   if (!webhookBaseUrl) throw new Error('webhookBaseUrl is required');
   if (!webhookSecret) throw new Error('webhookSecret is required');
+  // Entropy floor (#43-H8) — the webhook secret is the ONLY auth on the
+  // pre-bearer webhook routes (every per-mission token is derived from
+  // it). A short secret makes those tokens forgeable. Require real
+  // entropy; reject a trivially-guessable secret outright.
+  if (webhookSecret.length < PHONE_MIN_WEBHOOK_SECRET_LENGTH) {
+    throw new Error(`webhookSecret must be at least ${PHONE_MIN_WEBHOOK_SECRET_LENGTH} characters`);
+  }
 
   const parsedWebhookBaseUrl = new URL(webhookBaseUrl);
   if (parsedWebhookBaseUrl.protocol !== 'https:' && parsedWebhookBaseUrl.hostname !== '127.0.0.1' && parsedWebhookBaseUrl.hostname !== 'localhost') {

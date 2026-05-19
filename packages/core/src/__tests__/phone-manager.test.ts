@@ -1,11 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHmac } from 'node:crypto';
 import { createTestDatabase } from '../storage/db.js';
 import {
   PhoneManager,
+  PhoneRateLimitError,
+  PhoneWebhookAuthError,
   buildPhoneTransportConfig,
   redactPhoneTransportConfig,
   type OpenClawPhoneMissionPolicy,
 } from '../index.js';
+
+// Webhook secret must clear the 24-char entropy floor (#43-H8).
+const WEBHOOK_SECRET = 'hook-secret-abcdefghijklmnop';
+
+/** Recompute the per-mission webhook token the way the manager does. */
+function tokenFor(missionId: string): string {
+  return createHmac('sha256', WEBHOOK_SECRET).update(missionId).digest('hex');
+}
 
 const policy: OpenClawPhoneMissionPolicy = {
   policyVersion: 1,
@@ -41,7 +52,7 @@ function phoneConfig() {
     username: 'user',
     password: 'api-password-secret',
     webhookBaseUrl: 'https://agenticmail.example.com',
-    webhookSecret: 'hook-secret',
+    webhookSecret: WEBHOOK_SECRET,
     supportedRegions: ['AT', 'DE'],
   });
 }
@@ -68,12 +79,24 @@ describe('PhoneManager', () => {
       phoneNumber: '+43123456789',
       username: 'user',
       password: 'api-password-secret',
-      webhookSecret: 'hook-secret',
+      webhookSecret: WEBHOOK_SECRET,
     });
     expect(redactPhoneTransportConfig(loaded!).password).toBe('***');
     const raw = db.prepare('SELECT metadata FROM agents WHERE id = ?').get('agent1') as { metadata: string };
-    expect(raw.metadata).not.toContain('hook-secret');
+    expect(raw.metadata).not.toContain(WEBHOOK_SECRET);
     expect(raw.metadata).not.toContain('api-password-secret');
+  });
+
+  it('rejects a webhook secret below the entropy floor (#43-H8)', () => {
+    expect(() => buildPhoneTransportConfig({
+      provider: '46elks',
+      phoneNumber: '+43123456789',
+      username: 'user',
+      password: 'api-password-secret',
+      webhookBaseUrl: 'https://agenticmail.example.com',
+      webhookSecret: 'short',
+      supportedRegions: ['AT', 'DE'],
+    })).toThrow(/at least 24 characters/);
   });
 
   it('starts a dry-run mission without calling the provider', async () => {
@@ -90,13 +113,15 @@ describe('PhoneManager', () => {
 
     expect(result.mission.status).toBe('dialing');
     expect(result.mission.providerCallId).toBe('dryrun-call');
+    expect(result.mission.metadata.attempts).toBe(1);
     expect(result.providerRequest?.url).toBe('https://api.46elks.com/a1/calls');
     expect(result.providerRequest?.body).toMatchObject({
       from: '+43123456789',
       to: '+436641234567',
       timeout: '300',
     });
-    expect(String(result.mission.metadata.providerRequest)).not.toContain('hook-secret');
+    // The webhook URL must carry a per-mission token, never the raw secret.
+    expect(String(result.mission.metadata.providerRequest)).not.toContain(WEBHOOK_SECRET);
   });
 
   it('posts a 46elks call-control request with form encoding', async () => {
@@ -130,6 +155,29 @@ describe('PhoneManager', () => {
     expect(body.get('to')).toBe('+436641234567');
     expect(body.get('voice_start')).toContain('/api/agenticmail/calls/webhook/46elks/voice-start');
     expect(body.get('whenhangup')).toContain('/api/agenticmail/calls/webhook/46elks/hangup');
+    // The webhook URLs carry the per-mission HMAC token, not the secret.
+    expect(body.get('voice_start')).toContain(`token=${tokenFor(result.mission.id)}`);
+    expect(body.get('voice_start')).not.toContain(WEBHOOK_SECRET);
+  });
+
+  it('marks the mission failed when the provider request throws (fail-closed #43-H4)', async () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db);
+    manager.savePhoneTransportConfig('agent1', phoneConfig());
+
+    const fetchMock = vi.fn(async () => { throw new Error('network down'); });
+
+    await expect(manager.startMission('agent1', {
+      to: '+436641234567',
+      task: 'Reserve a table',
+      policy,
+    }, { fetchFn: fetchMock as unknown as typeof fetch })).rejects.toThrow(/network down/);
+
+    const missions = manager.listMissions('agent1');
+    expect(missions).toHaveLength(1);
+    expect(missions[0].status).toBe('failed');
+    expect(missions[0].metadata.providerError).toBe('network down');
   });
 
   it('rejects forged webhooks and records valid voice-start/hangup events', async () => {
@@ -142,25 +190,97 @@ describe('PhoneManager', () => {
       task: 'Reserve a table',
       policy,
     }, { dryRun: true });
+    const token = tokenFor(mission.id);
 
-    expect(() => manager.handleVoiceStartWebhook(mission.id, 'wrong')).toThrow(/secret/i);
+    // Wrong token, raw secret, and unknown mission all fail uniformly (#43-H3).
+    expect(() => manager.handleVoiceStartWebhook(mission.id, 'wrong')).toThrow(PhoneWebhookAuthError);
+    expect(() => manager.handleVoiceStartWebhook(mission.id, WEBHOOK_SECRET)).toThrow(PhoneWebhookAuthError);
+    expect(() => manager.handleVoiceStartWebhook('call_does-not-exist', token)).toThrow(PhoneWebhookAuthError);
 
-    const voiceStart = manager.handleVoiceStartWebhook(mission.id, 'hook-secret', { callid: 'call123' });
+    const voiceStart = manager.handleVoiceStartWebhook(mission.id, token, { callid: 'call123' });
     expect(voiceStart.mission.status).toBe('connected');
     expect(voiceStart.action.play).toContain('AgenticMail');
     const voiceStartTranscriptLength = voiceStart.mission.transcript.length;
 
-    const duplicateVoiceStart = manager.handleVoiceStartWebhook(mission.id, 'hook-secret', { callid: 'call123' });
+    const duplicateVoiceStart = manager.handleVoiceStartWebhook(mission.id, token, { callid: 'call123' });
     expect(duplicateVoiceStart.mission.transcript).toHaveLength(voiceStartTranscriptLength);
 
-    const hangup = manager.handleHangupWebhook(mission.id, 'hook-secret', { callid: 'call123' });
+    const hangup = manager.handleHangupWebhook(mission.id, token, { callid: 'call123' });
     expect(hangup.status).toBe('failed');
     expect(hangup.metadata.hangupReason).toBe('call-ended-before-conversation-runtime');
     expect(hangup.metadata.phoneWebhookEvents).toHaveLength(2);
     const hangupTranscriptLength = hangup.transcript.length;
 
-    const duplicateHangup = manager.handleHangupWebhook(mission.id, 'hook-secret', { callid: 'call123' });
+    const duplicateHangup = manager.handleHangupWebhook(mission.id, token, { callid: 'call123' });
     expect(duplicateHangup.transcript).toHaveLength(hangupTranscriptLength);
     expect(duplicateHangup.metadata.phoneWebhookEvents).toHaveLength(2);
+  });
+
+  it('does not resurrect a terminal mission from a late voice-start (#43-H5)', async () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db);
+    manager.savePhoneTransportConfig('agent1', phoneConfig());
+    const { mission } = await manager.startMission('agent1', {
+      to: '+436641234567',
+      task: 'Reserve a table',
+      policy,
+    }, { dryRun: true });
+    const token = tokenFor(mission.id);
+
+    const cancelled = manager.cancelMission('agent1', mission.id);
+    expect(cancelled.status).toBe('cancelled');
+
+    // A voice-start arriving after cancellation must not flip it back to connected.
+    const lateVoiceStart = manager.handleVoiceStartWebhook(mission.id, token, { callid: 'late' });
+    expect(lateVoiceStart.mission.status).toBe('cancelled');
+  });
+
+  it('enforces the concurrency cap on active missions (#43-H1)', async () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db);
+    manager.savePhoneTransportConfig('agent1', phoneConfig());
+
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 'c', status: 'created' }), { status: 200 }));
+    // 3 active missions allowed; the 4th is refused.
+    for (let i = 0; i < 3; i++) {
+      await manager.startMission('agent1', { to: '+436641234567', task: 'call', policy },
+        { fetchFn: fetchMock as unknown as typeof fetch });
+    }
+    await expect(manager.startMission('agent1', { to: '+436641234567', task: 'call', policy },
+      { fetchFn: fetchMock as unknown as typeof fetch })).rejects.toThrow(PhoneRateLimitError);
+  });
+
+  it('enforces the per-minute call rate limit (#43-H1)', async () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db);
+    manager.savePhoneTransportConfig('agent1', phoneConfig());
+
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 'c', status: 'created' }), { status: 200 }));
+    // 5 calls/minute allowed. Cancel each so the concurrency cap (3)
+    // doesn't trip first — the rate-limit timestamps still accrue.
+    for (let i = 0; i < 5; i++) {
+      const { mission } = await manager.startMission('agent1', { to: '+436641234567', task: 'call', policy },
+        { fetchFn: fetchMock as unknown as typeof fetch });
+      manager.cancelMission('agent1', mission.id);
+    }
+    await expect(manager.startMission('agent1', { to: '+436641234567', task: 'call', policy },
+      { fetchFn: fetchMock as unknown as typeof fetch })).rejects.toThrow(/rate limit/i);
+  });
+
+  it('dry runs are exempt from the rate + concurrency limits', async () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db);
+    manager.savePhoneTransportConfig('agent1', phoneConfig());
+
+    // Far more dry runs than any limit — none should be refused.
+    for (let i = 0; i < 12; i++) {
+      const result = await manager.startMission('agent1', { to: '+436641234567', task: 'call', policy },
+        { dryRun: true });
+      expect(result.mission.status).toBe('dialing');
+    }
   });
 });

@@ -18,6 +18,12 @@ export type {
 } from './realtime.js';
 export {
   PhoneManager,
+  PhoneWebhookAuthError,
+  PhoneRateLimitError,
+  PHONE_RATE_LIMIT_PER_MINUTE,
+  PHONE_RATE_LIMIT_PER_HOUR,
+  PHONE_MAX_CONCURRENT_MISSIONS,
+  PHONE_MIN_WEBHOOK_SECRET_LENGTH,
   buildPhoneTransportConfig,
   redactPhoneTransportConfig,
 } from './manager.js';
@@ -34,6 +40,10 @@ export {
   PHONE_MISSION_STATES,
   PHONE_REGION_SCOPES,
   TELEPHONY_TRANSPORT_CAPABILITIES,
+  PHONE_SERVER_MAX_CALL_DURATION_SECONDS,
+  PHONE_SERVER_MAX_COST_PER_MISSION,
+  PHONE_SERVER_MAX_ATTEMPTS,
+  PHONE_TASK_MAX_LENGTH,
   classifyPhoneNumberRisk,
   inferPhoneRegion,
   isPhoneRegionAllowed,

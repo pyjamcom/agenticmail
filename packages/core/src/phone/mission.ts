@@ -26,6 +26,23 @@ export type PhoneMissionState = typeof PHONE_MISSION_STATES[number];
 
 export type PhoneNumberRisk = 'invalid' | 'standard' | 'premium_or_special';
 
+/**
+ * Server-side hard ceilings for a phone mission policy.
+ *
+ * Hardening (#42-H1 / #43-H2) — `policy` is supplied by the calling agent,
+ * so a caller-set `maxCallDurationSeconds: 999999` or `maxCostPerMission:
+ * 1e9` is self-authorized and meaningless as a limit. These constants are
+ * the real ceiling: `validatePhoneMissionPolicy` clamps every caller value
+ * down to (at most) the server cap, so the effective policy can only ever
+ * be MORE restrictive than the server, never less. A phone mission places
+ * real, billed calls — these bounds are the financial blast-radius cap.
+ */
+export const PHONE_SERVER_MAX_CALL_DURATION_SECONDS = 3600;   // 1 hour
+export const PHONE_SERVER_MAX_COST_PER_MISSION = 5;           // currency units (e.g. USD/EUR)
+export const PHONE_SERVER_MAX_ATTEMPTS = 3;
+/** Hard cap on the free-text `task` fed to the voice runtime. */
+export const PHONE_TASK_MAX_LENGTH = 2000;
+
 export interface PhoneConfirmPolicy {
   paymentDetails: 'never';
   contractCommitment: 'never';
@@ -241,14 +258,17 @@ export function validatePhoneMissionPolicy(policy: unknown): PhoneMissionValidat
 
   if (issues.length > 0) return { ok: false, issues };
 
+  // Hardening (#42-H1 / #43-H2) — clamp the caller-supplied limits DOWN to
+  // the server-side hard ceilings. The caller may ask for a stricter limit
+  // than the server cap (that wins), but never a looser one.
   return {
     ok: true,
     policy: {
       policyVersion: 1,
       regionAllowlist: regionAllowlist!,
-      maxCallDurationSeconds: maxCallDurationSeconds!,
-      maxCostPerMission: maxCostPerMission!,
-      maxAttempts: maxAttempts!,
+      maxCallDurationSeconds: Math.min(maxCallDurationSeconds!, PHONE_SERVER_MAX_CALL_DURATION_SECONDS),
+      maxCostPerMission: Math.min(maxCostPerMission!, PHONE_SERVER_MAX_COST_PER_MISSION),
+      maxAttempts: Math.min(maxAttempts!, PHONE_SERVER_MAX_ATTEMPTS),
       transcriptEnabled: transcriptEnabled!,
       recordingEnabled: recordingEnabled!,
       confirmPolicy: policy.confirmPolicy as unknown as PhoneConfirmPolicy,
@@ -342,9 +362,15 @@ export function validatePhoneMissionStart(
     issues.push(issue('invalid-target-number', 'input.to', 'target number must be valid E.164'));
   }
 
-  const task = typeof input.task === 'string' ? input.task.trim() : '';
+  // Hardening (#42-H2) — `task` becomes the call objective handed to a
+  // voice runtime. Strip control characters (keep tab/newline) and bound
+  // the length so an unbounded or control-laced string can't ride through.
+  const rawTask = typeof input.task === 'string' ? input.task : '';
+  const task = rawTask.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
   if (!task) {
     issues.push(issue('task-required', 'input.task', 'task is required'));
+  } else if (task.length > PHONE_TASK_MAX_LENGTH) {
+    issues.push(issue('task-too-long', 'input.task', `task must be ${PHONE_TASK_MAX_LENGTH} characters or fewer`));
   }
 
   const policyResult = validatePhoneMissionPolicy(input.policy);

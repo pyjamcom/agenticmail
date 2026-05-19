@@ -156,3 +156,59 @@ describe('phone mission start validation', () => {
     }
   });
 });
+
+describe('phone mission server-side hardening', () => {
+  it('clamps caller-supplied policy limits down to the server caps (#42-H1/#43-H2)', () => {
+    const result = validatePhoneMissionPolicy({
+      ...policy,
+      maxCallDurationSeconds: 999_999,
+      maxCostPerMission: 1e9,
+      maxAttempts: 100_000,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // The caller asked for absurd "limits"; the server cap wins.
+      expect(result.policy.maxCallDurationSeconds).toBe(3600);
+      expect(result.policy.maxCostPerMission).toBe(5);
+      expect(result.policy.maxAttempts).toBe(3);
+    }
+  });
+
+  it('keeps a caller policy that is stricter than the server cap', () => {
+    const result = validatePhoneMissionPolicy({
+      ...policy,
+      maxCallDurationSeconds: 120,
+      maxCostPerMission: 1,
+      maxAttempts: 1,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // A stricter caller limit is honoured — clamping only lowers.
+      expect(result.policy.maxCallDurationSeconds).toBe(120);
+      expect(result.policy.maxCostPerMission).toBe(1);
+      expect(result.policy.maxAttempts).toBe(1);
+    }
+  });
+
+  it('rejects an over-long task and strips control characters (#42-H2)', () => {
+    const tooLong = validatePhoneMissionStart({
+      to: '+436641234567',
+      task: 'x'.repeat(2001),
+      policy,
+    }, transport);
+    expect(tooLong.ok).toBe(false);
+    if (!tooLong.ok) {
+      expect(tooLong.issues.map((item) => item.code)).toContain('task-too-long');
+    }
+
+    const controlLaced = validatePhoneMissionStart({
+      to: '+436641234567',
+      task: 'Reserve\u0000 a\u0007 table',
+      policy,
+    }, transport);
+    expect(controlLaced.ok).toBe(true);
+    if (controlLaced.ok) {
+      expect(controlLaced.mission.task).toBe('Reserve a table');
+    }
+  });
+});

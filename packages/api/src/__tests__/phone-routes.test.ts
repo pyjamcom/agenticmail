@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import express from 'express';
+import { createHmac } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import { createTestDatabase, type AgenticMailConfig } from '@agenticmail/core';
 import { createPhoneRoutes, createPhoneWebhookRoutes } from '../routes/phone.js';
+
+// Webhook secret must clear the 24-char entropy floor (#43-H8).
+const WEBHOOK_SECRET = 'hook-secret-abcdefghijklmnop';
+
+/** Recompute the per-mission webhook token (#43-H7) the manager emits. */
+function tokenFor(missionId: string): string {
+  return createHmac('sha256', WEBHOOK_SECRET).update(missionId).digest('hex');
+}
 
 const policy = {
   policyVersion: 1,
@@ -81,7 +90,7 @@ async function setupTransport(baseUrl: string) {
       username: 'user',
       password: 'api-password-secret',
       webhookBaseUrl: 'https://agenticmail.example.com',
-      webhookSecret: 'hook-secret',
+      webhookSecret: WEBHOOK_SECRET,
       supportedRegions: ['AT', 'DE'],
     }),
   });
@@ -108,6 +117,28 @@ describe('phone routes', () => {
       supportedRegions: ['AT', 'DE'],
       realtimeReady: false,
     });
+
+    db.close();
+  });
+
+  it('rejects a transport setup with a weak webhook secret', async () => {
+    const db = createDb();
+    const baseUrl = await listen(createPhoneApp(db));
+
+    const setup = await request(baseUrl, '/phone/transport/setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: '46elks',
+        phoneNumber: '+43123456789',
+        username: 'user',
+        password: 'api-password-secret',
+        webhookBaseUrl: 'https://agenticmail.example.com',
+        webhookSecret: 'short',
+        supportedRegions: ['AT', 'DE'],
+      }),
+    });
+    expect(setup.status).toBe(400);
+    expect(String(setup.body.error)).toMatch(/at least 24 characters/);
 
     db.close();
   });
@@ -152,21 +183,32 @@ describe('phone routes', () => {
       body: JSON.stringify({ to: '+436641234567', task: 'Reserve dinner', policy, dryRun: true }),
     });
     const missionId = started.body.mission.id;
+    const token = tokenFor(missionId);
 
-    const forged = await request(baseUrl, `/calls/webhook/46elks/voice-start?missionId=${missionId}&secret=wrong`, {
+    // Forged token -> uniform 403.
+    const forged = await request(baseUrl, `/calls/webhook/46elks/voice-start?missionId=${missionId}&token=wrong`, {
       method: 'POST',
       body: JSON.stringify({ callid: 'call123' }),
     });
     expect(forged.status).toBe(403);
 
-    const voiceStart = await request(baseUrl, `/calls/webhook/46elks/voice-start?missionId=${missionId}&secret=hook-secret`, {
+    // An unknown mission must return the SAME 403 + body — no 404-vs-403
+    // enumeration oracle (#43-H3).
+    const unknown = await request(baseUrl, `/calls/webhook/46elks/voice-start?missionId=call_does-not-exist&token=${token}`, {
+      method: 'POST',
+      body: JSON.stringify({ callid: 'call123' }),
+    });
+    expect(unknown.status).toBe(403);
+    expect(unknown.body).toEqual(forged.body);
+
+    const voiceStart = await request(baseUrl, `/calls/webhook/46elks/voice-start?missionId=${missionId}&token=${token}`, {
       method: 'POST',
       body: JSON.stringify({ callid: 'call123' }),
     });
     expect(voiceStart.status).toBe(200);
     expect(voiceStart.body.play).toContain('AgenticMail');
 
-    const hangup = await request(baseUrl, `/calls/webhook/46elks/hangup?missionId=${missionId}&secret=hook-secret`, {
+    const hangup = await request(baseUrl, `/calls/webhook/46elks/hangup?missionId=${missionId}&token=${token}`, {
       method: 'POST',
       body: JSON.stringify({ callid: 'call123' }),
     });
