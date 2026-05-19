@@ -1336,6 +1336,182 @@ export const toolDefinitions = [
       required: ['id'],
     },
   },
+  // ─── Media toolset ─────────────────────────────────────────────────
+  //
+  // Local, opt-in media tools (text-to-speech, image / video / audio
+  // editing, probing, video understanding, voice cloning). They drive
+  // external system binaries (ffmpeg, ffprobe, ImageMagick, whisper.cpp,
+  // Python) that are NOT bundled. Each tool feature-detects the binary
+  // it needs; when one is missing the call returns a clear, actionable
+  // install hint instead of failing the server. Call media_capabilities
+  // first to see what is available.
+  {
+    name: 'media_capabilities',
+    description: 'Report which media binaries (ffmpeg, ffprobe, ImageMagick, whisper.cpp, Python, edge-tts) are installed and available. Media tools are opt-in — call this first to see what operations are possible before attempting them.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        refresh: { type: 'boolean', description: 'Re-probe the binaries instead of using the cached result (e.g. after installing one).' },
+      },
+    },
+  },
+  {
+    name: 'media_tts',
+    description: 'Convert text to speech using Edge TTS (free, local — requires the optional node-edge-tts package). Returns an audio file path (OGG/Opus when ffmpeg is available, else MP3).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        text: { type: 'string', description: 'Text to speak.' },
+        voice: { type: 'string', description: 'Preset name (guy, jenny, aria, davis, tony, ana, brian, emma, ryan, sonia, william, natasha) or a full Edge voice id.' },
+        rate: { type: 'string', description: 'Speaking rate, e.g. "+20%" or "-10%".' },
+        pitch: { type: 'string', description: 'Pitch shift, e.g. "+5Hz" or "-10Hz".' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'media_tts_voices',
+    description: 'List the available text-to-speech voice presets.',
+    inputSchema: { type: 'object' as const, properties: {} },
+  },
+  {
+    name: 'media_image_edit',
+    description: 'Edit an image: resize, crop, rotate, convert format, compress, overlay text, flip, blur, sharpen, grayscale. Requires ImageMagick.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        input: { type: 'string', description: 'Absolute path to the input image.' },
+        action: { type: 'string', enum: ['resize', 'crop', 'rotate', 'convert', 'compress', 'text_overlay', 'flip', 'blur', 'sharpen', 'grayscale'], description: 'The edit action to perform.' },
+        width: { type: 'number', description: 'Target width in pixels (resize/crop).' },
+        height: { type: 'number', description: 'Target height in pixels (resize/crop).' },
+        angle: { type: 'number', description: 'Rotation angle in degrees (rotate).' },
+        format: { type: 'string', description: 'Output format: png, jpg, webp, gif, bmp, tiff (convert).' },
+        quality: { type: 'number', description: 'JPEG/WebP quality 1-100 (compress). Default: 80.' },
+        text: { type: 'string', description: 'Text to overlay (text_overlay).' },
+        position: { type: 'string', description: 'Text position: north, south, center, northeast, etc. Default: south.' },
+        fontSize: { type: 'number', description: 'Font size in points (text_overlay). Default: 36.' },
+        fontColor: { type: 'string', description: 'Text colour (text_overlay). Default: white.' },
+        blurRadius: { type: 'number', description: 'Blur radius (blur). Default: 5.' },
+        direction: { type: 'string', enum: ['horizontal', 'vertical'], description: 'Flip direction. Default: horizontal.' },
+        offsetX: { type: 'number', description: 'Crop X offset from top-left. Default: 0.' },
+        offsetY: { type: 'number', description: 'Crop Y offset from top-left. Default: 0.' },
+      },
+      required: ['input', 'action'],
+    },
+  },
+  {
+    name: 'media_video_edit',
+    description: 'Edit a video. Basic: trim, extract_frame, extract_frames, convert, gif, compress, resize, add_audio, remove_audio, speed. Cinematic: color_grade, transition, text_overlay, picture_in_picture, split_screen, ken_burns, slow_motion, watermark, concatenate, audio_mix, auto_caption. Requires ffmpeg (ImageMagick for text/captions, whisper.cpp for auto_caption).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        input: { type: 'string', description: 'Absolute path to the input video (or image for ken_burns). Not required for concatenate.' },
+        action: { type: 'string', enum: ['trim', 'extract_frame', 'extract_frames', 'convert', 'gif', 'compress', 'resize', 'add_audio', 'remove_audio', 'speed', 'color_grade', 'transition', 'text_overlay', 'picture_in_picture', 'split_screen', 'ken_burns', 'slow_motion', 'watermark', 'concatenate', 'audio_mix', 'auto_caption'], description: 'The edit action.' },
+        start: { type: 'string', description: 'Start time: "00:00:05" or "5".' },
+        end: { type: 'string', description: 'End time: "00:00:15" or "15".' },
+        duration: { type: 'string', description: 'Duration in seconds.' },
+        timestamp: { type: 'string', description: 'Timestamp for single frame extraction.' },
+        interval: { type: 'number', description: 'Seconds between extracted frames. Default: 1.' },
+        format: { type: 'string', description: 'Output format: mp4, webm, mov, avi, mkv.' },
+        width: { type: 'number', description: 'Target width.' },
+        height: { type: 'number', description: 'Target height.' },
+        fps: { type: 'number', description: 'Frame rate.' },
+        crf: { type: 'number', description: 'Quality 0-51, lower is better. Default: 28.' },
+        audioPath: { type: 'string', description: 'Path to an audio file (add_audio, audio_mix).' },
+        speedFactor: { type: 'number', description: 'Speed multiplier: 0.5 = half, 2 = double.' },
+        secondInput: { type: 'string', description: 'Second video/image path (transition, picture_in_picture, split_screen).' },
+        transitionType: { type: 'string', description: 'Transition type: fade, wipeleft, slideright, circlecrop, etc. Default: fade.' },
+        transitionDuration: { type: 'number', description: 'Transition duration in seconds. Default: 1.' },
+        text: { type: 'string', description: 'Text for text_overlay.' },
+        fontSize: { type: 'number', description: 'Font size for text_overlay. Default: 72.' },
+        fontColor: { type: 'string', description: 'Text colour. Default: white.' },
+        textPosition: { type: 'string', description: 'Text position: center, top, bottom, top-left, top-right, bottom-left, bottom-right.' },
+        textBg: { type: 'string', description: 'Text background colour with opacity, e.g. "black@0.5".' },
+        textStart: { type: 'string', description: 'When text appears (seconds). Default: 0.' },
+        textEnd: { type: 'string', description: 'When text disappears (seconds).' },
+        overlayOpacity: { type: 'number', description: 'Watermark opacity 0.0-1.0. Default: 0.7.' },
+        overlayScale: { type: 'number', description: 'Watermark scale 0.0-1.0. Default: 0.2.' },
+        watermarkPosition: { type: 'string', description: 'Watermark position: top-left, top-right, bottom-left, bottom-right, center.' },
+        watermarkPath: { type: 'string', description: 'Path to the watermark/logo image.' },
+        pipWidth: { type: 'number', description: 'Picture-in-picture overlay width. Default: 320.' },
+        pipPosition: { type: 'string', description: 'PiP position: top-left, top-right, bottom-left, bottom-right.' },
+        splitDirection: { type: 'string', enum: ['horizontal', 'vertical'], description: 'Split-screen direction. Default: horizontal.' },
+        zoomDirection: { type: 'string', description: 'Ken Burns: zoom_in, zoom_out, pan_left, pan_right, pan_up, pan_down.' },
+        zoomDuration: { type: 'number', description: 'Ken Burns output duration in seconds. Default: 5.' },
+        zoomFactor: { type: 'number', description: 'Ken Burns zoom factor 1.0-3.0. Default: 1.5.' },
+        files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths (concatenate).' },
+        bgVolume: { type: 'string', description: 'Background audio volume for audio_mix. Default: 0.3.' },
+        fgVolume: { type: 'string', description: 'Foreground audio volume for audio_mix. Default: 1.0.' },
+        colorPreset: { type: 'string', description: 'Colour grade preset: warm, cool, vintage, cinematic, dramatic, bleach, noir, vivid, muted, golden_hour.' },
+        lutPath: { type: 'string', description: 'Path to a .cube LUT file for color_grade.' },
+        captionColor: { type: 'string', description: 'Auto-caption text colour. Default: white.' },
+        captionFontSize: { type: 'number', description: 'Auto-caption font size. Default: auto-scaled.' },
+        whisperModel: { type: 'string', description: 'Absolute path to a whisper.cpp model file (.bin) — required for auto_caption.' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'media_audio_edit',
+    description: 'Edit audio: trim, convert format, merge files, adjust volume, change speed, extract from video, reverse, fade in/out. Requires ffmpeg.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        input: { type: 'string', description: 'Absolute path to the input audio (or video for extract). Not required for merge.' },
+        action: { type: 'string', enum: ['trim', 'convert', 'merge', 'volume', 'speed', 'extract', 'reverse', 'fade'], description: 'The edit action.' },
+        start: { type: 'string', description: 'Start time (trim): "00:00:05" or "5".' },
+        end: { type: 'string', description: 'End time (trim): "00:00:15".' },
+        duration: { type: 'string', description: 'Duration (trim): "10".' },
+        format: { type: 'string', description: 'Output format: mp3, wav, ogg, flac, aac, m4a (convert/extract).' },
+        files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths to merge (merge).' },
+        volume: { type: 'string', description: 'Volume: "1.5" (150%), "0.5" (50%), or "10dB", "-5dB".' },
+        speedFactor: { type: 'number', description: 'Speed: 0.5 = half, 2 = double (speed).' },
+        fadeType: { type: 'string', enum: ['in', 'out', 'both'], description: 'Fade direction (fade).' },
+        fadeDuration: { type: 'number', description: 'Fade duration in seconds (fade). Default: 3.' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'media_info',
+    description: 'Get metadata about any media file: duration, resolution, codec, bitrate, channels, etc. Requires ffprobe.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        input: { type: 'string', description: 'Absolute path to the media file.' },
+      },
+      required: ['input'],
+    },
+  },
+  {
+    name: 'media_video_understand',
+    description: 'Analyse a video before editing it. Extracts frames at intervals and (when a whisper model is supplied) transcribes the audio, returning a structured timeline of what is shown and said. Requires ffmpeg; transcription additionally needs whisper.cpp + a model file.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        input: { type: 'string', description: 'Absolute path to the video file.' },
+        frameInterval: { type: 'number', description: 'Seconds between extracted frames. Default: 3.' },
+        maxFrames: { type: 'number', description: 'Maximum number of frames to extract. Default: 30.' },
+        whisperModel: { type: 'string', description: 'Absolute path to a whisper.cpp model file (.bin). When supplied, the audio is transcribed and merged into the timeline.' },
+      },
+      required: ['input'],
+    },
+  },
+  {
+    name: 'media_voice_clone',
+    description: 'Synthesise speech in a reference voice using F5-TTS. Requires a Python interpreter with the f5-tts and soundfile packages. You MUST supply a reference audio sample and its transcript — there is no built-in voice.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        text: { type: 'string', description: 'Text to speak in the cloned voice. Keep it short (~15 words) for best quality.' },
+        refAudio: { type: 'string', description: 'Absolute path to the reference audio sample (required).' },
+        refText: { type: 'string', description: 'Transcript of the reference audio (required).' },
+        pythonBin: { type: 'string', description: 'Optional absolute path to a Python interpreter with F5-TTS installed.' },
+        device: { type: 'string', description: 'Compute device for F5-TTS: cpu, cuda, mps. Default: cpu.' },
+      },
+      required: ['text', 'refAudio', 'refText'],
+    },
+  },
   // ─── Persistent agent memory ───────────────────────────────────────
   {
     name: 'memory',
@@ -3350,6 +3526,143 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
     case 'call_cancel': {
       if (!args.id) throw new Error('id is required');
       const result = await apiRequest('POST', `/calls/${encodeURIComponent(String(args.id))}/cancel`);
+      return JSON.stringify(result, null, 2);
+    }
+
+    // ─── Media toolset ───────────────────────────────────────────────
+    // Thin clients of the /media/* API routes. The API delegates to the
+    // core MediaManager, which feature-detects each external binary and
+    // returns a 503 with an actionable install hint when one is missing.
+    case 'media_capabilities': {
+      const suffix = args.refresh === true ? '?refresh=true' : '';
+      const result = await apiRequest('GET', `/media/capabilities${suffix}`);
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_tts': {
+      const result = await apiRequest('POST', '/media/tts', {
+        text: args.text,
+        voice: args.voice,
+        rate: args.rate,
+        pitch: args.pitch,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_tts_voices': {
+      const result = await apiRequest('GET', '/media/voices');
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_image_edit': {
+      const result = await apiRequest('POST', '/media/image', {
+        input: args.input,
+        action: args.action,
+        width: args.width,
+        height: args.height,
+        angle: args.angle,
+        format: args.format,
+        quality: args.quality,
+        text: args.text,
+        position: args.position,
+        fontSize: args.fontSize,
+        fontColor: args.fontColor,
+        blurRadius: args.blurRadius,
+        direction: args.direction,
+        offsetX: args.offsetX,
+        offsetY: args.offsetY,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_video_edit': {
+      const result = await apiRequest('POST', '/media/video', {
+        input: args.input,
+        action: args.action,
+        start: args.start,
+        end: args.end,
+        duration: args.duration,
+        timestamp: args.timestamp,
+        interval: args.interval,
+        format: args.format,
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+        crf: args.crf,
+        audioPath: args.audioPath,
+        speedFactor: args.speedFactor,
+        secondInput: args.secondInput,
+        transitionType: args.transitionType,
+        transitionDuration: args.transitionDuration,
+        text: args.text,
+        fontSize: args.fontSize,
+        fontColor: args.fontColor,
+        textPosition: args.textPosition,
+        textBg: args.textBg,
+        textStart: args.textStart,
+        textEnd: args.textEnd,
+        overlayOpacity: args.overlayOpacity,
+        overlayScale: args.overlayScale,
+        watermarkPosition: args.watermarkPosition,
+        watermarkPath: args.watermarkPath,
+        pipWidth: args.pipWidth,
+        pipPosition: args.pipPosition,
+        splitDirection: args.splitDirection,
+        zoomDirection: args.zoomDirection,
+        zoomDuration: args.zoomDuration,
+        zoomFactor: args.zoomFactor,
+        files: args.files,
+        bgVolume: args.bgVolume,
+        fgVolume: args.fgVolume,
+        colorPreset: args.colorPreset,
+        lutPath: args.lutPath,
+        captionColor: args.captionColor,
+        captionFontSize: args.captionFontSize,
+        whisperModel: args.whisperModel,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_audio_edit': {
+      const result = await apiRequest('POST', '/media/audio', {
+        input: args.input,
+        action: args.action,
+        start: args.start,
+        end: args.end,
+        duration: args.duration,
+        format: args.format,
+        files: args.files,
+        volume: args.volume,
+        speedFactor: args.speedFactor,
+        fadeType: args.fadeType,
+        fadeDuration: args.fadeDuration,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_info': {
+      const result = await apiRequest('POST', '/media/info', { input: args.input });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_video_understand': {
+      const result = await apiRequest('POST', '/media/understand', {
+        input: args.input,
+        frameInterval: args.frameInterval,
+        maxFrames: args.maxFrames,
+        whisperModel: args.whisperModel,
+      });
+      return JSON.stringify(result, null, 2);
+    }
+
+    case 'media_voice_clone': {
+      const result = await apiRequest('POST', '/media/voice-clone', {
+        text: args.text,
+        refAudio: args.refAudio,
+        refText: args.refText,
+        pythonBin: args.pythonBin,
+        device: args.device,
+      });
       return JSON.stringify(result, null, 2);
     }
 

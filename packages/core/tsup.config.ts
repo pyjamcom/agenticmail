@@ -27,5 +27,10 @@ export default defineConfig({
   dts: true,
   clean: true,
   target: 'node22',
-  external: ['node:*'],
+  // `node-edge-tts` is an OPTIONAL peer dependency, loaded only on
+  // demand by the media toolset (tts_generate). Marking it external
+  // keeps esbuild from trying to bundle it when it isn't installed —
+  // the media module feature-detects it at runtime and degrades
+  // gracefully with an install hint when it is absent.
+  external: ['node:*', 'node-edge-tts'],
 });

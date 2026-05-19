@@ -2690,6 +2690,294 @@ WHERE filters support operators: {column: value} for equality, {column: {$gt: 5,
     },
   });
 
+  // ─── Media toolset ─────────────────────────────────────────────────
+  // Local, opt-in media tools — text-to-speech, image / video / audio
+  // editing, probing, video understanding, voice cloning. Thin clients
+  // of the /media/* API routes; the API delegates to the core
+  // MediaManager, which drives external binaries (ffmpeg, ffprobe,
+  // ImageMagick, whisper.cpp, Python) via execFile argument arrays — no
+  // shell. None are bundled: a missing binary yields a clear error with
+  // an install hint, never a crash. Call agenticmail_media_capabilities
+  // first to see what is available.
+
+  reg('agenticmail_media_capabilities', {
+    description: 'Report which media binaries (ffmpeg, ffprobe, ImageMagick, whisper.cpp, Python, edge-tts) are installed and available. Media tools are opt-in — call this first to see which operations are possible.',
+    parameters: {
+      refresh: { type: 'boolean', description: 'Re-probe the binaries instead of using the cached result (e.g. after installing one).' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        const suffix = params.refresh === true ? '?refresh=true' : '';
+        return await apiRequest(c, 'GET', `/media/capabilities${suffix}`);
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_tts', {
+    description: 'Convert text to speech using Edge TTS (free, local — requires the optional node-edge-tts package). Returns an audio file path (OGG/Opus when ffmpeg is available, else MP3).',
+    parameters: {
+      text: { type: 'string', required: true, description: 'Text to speak.' },
+      voice: { type: 'string', description: 'Preset name (guy, jenny, aria, davis, tony, ana, brian, emma, ryan, sonia, william, natasha) or a full Edge voice id.' },
+      rate: { type: 'string', description: 'Speaking rate, e.g. "+20%" or "-10%".' },
+      pitch: { type: 'string', description: 'Pitch shift, e.g. "+5Hz" or "-10Hz".' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'POST', '/media/tts', {
+          text: params.text,
+          voice: params.voice,
+          rate: params.rate,
+          pitch: params.pitch,
+        });
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_tts_voices', {
+    description: 'List the available text-to-speech voice presets.',
+    parameters: {},
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'GET', '/media/voices');
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_image_edit', {
+    description: 'Edit an image: resize, crop, rotate, convert format, compress, overlay text, flip, blur, sharpen, grayscale. Requires ImageMagick.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the input image.' },
+      action: { type: 'string', required: true, description: 'resize | crop | rotate | convert | compress | text_overlay | flip | blur | sharpen | grayscale' },
+      width: { type: 'number', description: 'Target width in pixels (resize/crop).' },
+      height: { type: 'number', description: 'Target height in pixels (resize/crop).' },
+      angle: { type: 'number', description: 'Rotation angle in degrees (rotate).' },
+      format: { type: 'string', description: 'Output format: png, jpg, webp, gif, bmp, tiff (convert).' },
+      quality: { type: 'number', description: 'JPEG/WebP quality 1-100 (compress). Default: 80.' },
+      text: { type: 'string', description: 'Text to overlay (text_overlay).' },
+      position: { type: 'string', description: 'Text position: north, south, center, northeast, etc. Default: south.' },
+      fontSize: { type: 'number', description: 'Font size in points (text_overlay). Default: 36.' },
+      fontColor: { type: 'string', description: 'Text colour (text_overlay). Default: white.' },
+      blurRadius: { type: 'number', description: 'Blur radius (blur). Default: 5.' },
+      direction: { type: 'string', description: 'Flip direction: horizontal or vertical. Default: horizontal.' },
+      offsetX: { type: 'number', description: 'Crop X offset from top-left. Default: 0.' },
+      offsetY: { type: 'number', description: 'Crop Y offset from top-left. Default: 0.' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'POST', '/media/image', {
+          input: params.input,
+          action: params.action,
+          width: params.width,
+          height: params.height,
+          angle: params.angle,
+          format: params.format,
+          quality: params.quality,
+          text: params.text,
+          position: params.position,
+          fontSize: params.fontSize,
+          fontColor: params.fontColor,
+          blurRadius: params.blurRadius,
+          direction: params.direction,
+          offsetX: params.offsetX,
+          offsetY: params.offsetY,
+        });
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_video_edit', {
+    description: 'Edit a video. Basic: trim, extract_frame, extract_frames, convert, gif, compress, resize, add_audio, remove_audio, speed. Cinematic: color_grade, transition, text_overlay, picture_in_picture, split_screen, ken_burns, slow_motion, watermark, concatenate, audio_mix, auto_caption. Requires ffmpeg (ImageMagick for text/captions, whisper.cpp for auto_caption).',
+    parameters: {
+      input: { type: 'string', description: 'Absolute path to the input video (or image for ken_burns). Not required for concatenate.' },
+      action: { type: 'string', required: true, description: 'trim | extract_frame | extract_frames | convert | gif | compress | resize | add_audio | remove_audio | speed | color_grade | transition | text_overlay | picture_in_picture | split_screen | ken_burns | slow_motion | watermark | concatenate | audio_mix | auto_caption' },
+      start: { type: 'string', description: 'Start time: "00:00:05" or "5".' },
+      end: { type: 'string', description: 'End time: "00:00:15" or "15".' },
+      duration: { type: 'string', description: 'Duration in seconds.' },
+      timestamp: { type: 'string', description: 'Timestamp for single frame extraction.' },
+      interval: { type: 'number', description: 'Seconds between extracted frames. Default: 1.' },
+      format: { type: 'string', description: 'Output format: mp4, webm, mov, avi, mkv.' },
+      width: { type: 'number', description: 'Target width.' },
+      height: { type: 'number', description: 'Target height.' },
+      fps: { type: 'number', description: 'Frame rate.' },
+      crf: { type: 'number', description: 'Quality 0-51, lower is better. Default: 28.' },
+      audioPath: { type: 'string', description: 'Path to an audio file (add_audio, audio_mix).' },
+      speedFactor: { type: 'number', description: 'Speed multiplier: 0.5 = half, 2 = double.' },
+      secondInput: { type: 'string', description: 'Second video/image path (transition, picture_in_picture, split_screen).' },
+      transitionType: { type: 'string', description: 'Transition type: fade, wipeleft, slideright, circlecrop, etc. Default: fade.' },
+      transitionDuration: { type: 'number', description: 'Transition duration in seconds. Default: 1.' },
+      text: { type: 'string', description: 'Text for text_overlay.' },
+      fontSize: { type: 'number', description: 'Font size for text_overlay. Default: 72.' },
+      fontColor: { type: 'string', description: 'Text colour. Default: white.' },
+      textPosition: { type: 'string', description: 'Text position: center, top, bottom, top-left, top-right, bottom-left, bottom-right.' },
+      textBg: { type: 'string', description: 'Text background colour with opacity, e.g. "black@0.5".' },
+      textStart: { type: 'string', description: 'When text appears (seconds). Default: 0.' },
+      textEnd: { type: 'string', description: 'When text disappears (seconds).' },
+      overlayOpacity: { type: 'number', description: 'Watermark opacity 0.0-1.0. Default: 0.7.' },
+      overlayScale: { type: 'number', description: 'Watermark scale 0.0-1.0. Default: 0.2.' },
+      watermarkPosition: { type: 'string', description: 'Watermark position: top-left, top-right, bottom-left, bottom-right, center.' },
+      watermarkPath: { type: 'string', description: 'Path to the watermark/logo image.' },
+      pipWidth: { type: 'number', description: 'Picture-in-picture overlay width. Default: 320.' },
+      pipPosition: { type: 'string', description: 'PiP position: top-left, top-right, bottom-left, bottom-right.' },
+      splitDirection: { type: 'string', description: 'Split-screen direction: horizontal or vertical. Default: horizontal.' },
+      zoomDirection: { type: 'string', description: 'Ken Burns: zoom_in, zoom_out, pan_left, pan_right, pan_up, pan_down.' },
+      zoomDuration: { type: 'number', description: 'Ken Burns output duration in seconds. Default: 5.' },
+      zoomFactor: { type: 'number', description: 'Ken Burns zoom factor 1.0-3.0. Default: 1.5.' },
+      files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths (concatenate).' },
+      bgVolume: { type: 'string', description: 'Background audio volume for audio_mix. Default: 0.3.' },
+      fgVolume: { type: 'string', description: 'Foreground audio volume for audio_mix. Default: 1.0.' },
+      colorPreset: { type: 'string', description: 'Colour grade preset: warm, cool, vintage, cinematic, dramatic, bleach, noir, vivid, muted, golden_hour.' },
+      lutPath: { type: 'string', description: 'Path to a .cube LUT file for color_grade.' },
+      captionColor: { type: 'string', description: 'Auto-caption text colour. Default: white.' },
+      captionFontSize: { type: 'number', description: 'Auto-caption font size. Default: auto-scaled.' },
+      whisperModel: { type: 'string', description: 'Absolute path to a whisper.cpp model file (.bin) — required for auto_caption.' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'POST', '/media/video', {
+          input: params.input,
+          action: params.action,
+          start: params.start,
+          end: params.end,
+          duration: params.duration,
+          timestamp: params.timestamp,
+          interval: params.interval,
+          format: params.format,
+          width: params.width,
+          height: params.height,
+          fps: params.fps,
+          crf: params.crf,
+          audioPath: params.audioPath,
+          speedFactor: params.speedFactor,
+          secondInput: params.secondInput,
+          transitionType: params.transitionType,
+          transitionDuration: params.transitionDuration,
+          text: params.text,
+          fontSize: params.fontSize,
+          fontColor: params.fontColor,
+          textPosition: params.textPosition,
+          textBg: params.textBg,
+          textStart: params.textStart,
+          textEnd: params.textEnd,
+          overlayOpacity: params.overlayOpacity,
+          overlayScale: params.overlayScale,
+          watermarkPosition: params.watermarkPosition,
+          watermarkPath: params.watermarkPath,
+          pipWidth: params.pipWidth,
+          pipPosition: params.pipPosition,
+          splitDirection: params.splitDirection,
+          zoomDirection: params.zoomDirection,
+          zoomDuration: params.zoomDuration,
+          zoomFactor: params.zoomFactor,
+          files: params.files,
+          bgVolume: params.bgVolume,
+          fgVolume: params.fgVolume,
+          colorPreset: params.colorPreset,
+          lutPath: params.lutPath,
+          captionColor: params.captionColor,
+          captionFontSize: params.captionFontSize,
+          whisperModel: params.whisperModel,
+        });
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_audio_edit', {
+    description: 'Edit audio: trim, convert format, merge files, adjust volume, change speed, extract from video, reverse, fade in/out. Requires ffmpeg.',
+    parameters: {
+      input: { type: 'string', description: 'Absolute path to the input audio (or video for extract). Not required for merge.' },
+      action: { type: 'string', required: true, description: 'trim | convert | merge | volume | speed | extract | reverse | fade' },
+      start: { type: 'string', description: 'Start time (trim): "00:00:05" or "5".' },
+      end: { type: 'string', description: 'End time (trim): "00:00:15".' },
+      duration: { type: 'string', description: 'Duration (trim): "10".' },
+      format: { type: 'string', description: 'Output format: mp3, wav, ogg, flac, aac, m4a (convert/extract).' },
+      files: { type: 'array', items: { type: 'string' }, description: 'Array of file paths to merge (merge).' },
+      volume: { type: 'string', description: 'Volume: "1.5" (150%), "0.5" (50%), or "10dB", "-5dB".' },
+      speedFactor: { type: 'number', description: 'Speed: 0.5 = half, 2 = double (speed).' },
+      fadeType: { type: 'string', description: 'Fade direction: in, out, or both (fade).' },
+      fadeDuration: { type: 'number', description: 'Fade duration in seconds (fade). Default: 3.' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'POST', '/media/audio', {
+          input: params.input,
+          action: params.action,
+          start: params.start,
+          end: params.end,
+          duration: params.duration,
+          format: params.format,
+          files: params.files,
+          volume: params.volume,
+          speedFactor: params.speedFactor,
+          fadeType: params.fadeType,
+          fadeDuration: params.fadeDuration,
+        });
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_info', {
+    description: 'Get metadata about any media file: duration, resolution, codec, bitrate, channels, etc. Requires ffprobe.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the media file.' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'POST', '/media/info', { input: params.input });
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_video_understand', {
+    description: 'Analyse a video before editing it. Extracts frames at intervals and (when a whisper model is supplied) transcribes the audio, returning a structured timeline of what is shown and said. Requires ffmpeg; transcription additionally needs whisper.cpp + a model file.',
+    parameters: {
+      input: { type: 'string', required: true, description: 'Absolute path to the video file.' },
+      frameInterval: { type: 'number', description: 'Seconds between extracted frames. Default: 3.' },
+      maxFrames: { type: 'number', description: 'Maximum number of frames to extract. Default: 30.' },
+      whisperModel: { type: 'string', description: 'Absolute path to a whisper.cpp model file (.bin). When supplied, the audio is transcribed and merged into the timeline.' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'POST', '/media/understand', {
+          input: params.input,
+          frameInterval: params.frameInterval,
+          maxFrames: params.maxFrames,
+          whisperModel: params.whisperModel,
+        });
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_media_voice_clone', {
+    description: 'Synthesise speech in a reference voice using F5-TTS. Requires a Python interpreter with the f5-tts and soundfile packages. You MUST supply a reference audio sample and its transcript — there is no built-in voice.',
+    parameters: {
+      text: { type: 'string', required: true, description: 'Text to speak in the cloned voice. Keep it short (~15 words) for best quality.' },
+      refAudio: { type: 'string', required: true, description: 'Absolute path to the reference audio sample.' },
+      refText: { type: 'string', required: true, description: 'Transcript of the reference audio.' },
+      pythonBin: { type: 'string', description: 'Optional absolute path to a Python interpreter with F5-TTS installed.' },
+      device: { type: 'string', description: 'Compute device for F5-TTS: cpu, cuda, mps. Default: cpu.' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        return await apiRequest(c, 'POST', '/media/voice-clone', {
+          text: params.text,
+          refAudio: params.refAudio,
+          refText: params.refText,
+          pythonBin: params.pythonBin,
+          device: params.device,
+        });
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
   // ─── Persistent agent memory ───────────────────────────────────────
   // Long-term, evolving knowledge that survives across every conversation
   // — the same universal memory the MCP `memory*` tools expose and that a

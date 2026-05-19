@@ -379,6 +379,42 @@ export {
 // Setup & Dependencies
 export { SetupManager, DependencyChecker, DependencyInstaller, ServiceManager, type ServiceStatus, type DependencyStatus, type InstallProgress, type SetupConfig, type SetupResult } from './setup/index.js';
 
+// Media toolset — text-to-speech, image / video / audio editing, media
+// probing, video understanding, and reference-voice cloning. The work
+// is done by external system binaries (ffmpeg, ffprobe, ImageMagick,
+// whisper.cpp, Python) invoked via execFile with argument arrays — no
+// shell. None are bundled; every operation feature-detects the binary
+// it needs and degrades gracefully with an actionable install hint.
+// See packages/core/src/media/* for the design.
+export {
+  MediaManager,
+  detectBinary,
+  requireBinary,
+  requireWhisperModel,
+  getMediaCapabilities,
+  clearMediaCapabilityCache,
+} from './media/index.js';
+export type {
+  MediaManagerOptions,
+  MediaBinary,
+  MediaCapability,
+  MediaCapabilityReport,
+  MediaFileResult,
+  MediaInfoResult,
+  MediaStreamInfo,
+  TtsGenerateOptions,
+  ImageAction,
+  ImageEditOptions,
+  VideoAction,
+  VideoEditOptions,
+  AudioAction,
+  AudioEditOptions,
+  VideoUnderstandOptions,
+  VideoTimelineEntry,
+  VideoUnderstandResult,
+  VoiceCloneOptions,
+} from './media/index.js';
+
 // Layered wake-context system (thread cache + agent memory).
 // See packages/core/src/threading/* for the design.
 export {

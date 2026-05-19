@@ -33,6 +33,15 @@
 
 ---
 
+### ✨ What's new — media toolset (unreleased)
+
+A local, opt-in media / video-editing toolset for AgenticMail agents.
+
+- **Nine media tools.** `media_tts` / `media_tts_voices` (Edge text-to-speech), `media_image_edit`, `media_video_edit`, `media_audio_edit`, `media_info`, `media_video_understand`, `media_voice_clone`, and `media_capabilities`. Available as MCP `media_*` tools and OpenClaw `agenticmail_media_*` tools, both thin clients of new `/media/*` API routes over a core `MediaManager`.
+- **Cinematic video editing.** Beyond trim/convert/compress: color grading presets, crossfade/wipe transitions, timed text overlays, picture-in-picture, split screen, Ken Burns, frame-interpolated slow motion, watermarks, concatenation, audio mixing, and whisper.cpp-driven auto-captions.
+- **Gracefully degrading.** The underlying binaries (ffmpeg, ffprobe, ImageMagick, whisper.cpp, Python) are not bundled — every tool feature-detects the binary it needs and returns an actionable install hint if it is missing. The server never crashes. A `media` block on `/health` and the `media_capabilities` tool surface what is available.
+- **Safe by construction.** Every binary is invoked via `execFile` with an argument array — no shell, no string interpolation. Untrusted input paths are validated (no control characters, no leading-dash flag-injection, must exist); numeric options are clamped; every call carries a bounded timeout and output buffer; output files land only inside the configured media directory.
+
 ### ✨ What's new in 0.9.54
 
 Twilio joins 46elks as a phone transport provider.
@@ -284,6 +293,17 @@ That's a real multi-agent thread captured in the REPL — the host kicked off on
 - **Operator channel** — carries `ask_operator` notifications and approvals, so a phone agent can reach you on Telegram mid-call
 - **Secrets protected** — bot tokens encrypted at rest, redacted from every log line and error
 
+### Media Toolset
+- **Nine local media tools** — `media_tts`, `media_tts_voices`, `media_image_edit`, `media_video_edit`, `media_audio_edit`, `media_info`, `media_video_understand`, `media_voice_clone`, plus `media_capabilities`
+- **Text-to-speech** — synthesise speech with Edge TTS (twelve voice presets); returns OGG/Opus, ready to send as a voice note
+- **Image editing** — resize, crop, rotate, convert, compress, text overlay, flip, blur, sharpen, grayscale (ImageMagick)
+- **Video editing** — basic (trim, GIF, compress, resize, add/remove audio, speed) and cinematic (color grading, transitions, captions, picture-in-picture, split screen, Ken Burns, slow motion, watermark, concatenate, auto-caption) — all via ffmpeg
+- **Audio editing** — trim, convert, merge, volume, speed, extract-from-video, reverse, fade
+- **Video understanding** — extract frames + transcribe audio (whisper.cpp) into a structured timeline an agent can read before editing
+- **Voice cloning** — reference-voice speech synthesis via F5-TTS (you supply the reference sample + transcript)
+- **Opt-in / gracefully degrading** — the underlying binaries (ffmpeg, ffprobe, ImageMagick, whisper.cpp, Python) are **not bundled**; every tool feature-detects the binary it needs and returns a clear, actionable install hint when one is absent — the server never crashes. Call `media_capabilities` (or read the `/health` `media` block) to see what is available
+- **Safe by construction** — every binary is invoked via `execFile` with an argument array (never a shell); untrusted input paths are validated (no control characters, no leading-dash flag-injection, must exist) and output files land only inside the configured media directory
+
 ### Persistent Agent Memory
 - **Long-term, evolving knowledge** — each agent has a categorised memory (knowledge, preference, correction, skill, reflection, …) that survives across every conversation
 - **Confidence + decay** — entries carry a confidence score that decays for unaccessed knowledge; `critical` entries never decay; low-confidence and expired entries are pruned
@@ -300,8 +320,8 @@ That's a real multi-agent thread captured in the REPL — the host kicked off on
 - **Structured RPC** — sub-agents return JSON, not raw text
 
 ### Integrations
-- **MCP server** — 80+ tools for any MCP-compatible AI client
-- **OpenClaw plugin** — 73 tools with skill definition and system prompt guidelines
+- **MCP server** — 90+ tools for any MCP-compatible AI client
+- **OpenClaw plugin** — 80+ tools with skill definition and system prompt guidelines
 - **REST API** — 75+ endpoints, OpenAPI-style, Bearer token auth
 - **SSE events** — real-time inbox notifications via Server-Sent Events
 - **Interactive CLI** — 44 shell commands with arrow key navigation, body previews, retry logic

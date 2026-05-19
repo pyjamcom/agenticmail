@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.56] - 2026-05-20
+
+### Added — media toolset
+
+AgenticMail agents get a local media / video-editing toolset, ported
+and adapted from the Fola media tooling.
+
+- **Nine media tools** — `media_tts` / `media_tts_voices` (Edge
+  text-to-speech), `media_image_edit`, `media_video_edit`,
+  `media_audio_edit`, `media_info`, `media_video_understand`,
+  `media_voice_clone`, and `media_capabilities`. Exposed as MCP
+  `media_*` tools and OpenClaw `agenticmail_media_*` tools — thin
+  clients of new `/media/*` API routes over a core `MediaManager`.
+- **Cinematic video editing** — beyond trim / convert / compress:
+  colour grading, transitions, timed text overlays, picture-in-
+  picture, split screen, Ken Burns, slow motion, watermarks,
+  concatenation, audio mixing, and whisper.cpp auto-captions.
+- **Opt-in, gracefully degrading** — the underlying binaries (ffmpeg,
+  ffprobe, ImageMagick, whisper.cpp, Python) are NOT bundled. Every
+  tool feature-detects the binary it needs and returns an actionable
+  install hint when it is missing — the server never crashes. A
+  `media` block on `/health` and the `media_capabilities` tool report
+  what is available.
+- **Safe by construction** — every binary is invoked via `execFile`
+  with an argument array (no shell, no string interpolation).
+  Untrusted input paths are validated (no control characters, no
+  leading-dash flag-injection, must exist); numeric options are
+  clamped; every call carries a bounded timeout and output buffer;
+  output files land only inside the configured media directory.
+
+1087 tests pass (up from 1045); full monorepo build green. The media
+tools require their system binaries to be installed locally — that is
+surfaced, not assumed.
+
 ## [0.9.55] - 2026-05-20
 
 ### Added — setup & onboarding for the new calling features

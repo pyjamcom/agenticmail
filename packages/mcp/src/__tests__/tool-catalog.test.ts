@@ -100,6 +100,20 @@ describe('tool catalogue ↔ tool definitions', () => {
     ]);
   });
 
+  it('media set exposes the media toolset surface', () => {
+    expect(TOOL_SETS.media).toEqual([
+      'media_capabilities',
+      'media_tts',
+      'media_tts_voices',
+      'media_image_edit',
+      'media_video_edit',
+      'media_audio_edit',
+      'media_info',
+      'media_video_understand',
+      'media_voice_clone',
+    ]);
+  });
+
   it('phone_transport_setup advertises both 46elks and twilio providers', () => {
     const tool = toolDefinitions.find(t => t.name === 'phone_transport_setup');
     expect(tool, 'phone_transport_setup must be defined').toBeTruthy();

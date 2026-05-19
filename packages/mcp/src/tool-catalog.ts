@@ -4,8 +4,8 @@
  *
  * # Why this exists
  *
- * Loading all 84 tool schemas into a Claude Code subagent's context costs
- * ~10K tokens per spawn — most of it never used. To stay cheap, subagents
+ * Loading the full tool schema set into a Claude Code subagent's context
+ * costs ~10K tokens per spawn — most of it never used. To stay cheap, subagents
  * are launched with a small curated whitelist (the ESSENTIAL set below)
  * plus a `request_tools` meta-tool. When they need something outside the
  * curated set, they call `request_tools` to discover what exists, then
@@ -164,6 +164,19 @@ export const TOOL_SETS = {
     'telegram_poll',
   ],
 
+  /** Media toolset — TTS, image/video/audio editing, probing, understanding. */
+  media: [
+    'media_capabilities',
+    'media_tts',
+    'media_tts_voices',
+    'media_image_edit',
+    'media_video_edit',
+    'media_audio_edit',
+    'media_info',
+    'media_video_understand',
+    'media_voice_clone',
+  ],
+
   /** Account admin (master-key territory — create/delete accounts, cleanup). */
   account_admin: [
     'create_account',
@@ -220,6 +233,7 @@ export const SET_DESCRIPTIONS: Record<ToolSetName, string> = {
   sms: 'SMS / voice — send/read/setup/parse/record',
   phone: 'Phone call-control — setup/capabilities/start/status/transcript/cancel',
   telegram: 'Telegram channel — bot setup, send/list messages, poll for updates',
+  media: 'Media toolset — text-to-speech, image/video/audio editing, probing, video understanding, voice cloning (opt-in, needs ffmpeg/ImageMagick/whisper)',
   account_admin: 'Account admin — create/delete/stop/resume agents, cleanup (master key required)',
   storage: 'File storage for an agent',
   memory: 'Persistent agent memory — remember/recall/reflect, ranked context digest, stats',

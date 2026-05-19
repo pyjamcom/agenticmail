@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { StalwartAdmin } from '@agenticmail/core';
+import { getMediaCapabilities, type StalwartAdmin } from '@agenticmail/core';
 
 const PKG_VERSION = (() => {
   try {
@@ -24,7 +24,7 @@ const ABOUT = {
   license: 'MIT',
   repository: 'https://github.com/agenticmail/agenticmail',
   contributing: 'Contributions and feature requests welcome! Visit the GitHub repo to open issues, suggest features, or submit pull requests.',
-  tools: 54,
+  tools: 63,
   features: {
     email: {
       summary: 'Full email lifecycle — send, receive, reply, forward, search, batch operations',
@@ -79,6 +79,16 @@ const ABOUT = {
         'Agent cannot bypass security guardrails — architectural enforcement, not just prompt rules',
       ],
     },
+    media: {
+      summary: 'Local, opt-in media toolset — text-to-speech, image / video / audio editing, probing, video understanding, voice cloning',
+      highlights: [
+        'Eight tools: tts_generate, tts_list_voices, image_edit, video_edit, audio_edit, media_info, video_understand, voice_clone',
+        'Cinematic video ops — color grading, transitions, captions, picture-in-picture, Ken Burns, slow motion, watermarks',
+        'Drives local binaries (ffmpeg, ImageMagick, whisper.cpp) — no API keys, no cloud upload',
+        'Gracefully degrading — every tool feature-detects its binary and returns an actionable install hint when absent; the server never crashes',
+        'Check availability any time with media_capabilities or the /health media block',
+      ],
+    },
   },
   impact: {
     tokenSavings: {
@@ -96,6 +106,25 @@ const ABOUT = {
   },
 };
 
+/**
+ * Compact media capability summary for the /health response. Never
+ * throws — binary detection is fully wrapped in @agenticmail/core, so
+ * a probe failure simply reports the binary as unavailable.
+ */
+function mediaCapabilitySummary(): {
+  ready: boolean;
+  binaries: Record<string, boolean>;
+} {
+  try {
+    const report = getMediaCapabilities();
+    const binaries: Record<string, boolean> = {};
+    for (const cap of report.capabilities) binaries[cap.binary] = cap.available;
+    return { ready: report.ready, binaries };
+  } catch {
+    return { ready: false, binaries: {} };
+  }
+}
+
 export function createHealthRoutes(stalwart: StalwartAdmin): Router {
   const router = Router();
 
@@ -110,6 +139,12 @@ export function createHealthRoutes(stalwart: StalwartAdmin): Router {
           api: 'ok',
           stalwart: stalwartOk ? 'ok' : 'unreachable',
         },
+        // Media is an OPT-IN capability — the toolset works only when the
+        // local binaries are installed. Surfacing the detection here lets
+        // an operator/agent see at a glance what media ops are available
+        // without it ever affecting the overall health status (a missing
+        // ffmpeg is not a degraded mail server).
+        media: mediaCapabilitySummary(),
         timestamp: new Date().toISOString(),
       });
     } catch {
@@ -117,6 +152,7 @@ export function createHealthRoutes(stalwart: StalwartAdmin): Router {
         status: 'error',
         version: ABOUT.version,
         services: { api: 'ok', stalwart: 'unreachable' },
+        media: mediaCapabilitySummary(),
         timestamp: new Date().toISOString(),
       });
     }
