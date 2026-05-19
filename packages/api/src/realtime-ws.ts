@@ -281,54 +281,90 @@ async function handleTwilioConnection(
   deps: ConnectionDeps,
 ): Promise<void> {
   const { phoneManager } = deps;
-  const query = new URL(req.url ?? '', 'http://localhost').searchParams;
-  const missionId = query.get('missionId') ?? '';
-  const token = query.get('token') ?? '';
 
-  // Buffer frames that arrive in the (tiny) window between the socket
-  // opening and the bridge being constructed.
+  // Twilio Media Streams DROPS the query string from the `<Stream url=…>`
+  // when it opens the WebSocket — only the path survives. The mission id +
+  // per-mission token therefore have to ride on the `<Parameter>` tags the
+  // voice webhook embedded in the TwiML, which Twilio delivers inside the
+  // `start` event as `start.customParameters`. We defer mission resolution
+  // until that frame arrives. URL query is kept as a fallback for clients /
+  // tests that DO include it.
   const buffered: string[] = [];
   let bridge: RealtimeVoiceBridge | null = null;
+  let resolving = false;
+
+  // Idle-timeout: if no `start` frame arrives we are not on a real Twilio
+  // call — close the socket so we don't leak a connection.
+  const startTimer = setTimeout(() => {
+    if (!bridge) {
+      console.warn('[realtime-voice] Twilio: no start frame — closing idle connection');
+      try { carrierWs.close(); } catch { /* ignore */ }
+    }
+  }, HELLO_TIMEOUT_MS);
 
   carrierWs.on('message', (data) => {
     const raw = data.toString();
-    if (bridge) bridge.handleCarrierMessage(raw);
-    else buffered.push(raw);
+    if (bridge) { bridge.handleCarrierMessage(raw); return; }
+    buffered.push(raw);
+    if (resolving) return;
+    // Only the `start` frame carries customParameters — earlier `connected`
+    // frames are buffered and replayed once the bridge exists.
+    let parsed: Record<string, unknown> | undefined;
+    try { parsed = JSON.parse(raw); } catch { return; }
+    if (parsed?.event !== 'start') return;
+    resolving = true;
+    void resolveAndStart(parsed).catch((err) => {
+      console.error('[realtime-voice] Twilio connection handler failed:', (err as Error)?.message ?? err);
+      try { carrierWs.close(); } catch { /* ignore */ }
+    });
   });
-  carrierWs.on('close', () => bridge?.handleCarrierClose());
-  carrierWs.on('error', (err) => bridge?.handleCarrierError(err));
+  carrierWs.on('close', () => { clearTimeout(startTimer); bridge?.handleCarrierClose(); });
+  carrierWs.on('error', (err) => { clearTimeout(startTimer); bridge?.handleCarrierError(err); });
 
-  const mission = missionId ? phoneManager.getMission(missionId) : null;
-  if (!mission) {
-    throw new Error(`no phone mission matches Twilio stream missionId ${missionId || '(missing)'}`);
-  }
+  async function resolveAndStart(startMsg: Record<string, unknown>): Promise<void> {
+    // Twilio Media Streams payload: `start.customParameters` is a flat
+    // string→string map populated from the TwiML `<Parameter>` tags.
+    const start = (startMsg.start && typeof startMsg.start === 'object')
+      ? startMsg.start as Record<string, unknown>
+      : {};
+    const cp = (start.customParameters && typeof start.customParameters === 'object')
+      ? start.customParameters as Record<string, unknown>
+      : {};
+    const urlQuery = new URL(req.url ?? '', 'http://localhost').searchParams;
+    const missionId = (typeof cp.missionId === 'string' ? cp.missionId : urlQuery.get('missionId')) ?? '';
+    const token = (typeof cp.token === 'string' ? cp.token : urlQuery.get('token')) ?? '';
 
-  const transport = phoneManager.getPhoneTransportConfig(mission.agentId);
-  if (!transport || transport.provider !== 'twilio') {
-    throw new Error('Twilio realtime stream: mission has no Twilio transport configured');
-  }
-  // Per-mission token auth (#43-H7) — recompute it the way the manager
-  // does and compare timing-safe. Uniform failure: just close.
-  if (!token || !safeEqual(token, missionWebhookToken(transport.webhookSecret, mission.id))) {
-    throw new Error('Twilio realtime stream failed token authentication');
-  }
+    const mission = missionId ? phoneManager.getMission(missionId) : null;
+    if (!mission) {
+      throw new Error(`no phone mission matches Twilio stream missionId ${missionId || '(missing)'}`);
+    }
 
-  if (!deps.config.openaiApiKey) {
-    phoneManager.recordRealtimeActivity(mission.id, [systemEntry(
-      'Realtime voice could not start — no OpenAI API key is configured (set OPENAI_API_KEY).',
-    )]);
-    throw new Error('OPENAI_API_KEY is not configured — cannot open a Realtime session');
-  }
+    const transport = phoneManager.getPhoneTransportConfig(mission.agentId);
+    if (!transport || transport.provider !== 'twilio') {
+      throw new Error('Twilio realtime stream: mission has no Twilio transport configured');
+    }
+    if (!token || !safeEqual(token, missionWebhookToken(transport.webhookSecret, mission.id))) {
+      throw new Error('Twilio realtime stream failed token authentication');
+    }
 
-  bridge = await startBridge({
-    mission,
-    carrierWs,
-    transport: createRealtimeTransport('twilio'),
-    deps,
-    getBridge: () => bridge,
-  });
-  for (const frame of buffered.splice(0)) {
-    bridge.handleCarrierMessage(frame);
+    if (!deps.config.openaiApiKey) {
+      phoneManager.recordRealtimeActivity(mission.id, [systemEntry(
+        'Realtime voice could not start — no OpenAI API key is configured (set OPENAI_API_KEY).',
+      )]);
+      throw new Error('OPENAI_API_KEY is not configured — cannot open a Realtime session');
+    }
+
+    clearTimeout(startTimer);
+    bridge = await startBridge({
+      mission,
+      carrierWs,
+      transport: createRealtimeTransport('twilio'),
+      deps,
+      getBridge: () => bridge,
+    });
+    for (const frame of buffered.splice(0)) {
+      bridge.handleCarrierMessage(frame);
+    }
   }
 }
 

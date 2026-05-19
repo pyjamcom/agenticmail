@@ -222,7 +222,13 @@ function buildWebhookUrl(config: PhoneTransportConfig, path: string, missionId: 
  * `ws://` for a localhost dev base).
  */
 function buildRealtimeStreamUrl(webhookBaseUrl: string, missionId: string, token: string): string {
-  const url = new URL(`${apiBaseUrl(webhookBaseUrl)}${TWILIO_REALTIME_WS_PATH}`);
+  // `TWILIO_REALTIME_WS_PATH` already includes the `/api/agenticmail` prefix
+  // (it is mounted on the root server, not under the api-base sub-app), so we
+  // join it directly onto `webhookBaseUrl` — going through `apiBaseUrl()`
+  // would double-prefix the path (`/api/agenticmail/api/agenticmail/...`) and
+  // Twilio's `<Stream>` would 404 on connect, dropping the call on pickup.
+  const root = webhookBaseUrl.replace(/\/+$/, '');
+  const url = new URL(`${root}${TWILIO_REALTIME_WS_PATH}`);
   url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
   url.searchParams.set('missionId', missionId);
   url.searchParams.set('token', token);

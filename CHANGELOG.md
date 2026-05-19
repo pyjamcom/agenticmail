@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.57] - 2026-05-19
+
+### Fixed — Twilio realtime voice end-to-end
+
+Twilio outbound realtime voice calls now connect, the agent greets
+first, and the conversation works end-to-end. Verified against a real
+Twilio number → real cellular handset → OpenAI Realtime (`gpt-realtime`).
+
+- **Stream URL no longer double-prefixed** — `manager.ts` was joining
+  `TWILIO_REALTIME_WS_PATH` (which already includes `/api/agenticmail`)
+  via `apiBaseUrl()`, producing `wss://.../api/agenticmail/api/agenticmail/calls/twilio-stream`.
+  Twilio Media Streams 404'd on connect and the call dropped with the
+  default "application error" voice on pickup. Joined onto
+  `webhookBaseUrl` directly so the path is correct.
+- **`missionId` / `token` read from `customParameters`** — Twilio
+  Media Streams strips the URL query string from `<Stream url=…>`
+  before opening the WebSocket. The realtime handler now waits for
+  Twilio's `start` event and reads the IDs from `start.customParameters`
+  (set via `<Parameter>` children in TwiML), falling back to query if
+  present. Without this, every Twilio call dropped at pickup with
+  `no phone mission matches Twilio stream missionId (missing)`.
+- **OpenAI `format.rate` removed** — the GA Realtime API rejects
+  `session.audio.input.format.rate` as `Unknown parameter`. The format
+  object is `{type}` only — `audio/pcm` is implicitly 24 kHz PCM16,
+  `audio/pcmu` is implicitly 8 kHz G.711 µ-law. Removed `rate` from
+  `DEFAULT_REALTIME_AUDIO_FORMAT` and both transport adapters.
+- **Agent greets first on outbound calls** — `handleOpenAIOpen` now
+  sends `{type: "response.create"}` immediately after `session.update`.
+  With `server_vad` turn_detection, OpenAI waits for the caller to
+  speak before generating a response — but on an outbound call the
+  agent is the one placing the call and should speak first. Without
+  this, the operator picked up to silence.
+
 ## [0.9.56] - 2026-05-20
 
 ### Added — media toolset

@@ -81,8 +81,10 @@ describe('buildRealtimeSessionConfig', () => {
     expect(cfg.session.type).toBe('realtime');
     expect(cfg.session.model).toBe(DEFAULT_REALTIME_MODEL);
     expect(cfg.session.output_modalities).toEqual(['audio']);
-    expect(cfg.session.audio.input.format).toEqual({ type: 'audio/pcm', rate: 24000 });
-    expect(cfg.session.audio.output.format).toEqual({ type: 'audio/pcm', rate: 24000 });
+    // OpenAI's GA Realtime API rejects `format.rate` — the object is `{type}`
+    // only. `audio/pcm` is implicitly 24 kHz mono PCM16.
+    expect(cfg.session.audio.input.format).toEqual({ type: 'audio/pcm' });
+    expect(cfg.session.audio.output.format).toEqual({ type: 'audio/pcm' });
     expect(cfg.session.audio.input.turn_detection).toEqual({ type: 'server_vad' });
     expect(cfg.session.audio.output.voice).toBe(DEFAULT_REALTIME_VOICE);
     expect(cfg.session.instructions).toContain('Order a pizza');
@@ -120,13 +122,16 @@ describe('RealtimeVoiceBridge — 46elks → OpenAI', () => {
     expect(openai.sent).toHaveLength(0);
 
     bridge.handleOpenAIOpen();
-    // First OpenAI message is the session.update; then the buffered audio.
+    // First OpenAI message is the session.update; then a `response.create`
+    // kick so the agent speaks first on outbound calls (server_vad would
+    // otherwise wait for the caller); then the buffered audio.
     expect(openai.sent[0].type).toBe('session.update');
-    expect(openai.sent[1]).toEqual({ type: 'input_audio_buffer.append', audio: b64('caller speech one') });
+    expect(openai.sent[1]).toEqual({ type: 'response.create' });
+    expect(openai.sent[2]).toEqual({ type: 'input_audio_buffer.append', audio: b64('caller speech one') });
 
     // Subsequent audio is forwarded immediately.
     bridge.handleElksMessage({ t: 'audio', data: b64('caller speech two') });
-    expect(openai.sent[2]).toEqual({ type: 'input_audio_buffer.append', audio: b64('caller speech two') });
+    expect(openai.sent[3]).toEqual({ type: 'input_audio_buffer.append', audio: b64('caller speech two') });
   });
 
   it('only honours the first hello frame', () => {
@@ -303,7 +308,9 @@ describe('RealtimeVoiceBridge — function calling', () => {
     expect(created.item).toEqual({
       type: 'function_call_output', call_id: 'fc1', output: 'Reserved 8pm for two.',
     });
-    expect(openai.ofKind('response.create')).toHaveLength(1);
+    // Two `response.create` frames total — the initial outbound-call kick
+    // sent on `handleOpenAIOpen`, plus the one that follows the tool result.
+    expect(openai.ofKind('response.create')).toHaveLength(2);
   });
 
   it('parses a malformed arguments string to an empty object rather than crashing', async () => {

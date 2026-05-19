@@ -128,7 +128,9 @@ export class ElksRealtimeTransport implements RealtimeTransportAdapter {
   // Historical prefix — `elks-bye` / `elks-closed` etc. are matched by
   // long-standing call sites and tests; do not change.
   readonly endReasonPrefix = 'elks';
-  readonly openaiAudioFormat = { type: 'audio/pcm', rate: 24_000 };
+  // OpenAI rejects `format.rate` as an unknown parameter — `audio/pcm` is
+  // implicitly 24 kHz mono PCM16 in the current Realtime API.
+  readonly openaiAudioFormat = { type: 'audio/pcm' };
 
   constructor(
     private readonly listenFormat: ElksRealtimeAudioFormat = 'pcm_24000',
@@ -183,9 +185,9 @@ export class TwilioRealtimeTransport implements RealtimeTransportAdapter {
   readonly provider = 'twilio' as const;
   readonly endReasonPrefix = 'twilio';
   // µ-law @ 8 kHz — Twilio's native format; no transcode end to end.
-  // > `audio/pcmu` is the OpenAI GA Realtime µ-law format token; verify
-  // > against current OpenAI docs before the live smoke-test.
-  readonly openaiAudioFormat = { type: 'audio/pcmu', rate: 8_000 };
+  // OpenAI rejects `format.rate` as an unknown parameter; `audio/pcmu` is
+  // implicitly 8 kHz G.711 µ-law in the current Realtime API.
+  readonly openaiAudioFormat = { type: 'audio/pcmu' };
 
   /** Latched from the Twilio `start` frame; required on every outbound. */
   private streamSid = '';

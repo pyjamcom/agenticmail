@@ -207,7 +207,10 @@ export interface RealtimeSessionConfigOptions extends RealtimeInstructionOptions
 }
 
 /** Default OpenAI Realtime audio format — linear PCM @ 24 kHz (46elks). */
-export const DEFAULT_REALTIME_AUDIO_FORMAT = { type: 'audio/pcm', rate: REALTIME_AUDIO_SAMPLE_RATE } as const;
+// OpenAI's current Realtime API rejects `session.audio.input.format.rate` with
+// "Unknown parameter" — the format object is `{type}` only. `audio/pcm` is
+// implicitly 24 kHz mono PCM16, `audio/pcmu` is implicitly 8 kHz G.711 µ-law.
+export const DEFAULT_REALTIME_AUDIO_FORMAT = { type: 'audio/pcm' } as const;
 
 /**
  * Build the `session.update` client event for the GA `gpt-realtime`
@@ -447,6 +450,11 @@ export class RealtimeVoiceBridge {
     if (this.ended || this.openaiReady) return;
     this.openaiReady = true;
     this.safeSend(this.openai, this.sessionConfig);
+    // Kick the model to speak first. This is an outbound call — the agent is
+    // calling the operator — so the agent should greet, not wait for the
+    // caller. With `server_vad` turn_detection, OpenAI does not emit a
+    // response until the user speaks, unless we explicitly create one.
+    this.safeSend(this.openai, { type: 'response.create' });
     // Flush any audio that arrived during the connect window.
     for (const audio of this.pendingAudio.splice(0)) {
       this.safeSend(this.openai, { type: 'input_audio_buffer.append', audio });

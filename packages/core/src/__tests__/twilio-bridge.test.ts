@@ -76,13 +76,16 @@ describe('buildRealtimeSessionConfig — Twilio µ-law audio', () => {
     const cfg = buildRealtimeSessionConfig({
       task: 'x', audioFormat: transport.openaiAudioFormat,
     }) as any;
-    expect(cfg.session.audio.input.format).toEqual({ type: 'audio/pcmu', rate: 8000 });
-    expect(cfg.session.audio.output.format).toEqual({ type: 'audio/pcmu', rate: 8000 });
+    // OpenAI's GA Realtime API rejects `format.rate` — the format object is
+    // `{type}` only. `audio/pcmu` is implicitly 8 kHz G.711 µ-law.
+    expect(cfg.session.audio.input.format).toEqual({ type: 'audio/pcmu' });
+    expect(cfg.session.audio.output.format).toEqual({ type: 'audio/pcmu' });
   });
 
   it('still defaults to PCM @ 24 kHz when no audioFormat is supplied (46elks)', () => {
     const cfg = buildRealtimeSessionConfig({ task: 'x' }) as any;
-    expect(cfg.session.audio.input.format).toEqual({ type: 'audio/pcm', rate: 24000 });
+    // `audio/pcm` is implicitly 24 kHz mono PCM16 in the GA Realtime API.
+    expect(cfg.session.audio.input.format).toEqual({ type: 'audio/pcm' });
   });
 });
 
@@ -101,8 +104,11 @@ describe('RealtimeVoiceBridge — Twilio → OpenAI', () => {
     bridge.handleCarrierMessage(mediaFrame('caller speech'));
     expect(openai.sent).toHaveLength(0);
     bridge.handleOpenAIOpen();
+    // session.update → response.create (outbound-call greeting kick) →
+    // then the buffered audio that arrived during the connect window.
     expect(openai.sent[0].type).toBe('session.update');
-    expect(openai.sent[1]).toEqual({ type: 'input_audio_buffer.append', audio: b64('caller speech') });
+    expect(openai.sent[1]).toEqual({ type: 'response.create' });
+    expect(openai.sent[2]).toEqual({ type: 'input_audio_buffer.append', audio: b64('caller speech') });
   });
 
   it('only honours the first start frame', () => {
