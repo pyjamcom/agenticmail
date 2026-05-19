@@ -17,9 +17,48 @@ export type {
   ElksRealtimeOutboundMessage,
 } from './realtime.js';
 export {
+  TWILIO_MEDIA_SAMPLE_RATE,
+  buildTwilioClearMessage,
+  buildTwilioMarkMessage,
+  buildTwilioMediaMessage,
+  parseTwilioRealtimeMessage,
+} from './twilio-realtime.js';
+export type {
+  TwilioConnectedMessage,
+  TwilioMarkMessage,
+  TwilioMediaMessage,
+  TwilioRealtimeInboundMessage,
+  TwilioRealtimeOutboundMessage,
+  TwilioStartMessage,
+  TwilioStopMessage,
+} from './twilio-realtime.js';
+export {
+  buildTwilioSignature,
+  validateTwilioSignature,
+  buildTwilioStreamTwiML,
+  buildTwilioSayTwiML,
+  escapeXml,
+} from './twilio.js';
+export type { TwilioStreamTwiMLOptions } from './twilio.js';
+export {
+  ELKS_REALTIME_WS_PATH,
+  TWILIO_REALTIME_WS_PATH,
+} from './realtime-paths.js';
+export {
+  ElksRealtimeTransport,
+  TwilioRealtimeTransport,
+  createRealtimeTransport,
+} from './realtime-transport.js';
+export type {
+  RealtimeTransportAdapter,
+  RealtimeTransportProvider,
+  RealtimeInboundEvent,
+} from './realtime-transport.js';
+export {
   OPENAI_REALTIME_URL,
   DEFAULT_REALTIME_MODEL,
   DEFAULT_REALTIME_VOICE,
+  DEFAULT_REALTIME_AUDIO_FORMAT,
   REALTIME_AUDIO_SAMPLE_RATE,
   REALTIME_MAX_AUDIO_FRAME_BASE64,
   REALTIME_TOOL_CALL_TIMEOUT_MS,
@@ -78,6 +117,7 @@ export {
   PHONE_RATE_LIMIT_PER_HOUR,
   PHONE_MAX_CONCURRENT_MISSIONS,
   PHONE_MIN_WEBHOOK_SECRET_LENGTH,
+  PHONE_CALL_CONTROL_PROVIDERS,
   buildPhoneTransportConfig,
   redactPhoneTransportConfig,
 } from './manager.js';

@@ -1,10 +1,11 @@
-import { Router, type Request, type Response } from 'express';
+import { Router, urlencoded, type Request, type Response } from 'express';
 import {
   PhoneManager,
   PhoneWebhookAuthError,
   PhoneRateLimitError,
   buildPhoneTransportConfig,
   redactPhoneTransportConfig,
+  validateTwilioSignature,
   type AgenticMailConfig,
   type PhoneMissionState,
 } from '@agenticmail/core';
@@ -30,6 +31,54 @@ function readMissionId(req: Request): string {
     || requestString(req.query.mission)
     || requestString((req.body as Record<string, unknown> | undefined)?.missionId)
     || requestString((req.body as Record<string, unknown> | undefined)?.mission);
+}
+
+/**
+ * Reconstruct the absolute URL Twilio requested — the string Twilio
+ * computed its `X-Twilio-Signature` over. Twilio signs the exact URL it
+ * was configured with (scheme + host + path + query). We hand Twilio a
+ * URL rooted at the agent's configured `webhookBaseUrl`, so that base
+ * is the source of truth for scheme + host; the path and query come
+ * from the inbound request. This avoids trusting a proxy-mangled
+ * `Host` header.
+ */
+function twilioRequestUrl(req: Request, webhookBaseUrl: string): string {
+  const base = new URL(webhookBaseUrl);
+  const requested = new URL(req.originalUrl, `${base.protocol}//${base.host}`);
+  return requested.toString();
+}
+
+/**
+ * Collect a Twilio webhook's POST parameters as a flat string map — the
+ * input to the signature computation. Twilio sends
+ * `application/x-www-form-urlencoded`, so `req.body` is a flat object;
+ * array/object values (which Twilio never sends for a signed webhook)
+ * are coerced to strings defensively.
+ */
+function twilioFormParams(req: Request): Record<string, string> {
+  const body = (req.body && typeof req.body === 'object') ? req.body as Record<string, unknown> : {};
+  const params: Record<string, string> = {};
+  for (const [key, value] of Object.entries(body)) {
+    params[key] = typeof value === 'string' ? value : String(value);
+  }
+  return params;
+}
+
+/** Body keys carrying a token-bearing webhook URL (46elks + Twilio). */
+const WEBHOOK_URL_KEYS = ['voice_start', 'whenhangup', 'Url', 'StatusCallback'] as const;
+
+/**
+ * Replace every token-bearing webhook URL in an echoed provider-request
+ * body with a `[redacted-url]` placeholder, so a `/calls/start`
+ * response never leaks a per-mission webhook token. Provider-agnostic —
+ * keys absent for a given provider are skipped.
+ */
+function redactWebhookBody(body: Record<string, string>): Record<string, string> {
+  const out = { ...body };
+  for (const key of WEBHOOK_URL_KEYS) {
+    if (typeof out[key] === 'string') out[key] = '[redacted-url]';
+  }
+  return out;
 }
 
 function getAgent(req: Request, res: Response): { id: string; email: string } | null {
@@ -107,6 +156,72 @@ export function createPhoneWebhookRoutes(
       const mission = phoneManager.handleHangupWebhook(
         readMissionId(req), readWebhookToken(req), req.body ?? {},
       );
+      res.json({ success: true, mission });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  // ─── Twilio webhooks ────────────────────────────────────────────
+  //
+  // Twilio POSTs `application/x-www-form-urlencoded` (not JSON), so
+  // these routes carry their own `urlencoded` body parser. Two auth
+  // gates run in series, both fail-closed:
+  //   1. The per-mission HMAC token (#43-H7) on the URL — same gate the
+  //      46elks webhooks use; resolves + authenticates the mission and
+  //      funnels every failure into a uniform 403 (no enumeration
+  //      oracle, #43-H3).
+  //   2. The `X-Twilio-Signature` header — HMAC-SHA1 over the request
+  //      URL + sorted POST params, keyed by the Twilio auth token.
+  //      Validated timing-safe; a missing/forged signature is the SAME
+  //      uniform 403.
+  // The signature check needs the resolved mission's auth token, so it
+  // runs after token auth resolves the mission.
+  const twilioBody = urlencoded({ extended: false });
+
+  /**
+   * Resolve + fully authenticate a Twilio webhook: the per-mission
+   * token, then the `X-Twilio-Signature`. Throws {@link PhoneWebhookAuthError}
+   * for ANY failure so the responder maps it to a uniform 403.
+   */
+  function authenticateTwilioWebhook(req: Request): { missionId: string; token: string } {
+    const missionId = readMissionId(req);
+    const token = readWebhookToken(req);
+    // Resolve the mission's transport so we can verify the Twilio
+    // signature. getMission/getPhoneTransportConfig failing all collapse
+    // into the same uniform auth error the manager throws.
+    const mission = missionId ? phoneManager.getMission(missionId) : null;
+    const transport = mission ? phoneManager.getPhoneTransportConfig(mission.agentId) : null;
+    if (!mission || !transport || transport.provider !== 'twilio') {
+      throw new PhoneWebhookAuthError();
+    }
+    const signature = requestString(req.get('x-twilio-signature'));
+    const ok = validateTwilioSignature(
+      transport.password,
+      twilioRequestUrl(req, transport.webhookBaseUrl),
+      twilioFormParams(req),
+      signature,
+    );
+    if (!ok) throw new PhoneWebhookAuthError();
+    // The manager re-checks the per-mission token itself; pass it on.
+    return { missionId, token };
+  }
+
+  router.post('/calls/webhook/twilio/voice', twilioBody, (req: Request, res: Response) => {
+    try {
+      const { missionId, token } = authenticateTwilioWebhook(req);
+      const result = phoneManager.handleTwilioVoiceWebhook(missionId, token, req.body ?? {});
+      // Twilio expects a TwiML (XML) document back, not JSON.
+      res.type('text/xml').send(result.twiml);
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.post('/calls/webhook/twilio/status', twilioBody, (req: Request, res: Response) => {
+    try {
+      const { missionId, token } = authenticateTwilioWebhook(req);
+      const mission = phoneManager.handleTwilioStatusWebhook(missionId, token, req.body ?? {});
       res.json({ success: true, mission });
     } catch (err) {
       sendPhoneError(res, err);
@@ -195,8 +310,11 @@ export function createPhoneRoutes(
       res.json({
         success: true,
         mission: result.mission,
+        // Redact every token-bearing webhook URL in the echoed request,
+        // provider-agnostically: 46elks uses `voice_start`/`whenhangup`,
+        // Twilio uses `Url`/`StatusCallback`.
         providerRequest: result.providerRequest
-          ? { ...result.providerRequest, body: { ...result.providerRequest.body, voice_start: '[redacted-url]', whenhangup: '[redacted-url]' } }
+          ? { ...result.providerRequest, body: redactWebhookBody(result.providerRequest.body) }
           : undefined,
         providerResponse: result.providerResponse,
       });

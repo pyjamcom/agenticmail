@@ -1,28 +1,45 @@
 /**
  * Realtime voice WebSocket endpoint.
  *
- * This is the live-conversation half of the phone feature. 46elks
- * streams a phone call's audio to a "websocket number" whose
- * `websocket_url` points here; for each call 46elks opens a WebSocket
- * to `/api/agenticmail/calls/realtime`. This module accepts that
- * socket, matches it to the phone mission that placed the call, loads
+ * This is the live-conversation half of the phone feature. A phone
+ * carrier streams a call's audio to a WebSocket, which this module
+ * accepts, matches to the phone mission that placed the call, loads
  * that agent's persistent memory, opens an OpenAI Realtime
  * (`gpt-realtime`) session with the memory folded into its
  * instructions, and runs a {@link RealtimeVoiceBridge} between the two.
  *
- * Everything protocol-level lives in `@agenticmail/core`'s
- * `RealtimeVoiceBridge` (transport-agnostic, unit-tested). This file is
- * the thin `ws` plumbing: upgrade handling, mission resolution, token
- * auth, OpenAI socket creation, transcript persistence.
+ * Two carriers are supported, on two paths:
+ *
+ *   - 46elks ({@link ELKS_REALTIME_WS_PATH}) — 46elks opens a socket to
+ *     a "websocket number" whose `websocket_url` points here. The
+ *     mission is resolved from the `hello` frame's `callid`; the static
+ *     `?token=` on the URL is verified against the mission agent's
+ *     webhook secret. Audio is linear PCM @ 24 kHz.
+ *
+ *   - Twilio ({@link TWILIO_REALTIME_WS_PATH}) — a Twilio
+ *     `<Connect><Stream>` opens a Media Streams socket here. The
+ *     mission id + per-mission token ride on the connection URL query
+ *     string (placed there by the TwiML the phone webhook returned), so
+ *     the mission is resolved + authenticated UP FRONT, before Twilio's
+ *     `start` frame even arrives. Audio is G.711 µ-law @ 8 kHz —
+ *     OpenAI's GA Realtime API speaks µ-law natively, so the bridge
+ *     does NO transcoding for a Twilio call.
+ *
+ * Everything protocol-level lives in `@agenticmail/core` — the
+ * provider-pluggable `RealtimeVoiceBridge` plus its per-carrier
+ * {@link RealtimeTransportAdapter} (transport-agnostic, unit-tested).
+ * This file is the thin `ws` plumbing: upgrade handling, mission
+ * resolution, token auth, OpenAI socket creation, transcript
+ * persistence.
  *
  * Testing boundary: the end-to-end path needs a live `OPENAI_API_KEY`
- * and a provisioned 46elks websocket number, so it cannot be exercised
- * in CI. The bridge logic it depends on IS covered by unit tests
+ * and a provisioned carrier number, so it cannot be exercised in CI.
+ * The bridge logic it depends on IS covered by unit tests
  * (packages/core realtime-bridge tests). The glue here is deliberately
  * minimal so it is correct by inspection.
  */
 
-import { timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -35,6 +52,9 @@ import {
   buildOpenAIRealtimeUrl,
   DEFAULT_REALTIME_MODEL,
   parseElksRealtimeMessage,
+  createRealtimeTransport,
+  ELKS_REALTIME_WS_PATH,
+  TWILIO_REALTIME_WS_PATH,
   createToolExecutor,
   getDatetime,
   recallMemory,
@@ -53,6 +73,8 @@ import {
   type RealtimeBridgePort,
   type RealtimeToolDefinition,
   type RealtimeToolHandler,
+  type RealtimeTransportAdapter,
+  type RealtimeTransportProvider,
   type ToolExecutor,
   type PhoneCallMission,
   type PhoneMissionTranscriptEntry,
@@ -60,10 +82,15 @@ import {
 
 type Db = ReturnType<typeof import('@agenticmail/core').getDatabase>;
 
-/** Path the 46elks websocket number's `websocket_url` should point at. */
-export const REALTIME_WS_PATH = '/api/agenticmail/calls/realtime';
+/**
+ * Path the 46elks websocket number's `websocket_url` should point at.
+ * Re-exported from core so the API entry point keeps importing it from
+ * here unchanged.
+ */
+export const REALTIME_WS_PATH = ELKS_REALTIME_WS_PATH;
+export { ELKS_REALTIME_WS_PATH, TWILIO_REALTIME_WS_PATH } from '@agenticmail/core';
 
-/** A 46elks connection that never sends `hello` is dropped after this. */
+/** A carrier connection that never sends its first frame is dropped after this. */
 const HELLO_TIMEOUT_MS = 15_000;
 /** OpenAI socket must open within this window or the call is failed. */
 const OPENAI_CONNECT_TIMEOUT_MS = 15_000;
@@ -79,9 +106,9 @@ function safeEqual(a: string, b: string): boolean {
 interface RealtimeVoiceServer {
   /**
    * Try to handle an HTTP upgrade as a realtime-voice WebSocket.
-   * Returns true if the request path matched and was handled (the
-   * socket is now owned by this server); false if it should be left
-   * for another handler.
+   * Returns true if the request path matched a carrier endpoint and was
+   * handled (the socket is now owned by this server); false if it
+   * should be left for another handler.
    */
   tryHandleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean;
   /** Close the WebSocket server and every active bridge. */
@@ -90,24 +117,28 @@ interface RealtimeVoiceServer {
 
 /**
  * Build the realtime voice WebSocket server. Mounted on the HTTP
- * server's `upgrade` event by the API entry point.
+ * server's `upgrade` event by the API entry point. Serves both the
+ * 46elks and the Twilio Media Streams carrier paths.
  */
 export function createRealtimeVoiceServer(db: Db, config: AgenticMailConfig): RealtimeVoiceServer {
   const wss = new WebSocketServer({ noServer: true });
   const phoneManager = new PhoneManager(db as any, config.masterKey);
   const memory = new AgentMemoryManager(db as any);
 
-  wss.on('connection', (elksWs: WebSocket, req: IncomingMessage) => {
-    handleConnection(elksWs, req, { config, phoneManager, memory, db }).catch((err) => {
+  wss.on('connection', (carrierWs: WebSocket, req: IncomingMessage) => {
+    const path = (req.url ?? '').split('?')[0];
+    const provider: RealtimeTransportProvider = path === TWILIO_REALTIME_WS_PATH ? 'twilio' : '46elks';
+    const handler = provider === 'twilio' ? handleTwilioConnection : handleElksConnection;
+    handler(carrierWs, req, { config, phoneManager, memory, db }).catch((err) => {
       console.error('[realtime-voice] connection handler failed:', (err as Error)?.message ?? err);
-      try { elksWs.close(); } catch { /* ignore */ }
+      try { carrierWs.close(); } catch { /* ignore */ }
     });
   });
 
   return {
     tryHandleUpgrade(req, socket, head) {
       const path = (req.url ?? '').split('?')[0];
-      if (path !== REALTIME_WS_PATH) return false;
+      if (path !== ELKS_REALTIME_WS_PATH && path !== TWILIO_REALTIME_WS_PATH) return false;
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
       return true;
     },
@@ -124,18 +155,21 @@ interface ConnectionDeps {
   db: Db;
 }
 
+// ─── 46elks connection ──────────────────────────────────
+
 /**
  * Drive one 46elks media connection: buffer frames until the `hello`
- * arrives, resolve + authorise the mission, open OpenAI, and run the
- * bridge. The whole thing fails closed — any resolution/auth failure
- * just closes the 46elks socket (the caller hears the call drop).
+ * arrives, resolve + authorise the mission from its `callid`, open
+ * OpenAI, and run the bridge. The whole thing fails closed — any
+ * resolution/auth failure just closes the carrier socket (the caller
+ * hears the call drop).
  */
-async function handleConnection(
-  elksWs: WebSocket,
+async function handleElksConnection(
+  carrierWs: WebSocket,
   req: IncomingMessage,
   deps: ConnectionDeps,
 ): Promise<void> {
-  const { config, phoneManager, memory, db } = deps;
+  const { phoneManager } = deps;
 
   // The static token on the websocket_url query string. 46elks sends no
   // auth of its own, so this — plus an unguessable URL path — is the
@@ -152,14 +186,14 @@ async function handleConnection(
   const helloTimer = setTimeout(() => {
     if (!bridge) {
       console.warn('[realtime-voice] no hello frame — closing idle connection');
-      try { elksWs.close(); } catch { /* ignore */ }
+      try { carrierWs.close(); } catch { /* ignore */ }
     }
   }, HELLO_TIMEOUT_MS);
 
-  elksWs.on('message', (data) => {
+  carrierWs.on('message', (data) => {
     const raw = data.toString();
     if (bridge) {
-      bridge.handleElksMessage(raw);
+      bridge.handleCarrierMessage(raw);
       return;
     }
     buffered.push(raw);
@@ -168,17 +202,17 @@ async function handleConnection(
     resolving = true;
     void resolveAndStart(raw).catch((err) => {
       console.error('[realtime-voice] failed to start bridge:', (err as Error)?.message ?? err);
-      try { elksWs.close(); } catch { /* ignore */ }
+      try { carrierWs.close(); } catch { /* ignore */ }
     });
   });
 
-  elksWs.on('close', () => {
+  carrierWs.on('close', () => {
     clearTimeout(helloTimer);
-    bridge?.handleElksClose();
+    bridge?.handleCarrierClose();
   });
-  elksWs.on('error', (err) => {
+  carrierWs.on('error', (err) => {
     clearTimeout(helloTimer);
-    bridge?.handleElksError(err);
+    bridge?.handleCarrierError(err);
   });
 
   async function resolveAndStart(firstFrame: string): Promise<void> {
@@ -205,7 +239,7 @@ async function handleConnection(
       throw new Error('realtime voice connection failed token authentication');
     }
 
-    if (!config.openaiApiKey) {
+    if (!deps.config.openaiApiKey) {
       phoneManager.recordRealtimeActivity(mission.id, [systemEntry(
         'Realtime voice could not start — no OpenAI API key is configured (set OPENAI_API_KEY).',
       )]);
@@ -213,101 +247,207 @@ async function handleConnection(
     }
 
     clearTimeout(helloTimer);
-    await startBridge(mission);
+    bridge = await startBridge({
+      mission,
+      carrierWs,
+      transport: createRealtimeTransport('46elks'),
+      deps,
+      getBridge: () => bridge,
+    });
+    // Replay buffered frames (the hello + anything that arrived during
+    // resolution) into the bridge, in order.
+    for (const frame of buffered.splice(0)) {
+      bridge.handleCarrierMessage(frame);
+    }
+  }
+}
+
+// ─── Twilio connection ──────────────────────────────────
+
+/**
+ * Drive one Twilio Media Streams connection. Unlike 46elks, the mission
+ * is resolved UP FRONT from the connection URL query string: the TwiML
+ * the Twilio voice webhook returned put the mission id + per-mission
+ * token in the `<Stream>` URL. So we authenticate before a single
+ * media frame arrives, then run the bridge — Twilio's `connected` and
+ * `start` frames flow straight into it.
+ *
+ * Fails closed: a missing/forged token, an unknown mission, or a
+ * non-Twilio transport just closes the socket (the call drops).
+ */
+async function handleTwilioConnection(
+  carrierWs: WebSocket,
+  req: IncomingMessage,
+  deps: ConnectionDeps,
+): Promise<void> {
+  const { phoneManager } = deps;
+  const query = new URL(req.url ?? '', 'http://localhost').searchParams;
+  const missionId = query.get('missionId') ?? '';
+  const token = query.get('token') ?? '';
+
+  // Buffer frames that arrive in the (tiny) window between the socket
+  // opening and the bridge being constructed.
+  const buffered: string[] = [];
+  let bridge: RealtimeVoiceBridge | null = null;
+
+  carrierWs.on('message', (data) => {
+    const raw = data.toString();
+    if (bridge) bridge.handleCarrierMessage(raw);
+    else buffered.push(raw);
+  });
+  carrierWs.on('close', () => bridge?.handleCarrierClose());
+  carrierWs.on('error', (err) => bridge?.handleCarrierError(err));
+
+  const mission = missionId ? phoneManager.getMission(missionId) : null;
+  if (!mission) {
+    throw new Error(`no phone mission matches Twilio stream missionId ${missionId || '(missing)'}`);
   }
 
-  async function startBridge(mission: PhoneCallMission): Promise<void> {
-    // Render the agent's persistent memory and fold it + the mission
-    // task into the OpenAI Realtime session instructions. The model is
-    // told to treat the block as its own knowledge — so the call feels
-    // continuous with everything the agent has learned elsewhere.
-    let memoryContext = '';
-    try {
-      memoryContext = await memory.generateMemoryContext(mission.agentId, mission.task);
-    } catch (err) {
-      console.warn('[realtime-voice] memory context unavailable:', (err as Error)?.message ?? err);
-    }
+  const transport = phoneManager.getPhoneTransportConfig(mission.agentId);
+  if (!transport || transport.provider !== 'twilio') {
+    throw new Error('Twilio realtime stream: mission has no Twilio transport configured');
+  }
+  // Per-mission token auth (#43-H7) — recompute it the way the manager
+  // does and compare timing-safe. Uniform failure: just close.
+  if (!token || !safeEqual(token, missionWebhookToken(transport.webhookSecret, mission.id))) {
+    throw new Error('Twilio realtime stream failed token authentication');
+  }
 
-    const model = DEFAULT_REALTIME_MODEL;
+  if (!deps.config.openaiApiKey) {
+    phoneManager.recordRealtimeActivity(mission.id, [systemEntry(
+      'Realtime voice could not start — no OpenAI API key is configured (set OPENAI_API_KEY).',
+    )]);
+    throw new Error('OPENAI_API_KEY is not configured — cannot open a Realtime session');
+  }
 
-    // Build this connection's tool layer (v0.9.53). `tools` is declared
-    // on the OpenAI session; `executor` dispatches the model's calls to
-    // real implementations (ask_operator, web_search, recall_memory,
-    // get_datetime). The executor's `ask_operator` poll needs to abort
-    // if the call drops — `isCallEnded` lets it see the bridge state.
-    const tools = buildVoiceTools();
-    const executor = createVoiceToolExecutor({
-      mission, phoneManager, memory, config, db,
-      isCallEnded: () => bridge?.isEnded ?? false,
-    });
+  bridge = await startBridge({
+    mission,
+    carrierWs,
+    transport: createRealtimeTransport('twilio'),
+    deps,
+    getBridge: () => bridge,
+  });
+  for (const frame of buffered.splice(0)) {
+    bridge.handleCarrierMessage(frame);
+  }
+}
 
-    const sessionConfig = buildRealtimeSessionConfig({
+/**
+ * Recompute the per-mission webhook token (#43-H7) the
+ * {@link PhoneManager} derives — `HMAC-SHA256(webhookSecret, missionId)`.
+ * Kept in lockstep with the manager's `webhookToken`.
+ */
+function missionWebhookToken(webhookSecret: string, missionId: string): string {
+  return createHmac('sha256', webhookSecret).update(missionId).digest('hex');
+}
+
+// ─── Shared bridge startup ──────────────────────────────
+
+interface StartBridgeParams {
+  mission: PhoneCallMission;
+  carrierWs: WebSocket;
+  transport: RealtimeTransportAdapter;
+  deps: ConnectionDeps;
+  /** Late-bound getter — the bridge ref the caller is about to assign. */
+  getBridge: () => RealtimeVoiceBridge | null;
+}
+
+/**
+ * Construct the OpenAI side + the {@link RealtimeVoiceBridge} for a
+ * resolved mission. Provider-neutral — the only carrier-specific input
+ * is the {@link RealtimeTransportAdapter}, which also dictates the
+ * OpenAI session audio format (linear PCM @ 24 kHz for 46elks, µ-law @
+ * 8 kHz for Twilio, so no transcoding either way).
+ *
+ * Async: the agent's persistent memory is rendered BEFORE the OpenAI
+ * session config is built, so the memory is folded into the session
+ * `instructions` the model receives on its very first turn. Memory
+ * rendering is best-effort — a failure just proceeds with the base
+ * instructions.
+ */
+async function startBridge(params: StartBridgeParams): Promise<RealtimeVoiceBridge> {
+  const { mission, carrierWs, transport, deps, getBridge } = params;
+  const { config, phoneManager, memory, db } = deps;
+
+  const model = DEFAULT_REALTIME_MODEL;
+
+  // Render the agent's persistent memory and fold it + the mission task
+  // into the OpenAI Realtime session instructions. The model is told to
+  // treat the block as its own knowledge — so the call feels continuous
+  // with everything the agent has learned elsewhere.
+  let memoryContext = '';
+  try {
+    memoryContext = await memory.generateMemoryContext(mission.agentId, mission.task);
+  } catch (err) {
+    console.warn('[realtime-voice] memory context unavailable:', (err as Error)?.message ?? err);
+  }
+
+  // Build this connection's tool layer. `tools` is declared on the
+  // OpenAI session; `executor` dispatches the model's calls to real
+  // implementations. The executor's `ask_operator` poll needs to abort
+  // if the call drops — `isCallEnded` lets it see the bridge state.
+  const tools = buildVoiceTools();
+  const executor = createVoiceToolExecutor({
+    mission, phoneManager, memory, config, db,
+    isCallEnded: () => getBridge()?.isEnded ?? false,
+  });
+
+  const transcript: PhoneMissionTranscriptEntry[] = [];
+  const record = (entry: PhoneMissionTranscriptEntry) => transcript.push(entry);
+
+  const openaiWs = new WebSocket(buildOpenAIRealtimeUrl(model), {
+    headers: { Authorization: `Bearer ${config.openaiApiKey}` },
+  });
+
+  const bridge = new RealtimeVoiceBridge({
+    carrier: portFor(carrierWs),
+    openai: portFor(openaiWs),
+    transport,
+    sessionConfig: buildRealtimeSessionConfig({
       task: mission.task,
       memoryContext,
       model,
       tools,
-    });
-
-    const openaiWs = new WebSocket(buildOpenAIRealtimeUrl(model), {
-      headers: { Authorization: `Bearer ${config.openaiApiKey}` },
-    });
-
-    const transcript: PhoneMissionTranscriptEntry[] = [];
-    const record = (entry: PhoneMissionTranscriptEntry) => transcript.push(entry);
-
-    bridge = new RealtimeVoiceBridge({
-      elks: portFor(elksWs),
-      openai: portFor(openaiWs),
-      sessionConfig,
-      toolExecutor: executor,
-      onTranscript: (e) => record({ at: new Date().toISOString(), source: e.source, text: e.text, metadata: e.metadata }),
-      onEnd: ({ reason, pendingToolCalls }) => {
-        record({ at: new Date().toISOString(), source: 'system', text: `Realtime voice bridge ended (${reason}).` });
-        // Persist the whole transcript + mark the mission completed
-        // (the conversation actually happened). recordRealtimeActivity
-        // keeps a terminal mission terminal — no resurrection.
-        try {
-          phoneManager.recordRealtimeActivity(mission!.id, transcript.splice(0), 'completed');
-        } catch (err) {
-          console.error('[realtime-voice] transcript persist failed:', (err as Error)?.message ?? err);
-        }
-        // Callback-on-disconnect (plan §7): the call dropped with a tool
-        // call (an unanswered ask_operator query) still in flight. Flag
-        // the mission so the answer endpoint dials the caller back once
-        // the operator responds. flagCallbackPending re-checks for an
-        // actually-unanswered query, so this is safe to call broadly.
-        if (pendingToolCalls > 0) {
-          try {
-            phoneManager.flagCallbackPending(mission!.id);
-          } catch (err) {
-            console.error('[realtime-voice] callback flag failed:', (err as Error)?.message ?? err);
-          }
-        }
-      },
-    });
-
-    // Mark the mission connected up front so /calls reflects the live
-    // call even before the first transcript flush.
-    try { phoneManager.recordRealtimeActivity(mission.id, [], 'connected'); } catch { /* best effort */ }
-
-    const openaiConnectTimer = setTimeout(() => {
-      if (openaiWs.readyState === WebSocket.CONNECTING) {
-        console.warn('[realtime-voice] OpenAI Realtime socket did not open in time');
-        bridge?.handleOpenAIError(new Error('OpenAI Realtime connection timed out'));
+      // Carrier-driven audio format — no transcoding end to end.
+      // 46elks → audio/pcm @ 24 kHz; Twilio → audio/pcmu @ 8 kHz.
+      audioFormat: transport.openaiAudioFormat,
+    }),
+    toolExecutor: executor,
+    onTranscript: (e) => record({ at: new Date().toISOString(), source: e.source, text: e.text, metadata: e.metadata }),
+    onEnd: ({ reason, pendingToolCalls }) => {
+      record({ at: new Date().toISOString(), source: 'system', text: `Realtime voice bridge ended (${reason}).` });
+      try {
+        phoneManager.recordRealtimeActivity(mission.id, transcript.splice(0), 'completed');
+      } catch (err) {
+        console.error('[realtime-voice] transcript persist failed:', (err as Error)?.message ?? err);
       }
-    }, OPENAI_CONNECT_TIMEOUT_MS);
+      if (pendingToolCalls > 0) {
+        try {
+          phoneManager.flagCallbackPending(mission.id);
+        } catch (err) {
+          console.error('[realtime-voice] callback flag failed:', (err as Error)?.message ?? err);
+        }
+      }
+    },
+  });
 
-    openaiWs.on('open', () => { clearTimeout(openaiConnectTimer); bridge?.handleOpenAIOpen(); });
-    openaiWs.on('message', (data) => bridge?.handleOpenAIMessage(data.toString()));
-    openaiWs.on('close', () => { clearTimeout(openaiConnectTimer); bridge?.handleOpenAIClose(); });
-    openaiWs.on('error', (err) => { clearTimeout(openaiConnectTimer); bridge?.handleOpenAIError(err); });
+  // Mark the mission connected up front so /calls reflects the live
+  // call even before the first transcript flush.
+  try { phoneManager.recordRealtimeActivity(mission.id, [], 'connected'); } catch { /* best effort */ }
 
-    // Replay buffered 46elks frames (the hello + anything that arrived
-    // during resolution) into the bridge, in order.
-    for (const frame of buffered.splice(0)) {
-      bridge.handleElksMessage(frame);
+  const openaiConnectTimer = setTimeout(() => {
+    if (openaiWs.readyState === WebSocket.CONNECTING) {
+      console.warn('[realtime-voice] OpenAI Realtime socket did not open in time');
+      bridge.handleOpenAIError(new Error('OpenAI Realtime connection timed out'));
     }
-  }
+  }, OPENAI_CONNECT_TIMEOUT_MS);
+
+  openaiWs.on('open', () => { clearTimeout(openaiConnectTimer); bridge.handleOpenAIOpen(); });
+  openaiWs.on('message', (data) => bridge.handleOpenAIMessage(data.toString()));
+  openaiWs.on('close', () => { clearTimeout(openaiConnectTimer); bridge.handleOpenAIClose(); });
+  openaiWs.on('error', (err) => { clearTimeout(openaiConnectTimer); bridge.handleOpenAIError(err); });
+
+  return bridge;
 }
 
 /** Wrap a `ws` socket as a {@link RealtimeBridgePort} — JSON sink + close. */
@@ -326,12 +466,12 @@ function systemEntry(text: string): PhoneMissionTranscriptEntry {
   return { at: new Date().toISOString(), source: 'system', text };
 }
 
-// ─── Realtime voice tools (v0.9.53) ─────────────────────
+// ─── Realtime voice tools ───────────────────────────────
 
 /**
- * The Phase 1+2 tool set declared on a realtime voice session. All four
- * are always available: `web_search` uses keyless DuckDuckGo (plan
- * §13.1), so there is no configuration that can make a tool unfulfillable.
+ * The tool set declared on a realtime voice session. All four are
+ * always available: `web_search` uses keyless DuckDuckGo, so there is
+ * no configuration that can make a tool unfulfillable.
  */
 function buildVoiceTools(): RealtimeToolDefinition[] {
   return [
@@ -376,23 +516,12 @@ function createVoiceToolExecutor(params: VoiceToolExecutorParams): ToolExecutor 
         + 'Tell the caller you will follow up another way.';
     }
 
-    // Notify the operator out-of-band (email — the channel-agnostic
-    // default, plan §5). Fire-and-forget: a slow / failing SMTP must not
-    // delay the poll, and the query is answerable via the API endpoint
-    // regardless of whether the email got through.
     void notifyOperator({ mission, config, db, queryId, question, callContext, urgency })
       .catch((err) => console.warn('[realtime-voice] operator notification failed:', (err as Error)?.message ?? err));
 
-    // Telegram is a first-class operator channel too (plan §13.5). Same
-    // fire-and-forget contract as the email notifier: an unconfigured or
-    // failing Telegram path must not delay the poll — the query is
-    // answerable from any channel regardless.
     void notifyOperatorViaTelegram({ mission, config, db, queryId, question, callContext, urgency })
       .catch((err) => console.warn('[realtime-voice] telegram operator notification failed:', (err as Error)?.message ?? err));
 
-    // Block, polling the query record, until the operator answers or the
-    // hard timeout elapses. Abort early if the call drops — the now-
-    // unanswered query is what arms callback-on-disconnect (plan §7).
     const answer = await pollForOperatorAnswer(
       () => phoneManager.getOperatorQuery(mission.id, queryId)?.answer ?? null,
       { signal: { get aborted() { return isCallEnded(); } } },
@@ -423,20 +552,10 @@ interface NotifyOperatorParams {
 }
 
 /**
- * Email the operator that the voice agent needs an answer mid-call
- * (plan §5 — the channel-agnostic default notifier). The query id is
- * embedded in the subject so the operator can simply *reply*; the
- * inbound mail hook (`routes/inbound.ts`) parses that reply back into
- * the query record.
- *
+ * Email the operator that the voice agent needs an answer mid-call.
  * Best-effort: with no `operatorEmail`, no agent password, or an SMTP
  * failure this just returns — the query is still recorded, still
  * polled, and still answerable through the HTTP endpoint.
- *
- * Testing boundary: like the live OpenAI ⇄ 46elks path, the actual SMTP
- * send is not exercised in CI. The pieces it composes ARE unit-tested
- * (`operatorQuerySubject`, the operator-query manager methods, the
- * answer endpoint, and `parseOperatorQueryReply`).
  */
 async function notifyOperator(params: NotifyOperatorParams): Promise<void> {
   const operatorEmail = params.config.operatorEmail?.trim();
@@ -483,15 +602,9 @@ async function notifyOperator(params: NotifyOperatorParams): Promise<void> {
 
 /**
  * Notify the operator over Telegram that the voice agent needs an
- * answer (plan §13.5 — Telegram as a first-class `ask_operator` channel,
- * complementing the email default in {@link notifyOperator}). The
- * operator can answer or approve straight from the Telegram chat; that
- * reply is routed back through the Telegram webhook to the SAME
- * operator-query record this notification references.
- *
- * Best-effort: no Telegram config, no linked operator chat, or a send
- * failure just returns — the query is still recorded, still polled, and
- * still answerable from any channel (email / HTTP / Telegram).
+ * answer. Best-effort: no Telegram config, no linked operator chat, or
+ * a send failure just returns — the query is still answerable from any
+ * channel (email / HTTP / Telegram).
  */
 async function notifyOperatorViaTelegram(params: NotifyOperatorParams): Promise<void> {
   const telegramManager = new TelegramManager(params.db as any, params.config.masterKey);

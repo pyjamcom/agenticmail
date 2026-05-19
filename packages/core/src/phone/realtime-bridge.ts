@@ -1,10 +1,11 @@
 /**
- * Realtime voice bridge — wires the OpenAI Realtime API to a 46elks
- * realtime-media WebSocket so a phone mission can actually *converse*.
+ * Realtime voice bridge — wires the OpenAI Realtime API to a phone
+ * carrier's realtime-media WebSocket so a phone mission can actually
+ * *converse*.
  *
  * # Shape of the integration
  *
- *   caller  ⇄  46elks  ⇄  (46elks media WebSocket)  ⇄  AgenticMail
+ *   caller  ⇄  carrier  ⇄  (carrier media WebSocket)  ⇄  AgenticMail
  *                                                         │
  *                                          RealtimeVoiceBridge
  *                                                         │
@@ -12,12 +13,23 @@
  *                                                         │
  *                                                   gpt-realtime
  *
- * 46elks streams the live call audio to AgenticMail as JSON `audio`
- * frames (base64 PCM); AgenticMail relays them to OpenAI as
+ * The carrier streams the live call audio to AgenticMail as JSON frames
+ * (base64 audio); AgenticMail relays them to OpenAI as
  * `input_audio_buffer.append`; OpenAI streams synthesised speech back
- * as `response.output_audio.delta`; AgenticMail relays that to 46elks
- * as `audio` frames. Server-side VAD on the OpenAI session handles
- * turn-taking — no manual commit / response.create.
+ * as `response.output_audio.delta`; AgenticMail relays that to the
+ * carrier. Server-side VAD on the OpenAI session handles turn-taking —
+ * no manual commit / response.create.
+ *
+ * # Provider-pluggable transport
+ *
+ * The carrier side speaks a provider-specific wire protocol — 46elks
+ * (`hello`/`audio`/`bye`, linear PCM) and Twilio Media Streams
+ * (`connected`/`start`/`media`/`stop`, G.711 µ-law). Those differences
+ * are isolated behind a {@link RealtimeTransportAdapter}: the bridge
+ * itself — OpenAI session lifecycle, function calling, barge-in,
+ * transcript, teardown — is identical across providers and lives here
+ * once. The bridge defaults to the 46elks adapter, so existing callers
+ * that pass no `transport` keep their exact prior behaviour.
  *
  * # Memory injection — the whole point
  *
@@ -35,7 +47,7 @@
  * WebSocket plumbing lives in `@agenticmail/api` (which has the `ws`
  * dependency); tests drive the bridge with in-memory fake ports. This
  * keeps `@agenticmail/core` dependency-free and the bridge logic fully
- * unit-testable without a live OpenAI key or a 46elks websocket number.
+ * unit-testable without a live OpenAI key or a carrier websocket number.
  *
  * The exact OpenAI Realtime wire shapes below are the GA `gpt-realtime`
  * protocol (session config nested under `audio.input` / `audio.output`,
@@ -44,14 +56,11 @@
  * defensively — some `gpt-realtime` deployments still emit it.
  */
 
+import type { ElksRealtimeAudioFormat } from './realtime.js';
 import {
-  buildElksAudioMessage,
-  buildElksByeMessage,
-  buildElksHandshakeMessages,
-  buildElksInterruptMessage,
-  parseElksRealtimeMessage,
-  type ElksRealtimeAudioFormat,
-} from './realtime.js';
+  ElksRealtimeTransport,
+  type RealtimeTransportAdapter,
+} from './realtime-transport.js';
 import {
   buildRealtimeToolGuidance,
   type RealtimeToolCall,
@@ -185,12 +194,27 @@ export interface RealtimeSessionConfigOptions extends RealtimeInstructionOptions
   tools?: RealtimeToolDefinition[];
   /** `tool_choice` override — defaults to `'auto'` when tools are set. */
   toolChoice?: 'auto' | 'none' | 'required';
+  /**
+   * OpenAI Realtime audio format for the session's input AND output.
+   * Defaults to linear PCM @ 24 kHz (`{ type: 'audio/pcm', rate: 24000 }`)
+   * — the format a 46elks `pcm_24000` call needs. A Twilio call must
+   * pass `{ type: 'audio/pcmu', rate: 8000 }` (G.711 µ-law @ 8 kHz) so
+   * the OpenAI session speaks the carrier's native codec with NO
+   * transcoding. Normally sourced from a {@link RealtimeTransportAdapter}'s
+   * `openaiAudioFormat`.
+   */
+  audioFormat?: { type: string; rate?: number };
 }
+
+/** Default OpenAI Realtime audio format — linear PCM @ 24 kHz (46elks). */
+export const DEFAULT_REALTIME_AUDIO_FORMAT = { type: 'audio/pcm', rate: REALTIME_AUDIO_SAMPLE_RATE } as const;
 
 /**
  * Build the `session.update` client event for the GA `gpt-realtime`
- * API. Audio in/out are PCM16 @ 24 kHz (matches 46elks `pcm_24000`),
- * turn-taking is server-side VAD, and the agent's memory is folded into
+ * API. Audio in/out default to PCM16 @ 24 kHz (matches 46elks
+ * `pcm_24000`); a Twilio call passes `audioFormat: { type: 'audio/pcmu',
+ * rate: 8000 }` so the session speaks G.711 µ-law natively. Turn-taking
+ * is server-side VAD, and the agent's memory is folded into
  * `instructions`.
  *
  * When `tools` are supplied they are declared under `session.tools`
@@ -200,8 +224,10 @@ export interface RealtimeSessionConfigOptions extends RealtimeInstructionOptions
  * to put the caller on hold before a slow tool (plan §6).
  *
  * > The `session.tools` / `tool_choice` field names follow the OpenAI
- * > Realtime function-calling protocol per the plan §3; verify against
- * > current OpenAI docs before the live smoke test.
+ * > Realtime function-calling protocol per the plan §3, and the
+ * > `audio/pcmu` µ-law format token follows the OpenAI GA Realtime
+ * > audio-format protocol; verify both against current OpenAI docs
+ * > before the live smoke test.
  */
 export function buildRealtimeSessionConfig(
   opts: RealtimeSessionConfigOptions,
@@ -216,6 +242,11 @@ export function buildRealtimeSessionConfig(
       toolGuidance: opts.toolGuidance ?? buildRealtimeToolGuidance(tools),
     });
 
+  // Audio format shared by the session's input + output. The carrier's
+  // codec drives this: 46elks → linear PCM @ 24 kHz, Twilio → µ-law @
+  // 8 kHz. Matching it end to end means the bridge never transcodes.
+  const audioFormat = opts.audioFormat ?? DEFAULT_REALTIME_AUDIO_FORMAT;
+
   const session: Record<string, unknown> = {
     type: 'realtime',
     model: opts.model?.trim() || DEFAULT_REALTIME_MODEL,
@@ -223,11 +254,11 @@ export function buildRealtimeSessionConfig(
     instructions,
     audio: {
       input: {
-        format: { type: 'audio/pcm', rate: REALTIME_AUDIO_SAMPLE_RATE },
+        format: { ...audioFormat },
         turn_detection: { type: 'server_vad' },
       },
       output: {
-        format: { type: 'audio/pcm', rate: REALTIME_AUDIO_SAMPLE_RATE },
+        format: { ...audioFormat },
         voice: opts.voice?.trim() || DEFAULT_REALTIME_VOICE,
       },
     },
@@ -263,15 +294,35 @@ export interface RealtimeBridgeTranscriptEntry {
 }
 
 export interface RealtimeVoiceBridgeOptions {
-  /** Port to the 46elks realtime-media side. */
-  elks: RealtimeBridgePort;
+  /**
+   * Port to the carrier realtime-media side. Named `elks` for backward
+   * compatibility (it predates the Twilio transport); `carrier` is the
+   * provider-neutral alias and takes precedence if both are given.
+   */
+  elks?: RealtimeBridgePort;
+  /** Provider-neutral alias for {@link elks} — the carrier media port. */
+  carrier?: RealtimeBridgePort;
   /** Port to the OpenAI Realtime side. */
   openai: RealtimeBridgePort;
   /** `session.update` payload — sent to OpenAI once its socket opens. */
   sessionConfig: Record<string, unknown>;
-  /** Audio format we ask 46elks to send us (default `pcm_24000`). */
+  /**
+   * Carrier transport adapter — encodes/decodes the provider's wire
+   * protocol (46elks vs Twilio Media Streams). Defaults to the 46elks
+   * adapter, so callers that omit it keep the original behaviour.
+   */
+  transport?: RealtimeTransportAdapter;
+  /**
+   * 46elks-only: audio format we ask 46elks to send us (default
+   * `pcm_24000`). Ignored unless the default 46elks transport is used
+   * and no explicit `transport` was supplied.
+   */
   listenFormat?: ElksRealtimeAudioFormat;
-  /** Audio format we declare for the audio we send 46elks (default `pcm_24000`). */
+  /**
+   * 46elks-only: audio format we declare for the audio we send 46elks
+   * (default `pcm_24000`). Ignored unless the default 46elks transport
+   * is used and no explicit `transport` was supplied.
+   */
   sendFormat?: ElksRealtimeAudioFormat;
   /** Per-frame base64 ceiling (default {@link REALTIME_MAX_AUDIO_FRAME_BASE64}). */
   maxAudioFrameBase64?: number;
@@ -301,31 +352,37 @@ export interface RealtimeVoiceBridgeOptions {
 }
 
 /**
- * Bridges a 46elks realtime-media connection to an OpenAI Realtime
- * connection. Transport-agnostic: the caller pumps raw messages in via
- * `handleElksMessage` / `handleOpenAIMessage` and connection lifecycle
- * via `handle*Open` / `handle*Close`. Every public method is safe to
- * call after the bridge has ended (they become no-ops).
+ * Bridges a phone carrier's realtime-media connection to an OpenAI
+ * Realtime connection. Provider-pluggable: the carrier wire protocol
+ * (46elks vs Twilio Media Streams) is isolated in a
+ * {@link RealtimeTransportAdapter}; the conversation logic here is
+ * provider-neutral. The caller pumps raw messages in via
+ * `handleCarrierMessage` / `handleOpenAIMessage` and connection
+ * lifecycle via `handle*Open` / `handle*Close`. Every public method is
+ * safe to call after the bridge has ended (they become no-ops).
+ *
+ * The legacy `handleElks*` method names remain as thin aliases for the
+ * `handleCarrier*` methods so existing 46elks call sites and tests do
+ * not break.
  */
 export class RealtimeVoiceBridge {
-  private readonly elks: RealtimeBridgePort;
+  private readonly carrier: RealtimeBridgePort;
   private readonly openai: RealtimeBridgePort;
   private readonly sessionConfig: Record<string, unknown>;
-  private readonly listenFormat: ElksRealtimeAudioFormat;
-  private readonly sendFormat: ElksRealtimeAudioFormat;
+  private readonly transport: RealtimeTransportAdapter;
   private readonly maxAudioFrameBase64: number;
   private readonly toolExecutor?: ToolExecutor;
   private readonly maxToolCallMs: number;
   private readonly onTranscript?: (entry: RealtimeBridgeTranscriptEntry) => void;
   private readonly onEnd?: (summary: { reason: string; pendingToolCalls: number }) => void;
 
-  /** 46elks `hello` received — the call leg is live. */
+  /** Carrier `hello`/`start` received — the call leg is live. */
   private helloSeen = false;
   /** OpenAI socket open + `session.update` sent. */
   private openaiReady = false;
   /** Bridge has ended — all further input is ignored. */
   private ended = false;
-  /** 46elks call id from the `hello` frame. */
+  /** Carrier call id from the `hello` event (46elks `callid` / Twilio `callSid`). */
   private callId = '';
   /** Audio frames received before OpenAI was ready, flushed on open. */
   private readonly pendingAudio: string[] = [];
@@ -344,11 +401,18 @@ export class RealtimeVoiceBridge {
   private readonly inFlightToolCalls = new Set<string>();
 
   constructor(opts: RealtimeVoiceBridgeOptions) {
-    this.elks = opts.elks;
+    const carrier = opts.carrier ?? opts.elks;
+    if (!carrier) {
+      throw new Error('RealtimeVoiceBridge requires a carrier (or elks) port');
+    }
+    this.carrier = carrier;
     this.openai = opts.openai;
     this.sessionConfig = opts.sessionConfig;
-    this.listenFormat = opts.listenFormat ?? 'pcm_24000';
-    this.sendFormat = opts.sendFormat ?? 'pcm_24000';
+    // Default to the 46elks transport so callers that pass no `transport`
+    // keep their exact prior behaviour. The 46elks `listen`/`send` format
+    // options only apply to that default adapter.
+    this.transport = opts.transport
+      ?? new ElksRealtimeTransport(opts.listenFormat ?? 'pcm_24000', opts.sendFormat ?? 'pcm_24000');
     this.maxAudioFrameBase64 = opts.maxAudioFrameBase64 ?? REALTIME_MAX_AUDIO_FRAME_BASE64;
     this.toolExecutor = opts.toolExecutor;
     this.maxToolCallMs = opts.maxToolCallMs ?? REALTIME_TOOL_CALL_TIMEOUT_MS;
@@ -361,9 +425,14 @@ export class RealtimeVoiceBridge {
     return this.ended;
   }
 
-  /** The 46elks call id, once the `hello` frame has been seen. */
+  /** The carrier call id, once the `hello`/`start` event has been seen. */
   get currentCallId(): string {
     return this.callId;
+  }
+
+  /** The carrier transport provider this bridge is running for. */
+  get provider(): string {
+    return this.transport.provider;
   }
 
   /** How many tool calls are executing right now. */
@@ -395,67 +464,91 @@ export class RealtimeVoiceBridge {
     this.end('openai-error');
   }
 
-  // ─── 46elks side lifecycle ────────────────────────────
-
-  /** Call when the 46elks media socket closes. */
-  handleElksClose(): void {
-    this.end('elks-closed');
-  }
-
-  /** Call when the 46elks media socket errors. */
-  handleElksError(err: unknown): void {
-    this.emitTranscript('system', `46elks media error: ${errorText(err)}`);
-    this.end('elks-error');
-  }
-
-  // ─── 46elks → OpenAI ──────────────────────────────────
+  // ─── Carrier side lifecycle ───────────────────────────
 
   /**
-   * Feed one raw message from the 46elks media socket. Accepts a JSON
-   * string or an already-parsed object. Malformed frames are ignored.
+   * Call when the carrier media socket closes. The `onEnd` reason is
+   * `<prefix>-closed`, where the prefix comes from the transport adapter
+   * (`elks` for 46elks, `twilio` for Twilio) — so historical 46elks
+   * reason strings (`elks-closed`) are preserved.
    */
-  handleElksMessage(raw: string | Record<string, unknown>): void {
+  handleCarrierClose(): void {
+    this.end(`${this.transport.endReasonPrefix}-closed`);
+  }
+
+  /** Call when the carrier media socket errors. */
+  handleCarrierError(err: unknown): void {
+    this.emitTranscript('system', `${this.transport.provider} media error: ${errorText(err)}`);
+    this.end(`${this.transport.endReasonPrefix}-error`);
+  }
+
+  /** @deprecated 46elks-era alias for {@link handleCarrierClose}. */
+  handleElksClose(): void {
+    this.handleCarrierClose();
+  }
+
+  /** @deprecated 46elks-era alias for {@link handleCarrierError}. */
+  handleElksError(err: unknown): void {
+    this.handleCarrierError(err);
+  }
+
+  // ─── Carrier → OpenAI ─────────────────────────────────
+
+  /**
+   * Feed one raw message from the carrier media socket. Accepts a JSON
+   * string or an already-parsed object. The transport adapter
+   * normalises the provider-specific frame; malformed frames throw out
+   * of the adapter and are ignored here (the bridge is never torn down
+   * for one bad frame).
+   */
+  handleCarrierMessage(raw: string | Record<string, unknown>): void {
     if (this.ended) return;
-    let msg;
+    let event;
     try {
-      msg = parseElksRealtimeMessage(raw);
+      event = this.transport.parseInbound(raw);
     } catch {
-      // Unknown / malformed 46elks frame — ignore, do not tear down.
+      // Unknown / malformed carrier frame — ignore, do not tear down.
       return;
     }
 
-    if (msg.t === 'hello') {
+    if (event.kind === 'hello') {
       if (this.helloSeen) return; // one hello per call leg
       this.helloSeen = true;
-      this.callId = msg.callid;
-      // Declare our audio formats to 46elks (listening = audio we want
-      // to receive, sending = audio we will send).
-      for (const handshake of buildElksHandshakeMessages({
-        listenFormat: this.listenFormat,
-        sendFormat: this.sendFormat,
-      })) {
-        this.safeSend(this.elks, handshake as unknown as Record<string, unknown>);
+      this.callId = event.callId;
+      // Send any carrier-side handshake (46elks negotiates audio
+      // formats; Twilio needs nothing — its handshake list is empty).
+      for (const handshake of this.transport.buildHandshake()) {
+        this.safeSend(this.carrier, handshake);
       }
       this.emitTranscript('system', 'Realtime voice bridge connected — live conversation started.', {
+        provider: this.transport.provider,
         callId: this.callId,
-        from: msg.from,
-        to: msg.to,
+        from: event.from,
+        to: event.to,
       });
       return;
     }
 
-    if (msg.t === 'audio') {
-      this.forwardInboundAudio(msg.data);
+    if (event.kind === 'audio') {
+      this.forwardInboundAudio(event.data);
       return;
     }
 
-    if (msg.t === 'bye') {
+    if (event.kind === 'bye') {
       this.emitTranscript('system', 'Caller side ended the call.', {
-        reason: msg.reason,
-        message: msg.message,
+        reason: event.reason,
+        message: event.message,
       });
-      this.end('elks-bye');
+      this.end(`${this.transport.endReasonPrefix}-bye`);
+      return;
     }
+
+    // event.kind === 'ignore' — a known-but-uninteresting carrier frame.
+  }
+
+  /** @deprecated 46elks-era alias for {@link handleCarrierMessage}. */
+  handleElksMessage(raw: string | Record<string, unknown>): void {
+    this.handleCarrierMessage(raw);
   }
 
   /** Relay caller audio to OpenAI, enforcing the per-frame size cap. */
@@ -504,10 +597,11 @@ export class RealtimeVoiceBridge {
         return;
       }
 
-      // The caller started talking — barge-in. Tell 46elks to drop any
-      // buffered playback so the agent stops mid-sentence.
+      // The caller started talking — barge-in. Tell the carrier to drop
+      // any buffered playback so the agent stops mid-sentence (46elks
+      // `interrupt` / Twilio `clear`).
       case 'input_audio_buffer.speech_started': {
-        this.safeSend(this.elks, buildElksInterruptMessage() as unknown as Record<string, unknown>);
+        this.safeSend(this.carrier, this.transport.buildInterrupt());
         return;
       }
 
@@ -578,16 +672,17 @@ export class RealtimeVoiceBridge {
     }
   }
 
-  /** Relay synthesised agent audio to 46elks, enforcing the size cap. */
+  /** Relay synthesised agent audio to the carrier, enforcing the size cap. */
   private forwardOutboundAudio(base64: string): void {
     if (base64.length > this.maxAudioFrameBase64) {
       this.noteDroppedFrame();
       return;
     }
     try {
-      this.safeSend(this.elks, buildElksAudioMessage(base64) as unknown as Record<string, unknown>);
+      this.safeSend(this.carrier, this.transport.buildAudio(base64));
     } catch {
-      // buildElksAudioMessage rejects non-base64 — drop the frame.
+      // The adapter rejects non-base64 (or a Twilio frame before its
+      // streamSid is known) — drop the frame rather than crash.
       this.noteDroppedFrame();
     }
   }
@@ -677,7 +772,8 @@ export class RealtimeVoiceBridge {
 
   /**
    * End the bridge. Idempotent — the first call wins, later calls are
-   * no-ops. Sends `bye` to 46elks, closes both ports, fires `onEnd`.
+   * no-ops. Sends the carrier's end-of-call frame (if it has one — 46elks
+   * `bye`; Twilio has none), closes both ports, fires `onEnd`.
    */
   end(reason: string): void {
     if (this.ended) return;
@@ -698,9 +794,13 @@ export class RealtimeVoiceBridge {
         text: `Call ended with ${pendingToolCalls} tool call(s) still pending (e.g. an unanswered operator query).`,
       });
     }
-    // Best-effort `bye` to 46elks, then close both sides.
-    try { this.elks.send(buildElksByeMessage() as unknown as Record<string, unknown>); } catch { /* ignore */ }
-    try { this.elks.close(); } catch { /* ignore */ }
+    // Best-effort end-of-call frame to the carrier (if the protocol has
+    // one), then close both sides.
+    const byeFrame = this.transport.buildBye();
+    if (byeFrame) {
+      try { this.carrier.send(byeFrame); } catch { /* ignore */ }
+    }
+    try { this.carrier.close(); } catch { /* ignore */ }
     try { this.openai.close(); } catch { /* ignore */ }
     this.onEnd?.({ reason, pendingToolCalls });
   }

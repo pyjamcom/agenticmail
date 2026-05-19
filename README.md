@@ -33,7 +33,17 @@
 
 ---
 
-### ✨ What's new in 0.9.53
+### ✨ What's new in 0.9.54
+
+Twilio joins 46elks as a phone transport provider.
+
+- **Pick your carrier.** `PhoneTransportProvider` is now `46elks` or `twilio` — chosen at phone setup. 46elks behaviour is unchanged; Twilio is at full parity (outbound call-control + realtime voice).
+- **Twilio call-control.** Outbound calls via the Twilio `Calls.json` REST API, TwiML webhooks, status-callback cost tracking. Inbound webhooks are verified with the `X-Twilio-Signature` header (HMAC-SHA1, timing-safe, fail-closed) on top of the per-mission token.
+- **Twilio realtime voice.** A Twilio Media Streams ↔ OpenAI Realtime bridge. `RealtimeVoiceBridge` was generalised behind a `RealtimeTransportAdapter` seam — one bridge serves both carriers, function-calling / barge-in / transcript logic written once. Twilio audio is G.711 µ-law @ 8 kHz and the OpenAI session uses `audio/pcmu`, so a Twilio call needs no transcoding. A `<Connect><Stream>` connects to `/api/agenticmail/calls/twilio-stream`.
+
+1038 tests pass; full build green. The live Twilio ↔ OpenAI call path still needs an operator smoke-test before the npm publish.
+
+### ✨ Earlier — 0.9.53
 
 Realtime voice tools + a Telegram channel.
 
@@ -261,7 +271,7 @@ That's a real multi-agent thread captured in the REPL — the host kicked off on
 
 ### Realtime Voice Calls
 - **Live two-way conversation** — `RealtimeVoiceBridge` bridges a phone mission to an OpenAI Realtime (`gpt-realtime`) session so an agent can actually talk on the call, not just place it
-- **46elks realtime media** — 46elks streams the call audio to the `/api/agenticmail/calls/realtime` WebSocket endpoint; PCM16 @ 24 kHz both ways, server-side VAD for turn-taking, caller barge-in relayed as a 46elks `interrupt`
+- **Two carriers — 46elks or Twilio** — pick the provider at phone setup; `RealtimeVoiceBridge` is generalised behind a `RealtimeTransportAdapter` so both run through one bridge. 46elks streams to `/api/agenticmail/calls/realtime` (PCM16 @ 24 kHz); Twilio Media Streams connects a `<Connect><Stream>` to `/api/agenticmail/calls/twilio-stream` (G.711 µ-law @ 8 kHz — OpenAI `audio/pcmu`, no transcoding). Server-side VAD for turn-taking, caller barge-in relayed to the carrier.
 - **Memory in the call** — the agent's persistent memory is rendered and folded into the Realtime session instructions, so the model speaks with full continuity, as if it had always known those things
 - **Mission-tracked** — the bridge resolves the connection to its phone mission by 46elks `callid`, authenticates the connection token, and persists the conversation transcript to the mission
 - **Hardened** — per-frame audio size cap, bounded pre-connect buffer, fail-closed connection auth, terminal-state guard

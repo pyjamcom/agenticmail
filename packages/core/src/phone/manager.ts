@@ -2,6 +2,8 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import type { Database } from '../storage/db.js';
 import { encryptSecret, decryptSecret, isEncryptedSecret } from '../crypto/secrets.js';
 import { normalizePhoneNumber } from '../sms/manager.js';
+import { buildTwilioStreamTwiML } from './twilio.js';
+import { TWILIO_REALTIME_WS_PATH } from './realtime-paths.js';
 import {
   PHONE_MISSION_STATES,
   PHONE_SERVER_MAX_CALL_DURATION_SECONDS,
@@ -15,7 +17,10 @@ import {
   type TelephonyTransportCapability,
 } from './mission.js';
 
-export type PhoneTransportProvider = '46elks';
+export type PhoneTransportProvider = '46elks' | 'twilio';
+
+/** Providers that support starting outbound call-control missions. */
+export const PHONE_CALL_CONTROL_PROVIDERS: readonly PhoneTransportProvider[] = ['46elks', 'twilio'];
 
 /**
  * Abuse / cost controls for the call-control surface. A phone mission
@@ -159,10 +164,16 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+/** Default 46elks REST API root. */
+const ELKS_DEFAULT_API_URL = 'https://api.46elks.com/a1';
+/** Twilio REST API root — the `{AccountSid}` segment is appended per call. */
+const TWILIO_DEFAULT_API_URL = 'https://api.twilio.com/2010-04-01';
+
 function defaultApiUrl(config: PhoneTransportConfig): string {
-  const url = (config.apiUrl || 'https://api.46elks.com/a1').replace(/\/+$/, '');
+  const fallback = config.provider === 'twilio' ? TWILIO_DEFAULT_API_URL : ELKS_DEFAULT_API_URL;
+  const url = (config.apiUrl || fallback).replace(/\/+$/, '');
   if (!/^https:\/\//i.test(url)) {
-    throw new Error('46elks apiUrl must use https:// — refusing to send credentials over a non-TLS connection');
+    throw new Error(`${config.provider} apiUrl must use https:// — refusing to send credentials over a non-TLS connection`);
   }
   return url;
 }
@@ -203,6 +214,21 @@ function buildWebhookUrl(config: PhoneTransportConfig, path: string, missionId: 
   return url.toString();
 }
 
+/**
+ * Build the `wss://…` URL a Twilio `<Connect><Stream>` connects to —
+ * the realtime voice WebSocket carrying the mission id + per-mission
+ * token (#43-H7) as query params. The scheme is upgraded from the
+ * configured `webhookBaseUrl` (`https://` → `wss://`, `http://` →
+ * `ws://` for a localhost dev base).
+ */
+function buildRealtimeStreamUrl(webhookBaseUrl: string, missionId: string, token: string): string {
+  const url = new URL(`${apiBaseUrl(webhookBaseUrl)}${TWILIO_REALTIME_WS_PATH}`);
+  url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+  url.searchParams.set('missionId', missionId);
+  url.searchParams.set('token', token);
+  return url.toString();
+}
+
 function redactWebhookUrl(value: string): string {
   try {
     const url = new URL(value);
@@ -215,15 +241,21 @@ function redactWebhookUrl(value: string): string {
   }
 }
 
+/** Body keys that carry a token-bearing webhook URL — redacted for storage/output. */
+const WEBHOOK_URL_BODY_KEYS = ['voice_start', 'whenhangup', 'Url', 'StatusCallback'] as const;
+
+/**
+ * Redact every token-bearing webhook URL in a provider request body.
+ * Provider-agnostic — handles both the 46elks (`voice_start` /
+ * `whenhangup`) and Twilio (`Url` / `StatusCallback`) body shapes; keys
+ * absent for a given provider are simply skipped.
+ */
 function redactProviderRequest(request: { url: string; body: Record<string, string> }): { url: string; body: Record<string, string> } {
-  return {
-    url: request.url,
-    body: {
-      ...request.body,
-      voice_start: redactWebhookUrl(request.body.voice_start),
-      whenhangup: redactWebhookUrl(request.body.whenhangup),
-    },
-  };
+  const body = { ...request.body };
+  for (const key of WEBHOOK_URL_BODY_KEYS) {
+    if (typeof body[key] === 'string') body[key] = redactWebhookUrl(body[key]);
+  }
+  return { url: request.url, body };
 }
 
 function stableFlatJson(value: Record<string, unknown>): string {
@@ -498,7 +530,7 @@ export class PhoneManager {
     if (!config) {
       throw new Error('Phone transport is not configured. Use phone_transport_setup first.');
     }
-    if (config.provider !== '46elks') {
+    if (!PHONE_CALL_CONTROL_PROVIDERS.includes(config.provider)) {
       throw new Error(`Phone provider ${config.provider} does not support call_control yet`);
     }
 
@@ -549,7 +581,12 @@ export class PhoneManager {
 
     this.insertMission(mission);
 
-    const providerRequest = this.build46ElksCallRequest(config, mission);
+    // Dispatch to the provider's outbound-call request builder. Both
+    // providers authenticate with HTTP Basic + an x-www-form-urlencoded
+    // body, so the actual fetch below is provider-agnostic.
+    const providerRequest = config.provider === 'twilio'
+      ? this.buildTwilioCallRequest(config, mission)
+      : this.build46ElksCallRequest(config, mission);
     if (options.dryRun) {
       const updated = this.updateProviderCall(missionId, 'dryrun-call', {
         dryRun: true,
@@ -582,7 +619,7 @@ export class PhoneManager {
       }, [{
         at: new Date().toISOString(),
         source: 'provider',
-        text: '46elks call start failed — the provider request threw before any response.',
+        text: `${config.provider} call start failed — the provider request threw before any response.`,
         metadata: { error: message },
       }]);
       throw err;
@@ -603,13 +640,17 @@ export class PhoneManager {
       }, [{
         at: new Date().toISOString(),
         source: 'provider',
-        text: `46elks call start failed with HTTP ${response.status}.`,
+        text: `${config.provider} call start failed with HTTP ${response.status}.`,
         metadata: { providerResponse: raw },
       }]);
-      throw new Error(`46elks call start failed (${response.status}) for mission ${failed.id}`);
+      throw new Error(`${config.provider} call start failed (${response.status}) for mission ${failed.id}`);
     }
 
-    const providerCallId = asRecord(raw).id ? String(asRecord(raw).id) : undefined;
+    // The provider call id field differs by provider: 46elks returns
+    // `id`, Twilio's Calls.json returns `sid`. Accept either.
+    const rawRecord = asRecord(raw);
+    const rawCallId = rawRecord.sid ?? rawRecord.id;
+    const providerCallId = rawCallId ? String(rawCallId) : undefined;
     const updated = this.updateProviderCall(missionId, providerCallId, { providerResponse: raw });
     return { mission: updated, providerRequest, providerResponse: raw };
   }
@@ -700,6 +741,140 @@ export class PhoneManager {
       phoneWebhookEvents: appendProcessedWebhookEvent(mission, eventKey),
       ...costPatch,
     }, transcript);
+  }
+
+  /**
+   * Handle Twilio's voice webhook — the `Url` Twilio fetches when the
+   * outbound call connects. The mirror of {@link handleVoiceStartWebhook}
+   * for Twilio: it authenticates the per-mission token, transitions the
+   * mission to `connected`, and returns the TwiML to send back.
+   *
+   * `twiml` is a `<Connect><Stream>` document that wires the call's
+   * audio to the realtime voice WebSocket — the same realtime path the
+   * 46elks websocket-number uses. The route serves it with
+   * `Content-Type: text/xml`.
+   *
+   * Like the 46elks handler this is terminal-state-guarded (#43-H5,
+   * a late/replayed webhook cannot resurrect a finished mission) and
+   * idempotent (a duplicate is acknowledged with the same TwiML but
+   * changes nothing).
+   */
+  handleTwilioVoiceWebhook(
+    missionId: string,
+    providedToken: string,
+    payload: Record<string, unknown> = {},
+  ): { mission: PhoneCallMission; twiml: string } {
+    const mission = this.authenticateWebhook(missionId, providedToken);
+    const config = this.getPhoneTransportConfig(mission.agentId)!;
+    const twiml = this.buildTwilioVoiceTwiML(config, mission);
+
+    if (TERMINAL_MISSION_STATES.includes(mission.status)) {
+      return { mission, twiml };
+    }
+
+    const eventKey = phoneWebhookEventKey('voice_start', payload);
+    if (hasProcessedWebhookEvent(mission, eventKey)) {
+      return { mission, twiml };
+    }
+
+    const updated = this.updateMissionStatus(mission.id, 'connected', {
+      lastVoiceStartPayload: payload,
+      phoneWebhookEvents: appendProcessedWebhookEvent(mission, eventKey),
+    }, [{
+      at: new Date().toISOString(),
+      source: 'provider',
+      text: 'Twilio voice webhook received — connecting the call to the realtime voice stream.',
+      metadata: { payload },
+    }]);
+
+    return { mission: updated, twiml };
+  }
+
+  /**
+   * Handle Twilio's status callback — the `StatusCallback` Twilio POSTs
+   * with the terminal call status. The mirror of
+   * {@link handleHangupWebhook} for Twilio. Idempotent + terminal-state
+   * guarded; records the reported `CallDuration` and accumulates cost
+   * from `Price` when Twilio supplied it (Twilio reports the final
+   * price asynchronously, so it may be absent on the first callback —
+   * the duration ceiling / rate limit / concurrency cap remain the
+   * preventive cost controls, #43-H2).
+   */
+  handleTwilioStatusWebhook(
+    missionId: string,
+    providedToken: string,
+    payload: Record<string, unknown> = {},
+  ): PhoneCallMission {
+    const mission = this.authenticateWebhook(missionId, providedToken);
+
+    const eventKey = phoneWebhookEventKey('hangup', payload);
+    if (hasProcessedWebhookEvent(mission, eventKey)) {
+      return mission;
+    }
+
+    const costPatch = this.buildTwilioCostMetadataPatch(mission, payload);
+
+    const nextStatus: PhoneMissionState = TERMINAL_MISSION_STATES.includes(mission.status)
+      ? mission.status
+      : 'failed';
+    const transcript: PhoneMissionTranscriptEntry[] = [{
+      at: new Date().toISOString(),
+      source: 'provider',
+      text: nextStatus === 'failed'
+        ? 'Twilio status callback received before a conversation runtime completed the mission.'
+        : 'Twilio status callback received.',
+      metadata: { payload },
+    }];
+    if (costPatch.costExceeded) {
+      transcript.push({
+        at: new Date().toISOString(),
+        source: 'system',
+        text: `Mission cost ${costPatch.totalCost} exceeded the policy cap of ${mission.policy.maxCostPerMission}.`,
+      });
+    }
+    return this.updateMissionStatus(mission.id, nextStatus, {
+      lastHangupPayload: payload,
+      hangupReason: nextStatus === 'failed' ? 'call-ended-before-conversation-runtime' : undefined,
+      phoneWebhookEvents: appendProcessedWebhookEvent(mission, eventKey),
+      ...costPatch,
+    }, transcript);
+  }
+
+  /**
+   * Build the TwiML for the Twilio voice webhook — a `<Connect><Stream>`
+   * pointing at the realtime voice WebSocket. The `<Stream>` URL is
+   * derived from `webhookBaseUrl` (https → wss); the per-mission token
+   * (#43-H7) rides as both a `<Parameter>` and a query param so the
+   * media socket can be matched to its mission.
+   */
+  private buildTwilioVoiceTwiML(config: PhoneTransportConfig, mission: PhoneCallMission): string {
+    const token = webhookToken(config.webhookSecret, mission.id);
+    return buildTwilioStreamTwiML({
+      streamUrl: buildRealtimeStreamUrl(config.webhookBaseUrl, mission.id, token),
+      parameters: { missionId: mission.id, token },
+    });
+  }
+
+  /**
+   * Read the call cost off a Twilio status callback (`Price`, a
+   * negative or string number), add it to the mission's running total,
+   * and flag a policy-cap breach (#43-H2). Twilio prices are reported
+   * as a negative amount (a debit); we use the absolute value.
+   */
+  private buildTwilioCostMetadataPatch(
+    mission: PhoneCallMission,
+    payload: Record<string, unknown>,
+  ): { totalCost: number; costExceeded: boolean } {
+    const rawPrice = payload.Price ?? payload.price;
+    const parsed = typeof rawPrice === 'number'
+      ? rawPrice
+      : Number.parseFloat(asString(rawPrice));
+    const callCost = Number.isFinite(parsed) ? Math.abs(parsed) : 0;
+    const priorCost = typeof mission.metadata.totalCost === 'number' ? mission.metadata.totalCost : 0;
+    const totalCost = Math.round((priorCost + callCost) * 1e6) / 1e6;
+    const cap = mission.policy?.maxCostPerMission;
+    const costExceeded = typeof cap === 'number' && totalCost > cap;
+    return { totalCost, costExceeded };
   }
 
   /**
@@ -996,6 +1171,52 @@ export class PhoneManager {
     };
   }
 
+  /**
+   * Build the Twilio outbound-call request — the mirror of
+   * {@link build46ElksCallRequest} for Twilio's Calls.json endpoint:
+   *
+   *   POST https://api.twilio.com/2010-04-01/Accounts/{AccountSid}/Calls.json
+   *
+   * with an `application/x-www-form-urlencoded` body. `From`/`To` are
+   * the numbers; `Url` is a TwiML webhook Twilio fetches when the call
+   * connects — it points at our voice-start webhook, which returns the
+   * `<Connect><Stream>` TwiML that wires the call's audio to the
+   * realtime voice WebSocket. `StatusCallback` is Twilio's hangup-
+   * equivalent — fired with the final call status (the analogue of the
+   * 46elks `whenhangup`). `TimeLimit` caps the call duration, re-clamped
+   * to the server ceiling (#43-H6) exactly as the 46elks `timeout` is.
+   *
+   * Both webhook URLs carry the per-mission HMAC token (#43-H7), never
+   * the raw `webhookSecret`. The Twilio `AccountSid` is `config.username`
+   * and the `AuthToken` is `config.password` (HTTP Basic on the request,
+   * and the key Twilio signs `X-Twilio-Signature` with).
+   *
+   * > The Calls.json endpoint path, the `From`/`To`/`Url`/
+   * > `StatusCallback`/`TimeLimit` body fields, and the `<Connect>
+   * > <Stream>` TwiML are per Twilio's public Programmable Voice docs;
+   * > verify against current docs before the live smoke-test.
+   */
+  private buildTwilioCallRequest(config: PhoneTransportConfig, mission: PhoneCallMission): { url: string; body: Record<string, string> } {
+    const accountSid = config.username;
+    if (!accountSid) {
+      throw new Error('Twilio account SID (username) is required to place a call');
+    }
+    const timeLimit = Math.min(Math.max(mission.policy.maxCallDurationSeconds, 1), PHONE_SERVER_MAX_CALL_DURATION_SECONDS);
+    return {
+      url: `${defaultApiUrl(config)}/Accounts/${encodeURIComponent(accountSid)}/Calls.json`,
+      body: {
+        From: config.phoneNumber,
+        To: mission.to,
+        // Twilio fetches this on answer; the route returns TwiML.
+        Url: buildWebhookUrl(config, '/calls/webhook/twilio/voice', mission.id),
+        // Twilio POSTs the terminal call status here (hangup-equivalent).
+        StatusCallback: buildWebhookUrl(config, '/calls/webhook/twilio/status', mission.id),
+        StatusCallbackEvent: 'completed',
+        TimeLimit: String(timeLimit),
+      },
+    };
+  }
+
   private insertMission(mission: PhoneCallMission): void {
     this.db.prepare(`
       INSERT INTO phone_missions (
@@ -1059,6 +1280,10 @@ export function buildPhoneTransportConfig(input: {
   phoneNumber?: unknown;
   username?: unknown;
   password?: unknown;
+  /** Twilio alias for {@link username} — the account SID. */
+  accountSid?: unknown;
+  /** Twilio alias for {@link password} — the account auth token. */
+  authToken?: unknown;
   webhookBaseUrl?: unknown;
   webhookSecret?: unknown;
   apiUrl?: unknown;
@@ -1067,16 +1292,27 @@ export function buildPhoneTransportConfig(input: {
   configuredAt?: string;
 }): PhoneTransportConfig {
   const provider = asString(input.provider) || '46elks';
-  if (provider !== '46elks') throw new Error('provider must be "46elks"');
+  if (provider !== '46elks' && provider !== 'twilio') {
+    throw new Error('provider must be "46elks" or "twilio"');
+  }
+  const isTwilio = provider === 'twilio';
 
   const phoneNumber = normalizePhoneNumber(asString(input.phoneNumber));
   if (!phoneNumber) throw new Error('phoneNumber must be a valid E.164 phone number');
 
-  const username = asString(input.username);
-  const password = asString(input.password);
+  // Both providers authenticate with HTTP Basic. For Twilio the
+  // credential pair is the account SID + auth token — accepted under
+  // either the generic `username`/`password` keys or the friendlier
+  // `accountSid`/`authToken` aliases.
+  const username = asString(input.username) || asString(input.accountSid);
+  const password = asString(input.password) || asString(input.authToken);
   const webhookBaseUrl = asString(input.webhookBaseUrl);
   const webhookSecret = asString(input.webhookSecret);
-  if (!username || !password) throw new Error('username and password are required for provider "46elks"');
+  if (!username || !password) {
+    throw new Error(isTwilio
+      ? 'accountSid and authToken are required for provider "twilio"'
+      : 'username and password are required for provider "46elks"');
+  }
   if (!webhookBaseUrl) throw new Error('webhookBaseUrl is required');
   if (!webhookSecret) throw new Error('webhookSecret is required');
   // Entropy floor (#43-H8) — the webhook secret is the ONLY auth on the

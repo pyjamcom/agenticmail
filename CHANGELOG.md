@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.54] - 2026-05-20
+
+### Added — Twilio as a phone transport provider
+
+AgenticMail's phone feature is no longer 46elks-only — **Twilio** is a
+first-class transport provider, at full parity (outbound call-control
+and realtime voice). At phone setup you pick the provider.
+
+- **Provider abstraction** — `PhoneTransportProvider` is now
+  `'46elks' | 'twilio'`. `PhoneManager` dispatches outbound calls to
+  the right provider; 46elks behaviour is byte-unchanged.
+- **Twilio call-control** — outbound calls via the Twilio
+  `Calls.json` REST API (HTTP Basic auth); TwiML webhooks; the
+  `whenhangup`-equivalent status callback records call cost.
+- **Twilio webhook auth** — inbound webhooks are verified with the
+  `X-Twilio-Signature` header (HMAC-SHA1 over the URL + sorted POST
+  params, keyed by the auth token), compared timing-safe and
+  fail-closed, on top of the existing per-mission token.
+- **Twilio realtime voice** — a Twilio Media Streams ↔ OpenAI
+  Realtime bridge. `RealtimeVoiceBridge` was generalised behind a
+  `RealtimeTransportAdapter` seam (46elks + Twilio adapters) — one
+  bridge, function-calling / barge-in / transcript / teardown written
+  once. Twilio audio is G.711 µ-law @ 8 kHz; the OpenAI session uses
+  `audio/pcmu`, so a Twilio call needs **no transcoding**.
+- **WebSocket endpoint** — a Twilio `<Connect><Stream>` connects to
+  `/api/agenticmail/calls/twilio-stream`; the mission id + per-mission
+  token ride the connection URL, so the mission is resolved and
+  authenticated before Twilio's first frame.
+
+1038 tests pass (up from 996); full monorepo build green. The live
+Twilio ↔ OpenAI call path still needs an operator smoke-test (a
+provisioned Twilio number + a public WSS host + `OPENAI_API_KEY`)
+before the npm publish.
+
 ## [0.9.53] - 2026-05-20
 
 ### Added — realtime voice tools + Telegram channel
