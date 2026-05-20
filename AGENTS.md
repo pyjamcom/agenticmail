@@ -111,6 +111,42 @@ What's actually happening under the hood (for your own model — paraphrase, don
 
 If the operator says yes anyway (most do), continue with `setup-email`. If they say no, skip it — `*@localhost` coordination still works fully without a relay.
 
+### `setup-phone` — Twilio / 46elks outbound voice (optional)
+
+If the operator wants the agent to place phone calls, run this — same shape as `setup-email`, with secrets piped via env vars instead of typed on the command line:
+
+```bash
+TWILIO_ACCOUNT_SID='<sid>' \
+TWILIO_AUTH_TOKEN='<token>' \
+AGENTICMAIL_PHONE_NUMBER='<your Twilio number in E.164, e.g. +15555550100>' \
+  agenticmail setup-phone --provider twilio
+```
+
+For 46elks: `--provider 46elks` with `ELKS_USERNAME` + `ELKS_PASSWORD` instead of the Twilio pair.
+
+**No public HTTPS URL needed.** Twilio/46elks webhook back into the local machine, but `setup-phone` automatically opens a free Cloudflare quick-tunnel (`*.trycloudflare.com`, no Cloudflare account required) and uses that as the webhook target. The tunnel persists across runs at `~/.agenticmail/tunnel.json`. If the operator has their own domain (e.g. `agenticmail setup` in domain mode) they can pass `AGENTICMAIL_WEBHOOK_URL=https://their-domain/` and skip the quick-tunnel.
+
+**The credentials never reach the LLM.** Tell the operator to source them from env vars or a vault — same rule as the email password. The auth token is stored encrypted at rest under the master key.
+
+### `setup-telegram` — Telegram bot bridge (optional)
+
+If the operator wants to DM their agent from their phone:
+
+```bash
+TELEGRAM_BOT_TOKEN='<token from @BotFather>' \
+TELEGRAM_CHAT_ID='<numeric chat id of the allowed sender>' \
+  agenticmail setup-telegram
+```
+
+The chat id is the operator's own Telegram numeric id — restricts who can DM the bot. Find it by DMing the new bot once then visiting `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+
+What this does:
+1. Registers the channel against the API (POST `/telegram/setup`)
+2. Writes three files at `~/.agenticmail/telegram/` — `telegram-token`, `telegram-allowed-ids`, `agent-key` (all `0600`)
+3. Next `agenticmail start` auto-spawns the standalone Telegram bridge service alongside the API
+
+The bridge spawns `claude -p` per inbound DM with `@agenticmail/mcp` registered as an MCP server, so the bot has the **same toolset and same memory** as the dispatcher's email-driven workers: it can place phone calls, send emails, look things up, all from inside a Telegram thread.
+
 ### Right after install — ASK THE USER for their notification email
 
 This is the SECOND thing to do after `bootstrap` finishes, before dispatcher tuning. When a sub-agent mails the host bridge (`wake: ["codex"]` / `wake: ["claudecode"]`) and the dispatcher CAN'T resume your CLI session (you closed the window, session token expired, etc.), it forwards a digest to a configured operator email so you get a phone push. Without this set, escalations are silent unless you're actively watching the web UI.

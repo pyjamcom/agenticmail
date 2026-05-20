@@ -462,7 +462,31 @@ The new optional steps in detail:
 
 - **Realtime voice** — paste an OpenAI API key to enable live spoken phone calls (the realtime voice bridge). Without it, phone missions still place and track call-control calls; only the spoken-conversation bridge is unavailable. The key is stored as `openaiApiKey` in `~/.agenticmail/config.json` (file mode 0600).
 - **Phone calling** — pick your carrier (`46elks` or `twilio`), enter that carrier's credentials (46elks API username/password, or Twilio Account SID/Auth Token), a caller number, and a public HTTPS webhook base URL. The webhook secret is auto-generated if you don't supply one. Persisted to the agent's phone-transport config.
-- **Telegram channel** — paste a bot token from `@BotFather` and your chat id. The token is verified with Telegram before it's stored; the channel comes up in poll mode (pull messages with the `telegram_poll` tool or `/poll` in the shell).
+- **Telegram channel** — paste a bot token from `@BotFather` and your chat id. The token is verified with Telegram before it's stored; the channel comes up in poll mode and `agenticmail start` auto-spawns a standalone bridge service that wakes the agent on inbound DMs with the full MCP toolset (memory, send_email, call_phone, …) available.
+
+### Want non-interactive setup? (env-piped, AI-assistant-friendly)
+
+Same setup, no prompts — secrets ride in via env vars. Useful for Claude / Codex / scripted installs:
+
+```bash
+# Email
+GMAIL_PASSWORD=… agenticmail setup-email <gmail-address>
+
+# Twilio outbound calls (auto-opens a free Cloudflare quick-tunnel if you
+# don't have a public HTTPS URL — no Cloudflare account required)
+TWILIO_ACCOUNT_SID='<sid>' TWILIO_AUTH_TOKEN='<token>' \
+AGENTICMAIL_PHONE_NUMBER='<E.164>' \
+  agenticmail setup-phone --provider twilio
+
+# Telegram (bridge auto-spawns on next `agenticmail start`)
+TELEGRAM_BOT_TOKEN='<from @BotFather>' TELEGRAM_CHAT_ID='<your chat id>' \
+  agenticmail setup-telegram
+
+# Manual tunnel control (not usually needed — setup-phone opens one for you)
+agenticmail tunnel start    # cloudflared quick-tunnel
+agenticmail tunnel url      # prints the *.trycloudflare.com URL
+agenticmail tunnel stop
+```
 
 ### Skip external email entirely?
 

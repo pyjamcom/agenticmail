@@ -166,6 +166,18 @@ All commands are available via `agenticmail <command>` or `npx @agenticmail/cli@
 | `agenticmail openclaw` | **Set up AgenticMail for OpenClaw.** Starts infrastructure, creates an agent, configures the plugin, enables agent auto-spawn via hooks, and restarts the OpenClaw gateway. |
 | `agenticmail claudecode` | **Set up AgenticMail for Claude Code.** ✨ NEW — wires AgenticMail into Claude Code so every agent (Fola, John, …) becomes a callable subagent via the `Agent` tool, AND wakes automatically on incoming mail or tasks. No separate Anthropic key needed — workers ride on your existing Claude OAuth. See the [Claude Code Integration](#claude-code-integration) section below. |
 
+### Non-Interactive Setup Commands (Claude / scripted installs)
+
+Same setup, no prompts — secrets ride in via env vars or flags, never typed at a TTY. Each command's `--help` lists the flag-vs-env mapping in detail.
+
+| Command | Description |
+|---------|-------------|
+| `agenticmail setup-email` | **Connect a mailbox.** Two questions interactively (email + password), or pipe via env. Auto-detects Gmail / Outlook / custom from the domain. |
+| `agenticmail setup-phone --provider twilio` | **Wire up Twilio for outbound calls.** Takes `--account-sid` + `--auth-token` (or `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`) and `--phone-number`. **No public HTTPS URL needed** — if `--webhook-url` is absent, `setup-phone` automatically opens a free Cloudflare quick-tunnel (`*.trycloudflare.com`, no Cloudflare account) and uses that. |
+| `agenticmail setup-phone --provider 46elks` | **Wire up 46elks for outbound calls.** Same shape — `--username` / `--password` (or `ELKS_USERNAME` / `ELKS_PASSWORD`). Auto-tunnel applies. |
+| `agenticmail setup-telegram` | **Wire up the Telegram bot bridge.** Takes `--bot-token` and optional `--chat-id` (or `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`). Writes the bridge config files so the next `agenticmail start` auto-spawns the standalone bridge alongside the API. The bridge gets the full MCP toolset (memory, send_email, call_phone, …) so DMing the bot is functionally equivalent to emailing the agent. |
+| `agenticmail tunnel {start\|stop\|status\|url}` | **Manage a free Cloudflare quick-tunnel** to the local API. Most users never call this — `setup-phone` opens one automatically. `agenticmail tunnel url` prints just the URL for piping: `AGENTICMAIL_WEBHOOK_URL=$(agenticmail tunnel url) …`. |
+
 ### Service Management (Auto-Start on Boot)
 
 AgenticMail installs a system service so your email server starts automatically when your computer boots — no manual intervention needed.
