@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.61] - 2026-05-19
+
+### Added — `agenticmail-telegram-bridge` (standalone Telegram service)
+
+A pm2-managed Telegram service that closes the inbound → reply loop
+end to end. Ported from the agent-harness Fola bridge (battle-tested
+pattern); spawns `claude -p` per inbound DM, captures stdout, and
+delivers it back to the same chat. State lives at
+`~/.agenticmail/telegram/`.
+
+- **Bridge code** at `agenticmail/telegram-bridge/` — `bridge.mjs`
+  (the loop), `lib/telegram-api.mjs`, `lib/sessions.mjs`,
+  `lib/log.mjs`, plus `lib/paths.mjs` + `lib/claude-runner.mjs`
+  written for AgenticMail's directory layout and the standard
+  `claude` CLI (no Fola harness dependency).
+- **Per-sender session continuity** — each Telegram user gets their
+  own UUID; first turn uses `--session-id`, subsequent turns use
+  `--resume`, so a multi-turn conversation persists across bridge
+  restarts.
+- **`agenticmail-telegram-bridge` bin** — installed alongside the
+  cli; pm2 launches it as a long-running service.
+
+### Fixed
+
+- **Session ID already in use.** `sessionFilePath` only replaced `/`
+  with `-` when mapping a cwd to its `~/.claude/projects/<dir>/`
+  name, but Claude Code's actual sanitisation also replaces `.` —
+  so any cwd containing a dot (and `~/.agenticmail/telegram` always
+  does) round-tripped to the wrong path. `sessionExists` then
+  always returned false, the bridge passed `--session-id <uuid>`
+  on every turn, and Claude rejected the second turn with `Session
+  ID <uuid> is already in use.` Now mirrors the full rule.
+- **`[Telegram]` mail no longer hits the bridge-wake path on both
+  dispatchers.** The Telegram-poller-synthesised mail in the bridge
+  agent's inbox needs an autonomous worker turn (the user is on
+  Telegram — not at their keyboard); without the carve-out it tried
+  to resume the operator's interactive session instead, which never
+  produced a Telegram reply. Subject-prefix `[Telegram] ` detection
+  added to both `@agenticmail/claudecode` and `@agenticmail/codex`
+  dispatchers so push-mode and poll-mode wake identically.
+- **Doc-comment cleanup.** Removed the maintainer's username from
+  the `safeJoin` JSDoc examples in `@agenticmail/core/src/util/safe-path.ts`
+  — replaced with the standard `/home/alice/...` placeholder so
+  published docs don't ship a real user's home directory layout.
+
 ## [0.9.60] - 2026-05-19
 
 ### Added — Telegram channel: full inbound auto-wake pipeline

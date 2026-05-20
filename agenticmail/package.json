@@ -1,6 +1,6 @@
 {
   "name": "@agenticmail/cli",
-  "version": "0.9.60",
+  "version": "0.9.61",
   "description": "Email, SMS & phone-call infrastructure for AI agents — real email addresses, phone numbers, and agent-driven outbound voice calls",
   "type": "module",
   "main": "dist/index.js",
@@ -8,7 +8,8 @@
   "bin": {
     "agenticmail": "dist/cli.js",
     "agenticmail-claudecode": "dist/bin-claudecode.js",
-    "agenticmail-codex": "dist/bin-codex.js"
+    "agenticmail-codex": "dist/bin-codex.js",
+    "agenticmail-telegram-bridge": "telegram-bridge/bridge.mjs"
   },
   "exports": {
     ".": {
@@ -19,6 +20,7 @@
   "files": [
     "dist",
     "scripts",
+    "telegram-bridge",
     "README.md",
     "REFERENCE.md",
     "LICENSE"
@@ -31,13 +33,13 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@agenticmail/api": "^0.9.43",
-    "@agenticmail/core": "^0.9.21",
+    "@agenticmail/api": "^0.9.44",
+    "@agenticmail/core": "^0.9.22",
     "json5": "^2.2.3"
   },
   "optionalDependencies": {
-    "@agenticmail/claudecode": "^0.2.26",
-    "@agenticmail/codex": "^0.1.22"
+    "@agenticmail/claudecode": "^0.2.27",
+    "@agenticmail/codex": "^0.1.23"
   },
   "devDependencies": {
     "tsup": "^8.4.0",

@@ -1,0 +1,664 @@
+#!/usr/bin/env node
+/**
+ * fola-telegram-bridge — always-on Telegram ↔ fola-claude router.
+ *
+ * Shuttles inbound Telegram messages into fola-claude and streams the
+ * responses back. Supports:
+ *   - Long-polling (default) OR webhook mode (if webhook URL configured)
+ *   - Per-sender session isolation — each Telegram user gets a continuous
+ *     Claude conversation, persisted across restarts
+ *   - Media download (photo/video/document/voice/audio) → local paths
+ *     attached to the prompt so Claude can read them
+ *   - Auto-registered Telegram MCP server so Claude can send proactive
+ *     messages back to any chat (useful for cron-triggered notifications)
+ *   - Allow-list of Telegram user IDs
+ *   - Per-chat inflight dedup + typing indicator
+ *   - Clean restart recovery via persistent offset
+ *
+ * Setup: run `fola-telegram-setup` or see the top of that file for details.
+ *
+ * Env overrides:
+ *   TELEGRAM_BOT_TOKEN           — inline bot token (overrides token file)
+ *   FOLA_BRIDGE_MODE             — 'poll' | 'webhook' (default: auto-detect)
+ *   FOLA_WEBHOOK_PORT            — port for webhook HTTP server (default: 8787)
+ */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { createLogger } from './lib/log.mjs';
+import {
+  FOLA_DIR,
+  TELEGRAM_TOKEN_FILE,
+  TELEGRAM_ALLOWED_IDS_FILE,
+  TELEGRAM_OFFSET_FILE,
+  TELEGRAM_WEBHOOK_CONFIG_FILE,
+  MCP_CONFIG_FILE,
+} from './lib/paths.mjs';
+import {
+  tgApi,
+  sendMessage,
+  sendChatAction,
+  downloadMedia,
+  setWebhook,
+  deleteWebhook,
+  getWebhookInfo,
+} from './lib/telegram-api.mjs';
+import { SessionMap } from './lib/sessions.mjs';
+import { runClaude as runFolaClaude, loadAnthropicToken } from './lib/claude-runner.mjs';
+
+// AgenticMail port: no MCP config is registered for now — the bridge replies
+// via direct stdout capture and Telegram API send. Future versions may wire
+// in `mcp__agenticmail__*` so the bot can call_phone / send_email / etc.
+// from inside a Telegram turn; until then, this is a noop.
+function ensureTelegramMcpRegistered() { return false; }
+
+const log = createLogger('tg-bridge');
+
+// ── bootstrap helpers ────────────────────────────────────────────────────────
+function loadBotToken() {
+  if (process.env.TELEGRAM_BOT_TOKEN) return process.env.TELEGRAM_BOT_TOKEN.trim();
+  if (existsSync(TELEGRAM_TOKEN_FILE)) return readFileSync(TELEGRAM_TOKEN_FILE, 'utf8').trim();
+  log.error(`No Telegram token. Set TELEGRAM_BOT_TOKEN or save to ${TELEGRAM_TOKEN_FILE}`);
+  process.exit(1);
+}
+
+function loadAllowedIds() {
+  if (!existsSync(TELEGRAM_ALLOWED_IDS_FILE)) {
+    log.warn(`No allow-list at ${TELEGRAM_ALLOWED_IDS_FILE} — bot will ignore ALL messages`);
+    return new Set();
+  }
+  const ids = readFileSync(TELEGRAM_ALLOWED_IDS_FILE, 'utf8')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'));
+  return new Set(ids);
+}
+
+function loadOffset() {
+  if (!existsSync(TELEGRAM_OFFSET_FILE)) return 0;
+  try {
+    return JSON.parse(readFileSync(TELEGRAM_OFFSET_FILE, 'utf8')).offset || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveOffset(offset) {
+  mkdirSync(FOLA_DIR, { recursive: true });
+  writeFileSync(
+    TELEGRAM_OFFSET_FILE,
+    JSON.stringify({ offset, updatedAt: new Date().toISOString() }),
+  );
+}
+
+function loadWebhookConfig() {
+  if (!existsSync(TELEGRAM_WEBHOOK_CONFIG_FILE)) return null;
+  try {
+    return JSON.parse(readFileSync(TELEGRAM_WEBHOOK_CONFIG_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// ── prompt formatting ────────────────────────────────────────────────────────
+function formatPrompt(msg, mediaPaths) {
+  const from = msg.from || {};
+  const chat = msg.chat || {};
+  const text = msg.text || msg.caption || '';
+  const senderName =
+    [from.first_name, from.last_name].filter(Boolean).join(' ') || from.username || 'User';
+  const isGroup = chat.type === 'group' || chat.type === 'supergroup';
+
+  // Header block gives Claude metadata + explicit reply routing rules.
+  //
+  // CRITICAL: without these rules Claude sometimes calls telegram_send to
+  // reply to the current chat AND also writes a narration like "Sent X to
+  // the chat" to stdout, which the bridge forwards as a second message.
+  // The user receives two copies. By spelling out that stdout IS the reply
+  // and telegram_send is for OTHER chats only, we get exactly one message
+  // per turn.
+  const header = [
+    '[Incoming Telegram message — via fola-telegram-bridge]',
+    `from_name: ${senderName}`,
+    `from_id: ${from.id}`,
+    `chat_id: ${chat.id}`,
+    `chat_type: ${chat.type}`,
+    `message_id: ${msg.message_id}`,
+    isGroup ? `chat_title: ${chat.title || '(untitled)'}` : null,
+    `timestamp: ${new Date((msg.date || 0) * 1000).toISOString()}`,
+    '',
+    '=== REPLY ROUTING (important, read before responding) ===',
+    `To reply to THIS message (chat_id=${chat.id}): just write your response as`,
+    'your normal final text. Whatever you print to stdout will be sent back to',
+    'this chat automatically by the bridge. Do NOT call telegram_send for the',
+    'reply — that causes a duplicate message.',
+    '',
+    'Use telegram_send ONLY for: (a) messaging a DIFFERENT chat than this one,',
+    '(b) proactive notifications triggered by something other than the current',
+    "incoming message, or (c) sending media via telegram_send_media.",
+    '',
+    'Keep replies concise and plain-text (markdown formatting gets stripped',
+    'by the bridge before Telegram delivery). No narration about what you',
+    "just did — just answer the user's question.",
+    '=== END REPLY ROUTING ===',
+    '',
+  ]
+    .filter(l => l !== null)
+    .join('\n');
+
+  const parts = [header];
+  if (text) parts.push(text);
+  if (mediaPaths && mediaPaths.length > 0) {
+    parts.push('');
+    parts.push('Attached media files (read with the Read tool if needed):');
+    for (const p of mediaPaths) parts.push(`- ${p}`);
+  }
+  return parts.join('\n');
+}
+
+// ── per-chat message queue ───────────────────────────────────────────────────
+//
+// Old design: "inflight dedup" — if a task was running, new messages got a
+// "⏳ busy" notice (which Telegram rate-limited, crashing the bridge) or were
+// silently dropped (losing the user's input).
+//
+// New design: per-chat QUEUE. Messages are never dropped or noticed. They
+// accumulate while a task is running. When the current task finishes, the
+// queue is drained: all waiting messages are batched into ONE combined prompt
+// for the next turn ("btw" pattern — the agent sees everything the user said
+// while it was working, in order, as a single multi-part message). No
+// Telegram spam, no lost messages, the agent gets full context.
+
+const chatQueues = new Map(); // chatId → { messages, processing, currentChild, aborted }
+let activeWorkers = 0; // tracked by processChatQueue, read by shutdown handler
+// Dedup: track recently-seen message_ids so duplicate Telegram updates
+// (from local Bot API replay, media resends, or webhook+poll overlap)
+// never queue the same message twice. Keeps the last 500 ids per chat.
+const seenMessageIds = new Map(); // chatId → Set<messageId>
+const SEEN_IDS_MAX = 500;
+
+// Words that, when sent alone (case-insensitive, trimmed, optional trailing
+// punctuation), abort whatever fola-claude run is in flight for that chat and
+// clear any queued follow-ups. Kept narrow on purpose: anything longer or
+// ambiguous should be treated as a normal message.
+const STOP_WORDS = new Set(['stop', 'abort', 'kill', 'cancel', 'halt']);
+
+function isStopCommand(text) {
+  if (!text) return false;
+  const cleaned = text.trim().toLowerCase().replace(/[!.?]+$/, '');
+  return STOP_WORDS.has(cleaned);
+}
+
+// /btw <text> — matches the harness's /btw feature. In telegram we can't
+// interject into a live print-mode run (cli.js -p is one-shot, no stdin),
+// so "mid-task" is implemented as: tag the message, queue it, and render
+// it with a clear "side note while you were working" framing on the next
+// turn. If no run is in flight, behaves like a normal message with the
+// /btw prefix stripped.
+const BTW_PREFIX = /^\/btw\b\s*/i;
+
+function detectBtw(text) {
+  if (!text) return { isBtw: false, stripped: text };
+  const m = text.match(BTW_PREFIX);
+  if (!m) return { isBtw: false, stripped: text };
+  return { isBtw: true, stripped: text.slice(m[0].length) };
+}
+
+function getChatQueue(chatId) {
+  if (!chatQueues.has(chatId)) {
+    chatQueues.set(chatId, {
+      messages: [],
+      processing: false,
+      currentChild: null, // spawned fola-claude ChildProcess during a run
+      aborted: false,     // set by a stop command so the worker skips reply
+    });
+  }
+  return chatQueues.get(chatId);
+}
+
+/** Kill the in-flight fola-claude run for a chat (if any) and clear its queue. */
+function abortChatRun(chatId) {
+  const queue = chatQueues.get(chatId);
+  if (!queue) return { killed: false, dropped: 0 };
+  const dropped = queue.messages.length;
+  queue.messages = [];
+  let killed = false;
+  const child = queue.currentChild;
+  if (child && child.pid && child.exitCode === null && !child.killed) {
+    queue.aborted = true;
+    try {
+      // Kill the whole process group — the child was spawned detached, so
+      // its PID is also its PGID. This takes down any MCP subprocesses too.
+      process.kill(-child.pid, 'SIGTERM');
+      killed = true;
+    } catch {
+      // Fall back to killing just the child if the group kill fails
+      // (e.g. race where the child has already exited).
+      try { child.kill('SIGTERM'); killed = true; } catch {}
+    }
+  }
+  return { killed, dropped };
+}
+
+function isDuplicateMessage(chatId, messageId) {
+  if (!seenMessageIds.has(chatId)) {
+    seenMessageIds.set(chatId, new Set());
+  }
+  const seen = seenMessageIds.get(chatId);
+  if (seen.has(messageId)) return true;
+  seen.add(messageId);
+  // Prune old ids to cap memory
+  if (seen.size > SEEN_IDS_MAX) {
+    const arr = [...seen];
+    seenMessageIds.set(chatId, new Set(arr.slice(-SEEN_IDS_MAX / 2)));
+  }
+  return false;
+}
+
+async function handleMessage(msg, state) {
+  const userId = String(msg.from?.id || '');
+  const chatId = String(msg.chat?.id || '');
+
+  // Allow-list gate
+  if (state.allowedIds.size > 0 && !state.allowedIds.has(userId)) {
+    return; // silent — don't even log, to avoid flooding logs with unauthorized noise
+  }
+
+  // Dedup: if we've already seen this exact message_id for this chat, skip.
+  // This catches duplicate Telegram updates from local Bot API replay,
+  // media message resends, and webhook+poll overlap.
+  const messageId = msg.message_id;
+  if (isDuplicateMessage(chatId, messageId)) {
+    return; // completely silent — no log, no notice, no queue entry
+  }
+
+  // Stop command: if the user sends a bare "stop"/"abort"/"kill"/... it
+  // aborts the in-flight run and drops any queued follow-ups for this chat.
+  // Checked BEFORE media download so it reacts instantly even on mid-run panics.
+  const rawText = msg.text || msg.caption || '';
+  if (isStopCommand(rawText)) {
+    const { killed, dropped } = abortChatRun(chatId);
+    log.info(`stop command from user=${userId} chat=${chatId}: killed=${killed} dropped=${dropped}`);
+    const parts = [];
+    if (killed) parts.push('stopped in-flight run');
+    if (dropped > 0) parts.push(`dropped ${dropped} queued`);
+    const reply = parts.length ? `🛑 ${parts.join(', ')}.` : 'Nothing to stop.';
+    await sendMessage(state.token, chatId, reply, { replyToMessageId: messageId }).catch(() => {});
+    return;
+  }
+
+  // Download any attached media BEFORE queueing so the paths are ready
+  // when the worker picks up the message.
+  const mediaPaths = [];
+  const mediaRefs = [];
+  if (msg.photo?.length)
+    mediaRefs.push({ fileId: msg.photo.at(-1).file_id, name: `photo-${Date.now()}.jpg` });
+  if (msg.video) mediaRefs.push({ fileId: msg.video.file_id, name: msg.video.file_name });
+  if (msg.document) mediaRefs.push({ fileId: msg.document.file_id, name: msg.document.file_name });
+  if (msg.voice) mediaRefs.push({ fileId: msg.voice.file_id, name: `voice-${Date.now()}.ogg` });
+  if (msg.audio)
+    mediaRefs.push({ fileId: msg.audio.file_id, name: msg.audio.file_name || `audio-${Date.now()}.mp3` });
+
+  for (const m of mediaRefs) {
+    const p = await downloadMedia(state.token, m.fileId, m.name, err => log.warn(err));
+    if (p) {
+      mediaPaths.push(p);
+      log.info(`downloaded media → ${p}`);
+    }
+  }
+
+  const text = msg.text || msg.caption || '';
+  if (!text && mediaPaths.length === 0) {
+    log.info(`empty message from user_id=${userId}, skipping`);
+    return;
+  }
+
+  // /btw prefix → side-note framing. Strip the prefix from the text the agent
+  // sees and rewrite msg.text/caption so formatPrompt picks up the cleaned
+  // version. isBtw is stashed on the queue entry for the batch renderer.
+  const { isBtw, stripped } = detectBtw(text);
+  if (isBtw) {
+    if (msg.text !== undefined) msg.text = stripped;
+    if (msg.caption !== undefined) msg.caption = stripped;
+  }
+
+  // Enqueue the message
+  const queue = getChatQueue(chatId);
+  queue.messages.push({ msg, mediaPaths, userId, isBtw });
+  log.info(
+    `queued msg #${msg.message_id} for chat=${chatId} (queue depth: ${queue.messages.length})${isBtw ? ' [btw]' : ''}`,
+  );
+
+  // If no worker is running for this chat, start one
+  if (!queue.processing) {
+    processChatQueue(chatId, state);
+  }
+}
+
+/**
+ * Worker loop for a single chat. Drains the queue one batch at a time.
+ * While a fola-claude turn is running, new messages accumulate in the queue.
+ * When the turn finishes, the worker checks if more messages arrived and
+ * combines them into one prompt for the next turn (the "btw" batch).
+ */
+async function processChatQueue(chatId, state) {
+  const queue = getChatQueue(chatId);
+  if (queue.processing) return; // another worker already running
+  queue.processing = true;
+  activeWorkers++;
+
+  try {
+    while (queue.messages.length > 0 && state.running) {
+      // Drain everything currently in the queue into one batch
+      const batch = queue.messages.splice(0, queue.messages.length);
+      const firstMsg = batch[0].msg;
+      const userId = batch[0].userId;
+
+      // Typing indicator
+      sendChatAction(state.token, chatId);
+      const typingTimer = setInterval(() => sendChatAction(state.token, chatId), 4000);
+
+      try {
+        const sessionId = state.sessions.getOrCreate(userId);
+
+        // If session just rotated, extract handoff context from the old session
+        let sessionHandoff = null;
+        if (state.sessions.lastRotation) {
+          const { from } = state.sessions.lastRotation;
+          log.info(`session rotated: ${from.slice(0, 8)} → ${sessionId.slice(0, 8)}, building handoff`);
+          sessionHandoff = state.sessions.getSessionHandoff(from);
+          if (sessionHandoff) {
+            log.info(`handoff context: ${sessionHandoff.length} chars from old session`);
+          }
+        }
+
+        // Build the prompt: if there's just one message, use normal format.
+        // If there are multiple (user sent follow-ups while agent was working),
+        // combine them with "[btw]" separators so the agent sees the full context.
+        // Entries flagged isBtw (user typed "/btw ..." to give a side instruction
+        // mid-task) get a distinct header so the agent treats them as supplemental
+        // guidance rather than a separate new task.
+        const btwHeader = (i) =>
+          i === 0
+            ? '\n[BTW — side note from user, factor into your current work but it is not a new standalone task]\n'
+            : `\n[Follow-up #${i + 1} — BTW side note from user while you were working, factor in alongside the other messages]\n`;
+        const followUpHeader = (i) => `\n[Follow-up message #${i + 1} sent while you were working]\n`;
+        let prompt;
+        if (batch.length === 1) {
+          const entry = batch[0];
+          prompt = entry.isBtw
+            ? btwHeader(0) + formatPrompt(firstMsg, entry.mediaPaths)
+            : formatPrompt(firstMsg, entry.mediaPaths);
+        } else {
+          const parts = batch.map((entry, i) => {
+            const body = formatPrompt(entry.msg, entry.mediaPaths);
+            if (entry.isBtw) return btwHeader(i) + body;
+            return i === 0 ? body : followUpHeader(i) + body;
+          });
+          prompt = parts.join('\n\n---\n\n');
+        }
+
+        log.info(
+          `→ claude user=${userId} chat=${chatId} session=${sessionId.slice(0, 8)} batch=${batch.length} prompt_len=${prompt.length}`,
+        );
+
+        queue.aborted = false;
+        let result;
+        try {
+          result = await runFolaClaude({
+            prompt,
+            sessionId,
+            sessionHandoff,
+            anthropicToken: state.anthropicToken,
+            mcpConfig: state.mcpConfig,
+            onLog: line => log.info(`claude: ${line}`),
+            onSpawn: child => { queue.currentChild = child; },
+          });
+        } finally {
+          queue.currentChild = null;
+        }
+
+        if (queue.aborted) {
+          log.info(`← claude user=${userId} aborted by user, suppressing reply`);
+        } else {
+          log.info(`← claude user=${userId} response_len=${result.stdout.length}`);
+          if (result.stdout) {
+            // Reply to the LAST message in the batch so it threads correctly
+            const lastMsg = batch[batch.length - 1].msg;
+            await sendMessage(state.token, chatId, result.stdout, {
+              replyToMessageId: lastMsg.message_id,
+            });
+          } else {
+            log.info('empty stdout — likely tool-only turn, no fallback reply sent');
+          }
+        }
+      } catch (err) {
+        if (queue.aborted) {
+          // User-requested kill surfaces as a SIGTERM-rejected promise — swallow it.
+          log.info(`handler: run aborted by user (${err.message.slice(0, 80)})`);
+        } else {
+          log.error(`handler error: ${err.message}`);
+          await sendMessage(
+            state.token,
+            chatId,
+            `Error: ${err.message.slice(0, 400)}`,
+            { replyToMessageId: firstMsg.message_id },
+          ).catch(() => {});
+        }
+      } finally {
+        clearInterval(typingTimer);
+      }
+
+      // Brief yield so the event loop can accept new messages from the
+      // poll before we check the queue again
+      await new Promise(r => setTimeout(r, 100));
+    }
+  } finally {
+    queue.processing = false;
+    activeWorkers--;
+  }
+}
+
+// ── transport: long-poll ─────────────────────────────────────────────────────
+async function runPollingLoop(state) {
+  let offset = loadOffset();
+  log.info(`polling mode, starting offset=${offset}`);
+
+  // Make sure no webhook is registered while we poll (Telegram rejects getUpdates
+  // if a webhook is active)
+  try {
+    const info = await getWebhookInfo(state.token);
+    if (info?.url) {
+      log.info(`webhook currently set to ${info.url}, clearing it for polling mode`);
+      await deleteWebhook(state.token);
+    }
+  } catch (err) {
+    log.warn(`webhook info check failed: ${err.message}`);
+  }
+
+  while (state.running) {
+    try {
+      const updates = await tgApi(
+        state.token,
+        'getUpdates',
+        { offset, timeout: 25, allowed_updates: ['message'] },
+        { longPoll: true },
+      );
+      // Advance offset FIRST, save to disk, THEN dispatch messages.
+      // This ensures a crash during message handling can't replay the
+      // same batch — Telegram considers them consumed once we poll
+      // with the higher offset on the next iteration.
+      for (const update of updates) {
+        if (update.update_id >= offset) offset = update.update_id + 1;
+      }
+      if (updates.length > 0) saveOffset(offset);
+
+      // Now dispatch (fire-and-forget so slow Claude runs don't block polling)
+      for (const update of updates) {
+        if (update.message) {
+          handleMessage(update.message, state).catch(err =>
+            log.error(`unhandled message: ${err.message}`),
+          );
+        }
+      }
+    } catch (err) {
+      log.error(`poll error: ${err.message}`);
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+
+  saveOffset(offset);
+}
+
+// ── transport: webhook ──────────────────────────────────────────────────────
+async function runWebhookServer(state, webhookCfg) {
+  const port = Number(process.env.FOLA_WEBHOOK_PORT || webhookCfg.port || 8787);
+  const path = webhookCfg.path || `/fola-telegram-webhook`;
+  const url = webhookCfg.url; // public URL: e.g. https://fola.example.com + path
+  const secret = webhookCfg.secret;
+
+  if (!url) {
+    log.error(`webhook mode requires "url" in ${TELEGRAM_WEBHOOK_CONFIG_FILE}`);
+    process.exit(1);
+  }
+
+  log.info(`webhook mode, listening on :${port}${path}, public URL = ${url}`);
+  const fullPath = path.endsWith(url.split('/').pop() || '') ? path : path;
+
+  const server = createServer(async (req, res) => {
+    // Only POST /<path> with matching secret
+    if (req.method !== 'POST' || req.url !== fullPath) {
+      res.writeHead(404).end('not found');
+      return;
+    }
+    if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret) {
+      res.writeHead(403).end('bad secret');
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+    });
+    req.on('end', async () => {
+      res.writeHead(200).end('ok'); // Ack first, process async
+      try {
+        const update = JSON.parse(body);
+        if (update.message) {
+          handleMessage(update.message, state).catch(err =>
+            log.error(`webhook handler: ${err.message}`),
+          );
+        }
+      } catch (err) {
+        log.error(`webhook parse: ${err.message}`);
+      }
+    });
+  });
+
+  server.listen(port, () => {
+    log.info(`webhook HTTP server ready on port ${port}`);
+  });
+
+  // Register the webhook with Telegram
+  try {
+    await setWebhook(state.token, url, { secretToken: secret });
+    log.info(`webhook registered with Telegram → ${url}`);
+  } catch (err) {
+    log.error(`setWebhook failed: ${err.message}`);
+  }
+
+  // Block until shutdown
+  await new Promise(resolve => {
+    state.stopServer = resolve;
+  });
+
+  server.close();
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+async function main() {
+  mkdirSync(FOLA_DIR, { recursive: true });
+
+  const token = loadBotToken();
+  const { token: anthropicToken, source: tokenSource } = loadAnthropicToken();
+  if (!anthropicToken) {
+    log.error('No Anthropic OAuth token. Save to ~/.fola-claude-token');
+    process.exit(1);
+  }
+  log.info(`anthropic token source: ${tokenSource} (suffix ...${anthropicToken.slice(-6)})`);
+
+  const allowedIds = loadAllowedIds();
+  const sessions = new SessionMap({ scope: 'telegram' }).load();
+
+  // Ensure the telegram-mcp server is registered so Claude can send proactively
+  const mcpConfig = ensureTelegramMcpRegistered() ? MCP_CONFIG_FILE : undefined;
+
+  // Bot identity sanity check
+  let me;
+  try {
+    me = await tgApi(token, 'getMe');
+  } catch (err) {
+    log.error(`getMe failed — bad token? ${err.message}`);
+    process.exit(1);
+  }
+  log.info(`connected as @${me.username} (${me.first_name})`);
+  log.info(`allow-list: ${allowedIds.size === 0 ? 'EMPTY' : [...allowedIds].join(',')}`);
+  log.info(`existing sessions: ${sessions.list().length}`);
+  log.info(`mcp config: ${mcpConfig || '(none)'}`);
+
+  const state = {
+    token,
+    anthropicToken,
+    allowedIds,
+    sessions,
+    mcpConfig,
+    running: true,
+    stopServer: null,
+  };
+
+  // Deferred shutdown: if SIGINT/SIGTERM arrives while a fola-claude child
+  // is processing, DON'T exit immediately — the response would be lost and
+  // the user sees silence. Instead, set running=false so the poll loop
+  // stops after the current batch, and let processChatQueue's finally block
+  // notice that running=false and NOT start a new batch. The setTimeout
+  // is a hard backstop in case something truly hangs.
+  const shutdown = sig => {
+    log.info(`received ${sig}`);
+    state.running = false;
+    if (activeWorkers > 0) {
+      log.info(`${activeWorkers} worker(s) still active — deferring exit until they finish (max 90s)`);
+      const hardStop = setTimeout(() => {
+        log.warn('hard stop — workers did not finish in 90s');
+        process.exit(0);
+      }, 90_000);
+      hardStop.unref(); // don't keep the process alive just for this timer
+      // The worker(s) will notice state.running=false and exit the loop,
+      // then the event loop drains and Node exits naturally.
+    } else {
+      log.info('no active workers — exiting immediately');
+      if (state.stopServer) state.stopServer();
+      setTimeout(() => process.exit(0), 500);
+    }
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Mode selection
+  const webhookCfg = loadWebhookConfig();
+  const mode = process.env.FOLA_BRIDGE_MODE || (webhookCfg?.url ? 'webhook' : 'poll');
+
+  if (mode === 'webhook') {
+    if (!webhookCfg) {
+      log.error(`FOLA_BRIDGE_MODE=webhook but ${TELEGRAM_WEBHOOK_CONFIG_FILE} is missing`);
+      process.exit(1);
+    }
+    await runWebhookServer(state, webhookCfg);
+  } else {
+    await runPollingLoop(state);
+  }
+}
+
+main().catch(err => {
+  log.error(`fatal: ${err.stack || err.message}`);
+  process.exit(1);
+});

@@ -1378,14 +1378,28 @@ export class Dispatcher {
     // (codex@localhost), route to handleBridgeMail (headless resume
     // via @openai/codex-sdk) instead of spawnWorker. The bridge is the
     // operator's session proxy, not an automated worker.
+    //
+    // EXCEPTION — Telegram-bridged mail. The GatewayManager's Telegram
+    // poller synthesises an email per inbound DM and lands it in the
+    // bridge agent's inbox with a `[Telegram] ` subject prefix. That
+    // mail must NOT resume the operator's Codex session (the operator
+    // is the end user on Telegram — not at their keyboard); it must
+    // spawn an autonomous worker that reads the mail and replies on
+    // the Telegram channel. Let those fall through to the normal
+    // `spawnWorker` path below.
     if (event.type === 'new' && typeof event.uid === 'number'
         && account.name.toLowerCase() === this.cfg.bridgeAgentName.toLowerCase()) {
-      const ch = this.channels.get(account.id);
-      if (ch?.seenUids.has(event.uid)) return;
-      if (ch) rememberBounded(ch.seenUids, event.uid);
-      this.state.markSeen(account.id, event.uid);
-      void this.handleBridgeMail(account, event);
-      return;
+      const subj = extractSubject(event) ?? '';
+      const isTelegramBridgeMail = subj.startsWith('[Telegram] ');
+      if (!isTelegramBridgeMail) {
+        const ch = this.channels.get(account.id);
+        if (ch?.seenUids.has(event.uid)) return;
+        if (ch) rememberBounded(ch.seenUids, event.uid);
+        this.state.markSeen(account.id, event.uid);
+        void this.handleBridgeMail(account, event);
+        return;
+      }
+      // Telegram-bridged mail: fall through to spawnWorker.
     }
 
     if (event.type === 'new' && typeof event.uid === 'number') {

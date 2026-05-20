@@ -1146,14 +1146,28 @@ export class Dispatcher {
     // session via @anthropic-ai/claude-agent-sdk's `resume` option
     // rather than spawning a fresh subagent turn. See
     // packages/claudecode/src/bridge-wake.ts for the SDK call.
+    //
+    // EXCEPTION — Telegram-bridged mail. The GatewayManager's Telegram
+    // poller synthesises an email per inbound DM and lands it in the
+    // bridge agent's inbox; the subject is prefixed `[Telegram]`. That
+    // mail does NOT want the operator's session resumed (the operator
+    // is the END USER on Telegram — they're not at their keyboard),
+    // it wants an autonomous worker to read it and reply through the
+    // `telegram_send` MCP tool. So we let those fall through to the
+    // normal `spawnWorker` path below.
     if (event.type === 'new' && typeof event.uid === 'number'
         && account.name.toLowerCase() === this.cfg.bridgeAgentName.toLowerCase()) {
-      const ch = this.channels.get(account.id);
-      if (ch?.seenUids.has(event.uid)) return;
-      if (ch) rememberBounded(ch.seenUids, event.uid);
-      this.state.markSeen(account.id, event.uid);
-      void this.handleBridgeMail(account, event);
-      return;
+      const subj = extractSubject(event) ?? '';
+      const isTelegramBridgeMail = subj.startsWith('[Telegram] ');
+      if (!isTelegramBridgeMail) {
+        const ch = this.channels.get(account.id);
+        if (ch?.seenUids.has(event.uid)) return;
+        if (ch) rememberBounded(ch.seenUids, event.uid);
+        this.state.markSeen(account.id, event.uid);
+        void this.handleBridgeMail(account, event);
+        return;
+      }
+      // Telegram-bridged mail: fall through to spawnWorker.
     }
 
     if (event.type === 'new' && typeof event.uid === 'number') {

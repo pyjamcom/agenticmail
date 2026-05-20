@@ -34,6 +34,7 @@ import {
   type ParsedTelegramMessage,
   type TelegramConfig,
 } from '../telegram/index.js';
+import { PhoneManager } from '../phone/manager.js';
 
 export interface LocalSmtpConfig {
   host: string;
@@ -1165,26 +1166,68 @@ export class GatewayManager {
     config: TelegramConfig,
     agentNameHint?: string,
   ): Promise<void> {
-    // Operator-query replies short-circuit. We do NOT wake the agent
-    // for these — the phone bridge already has what it needs.
+    console.log(`[TelegramBridge] inbound msg id=${parsed.messageId} chat=${parsed.chatId} text="${(parsed.text||'').slice(0,40)}" agentId=${agentId.slice(0,8)}`);
+    // Operator-query short-circuit. ONLY skip the agent wake when the
+    // message is an actual answer to an in-flight phone-call query —
+    // either an explicit `/answer <queryId> ...` command, or a plain
+    // text reply while exactly one query is open. Earlier versions of
+    // this bridge mistakenly short-circuited EVERY message from the
+    // operator's own chat, because `parseTelegramOperatorReply` happily
+    // treats any plain text as a potential answer — silently dropping
+    // every "Hey how are you" the user typed into the bot.
+    //
+    // The actual hand-off to the phone manager still happens in the
+    // route's `processInboundMessage`; here we just decide whether to
+    // additionally wake the agent.
     const operatorChatId = config.operatorChatId?.toString().trim() || '';
     if (operatorChatId && parsed.chatId === operatorChatId) {
       const reply = parseTelegramOperatorReply({ text: parsed.text, replyToText: parsed.replyToText });
-      if (reply) return;
+      if (reply) {
+        // Only treat as an operator-query reply if it actually has a
+        // resolvable query id — either inline / in a quoted reply, or
+        // implicitly when exactly one query is open.
+        if (reply.queryId) return;
+        try {
+          const phoneManager = new PhoneManager(this.db as any, this.encryptionKey ?? undefined);
+          const missions = phoneManager.listMissions(agentId, { limit: 100, offset: 0 });
+          let openCount = 0;
+          for (const m of missions) {
+            for (const q of phoneManager.listOperatorQueries(m.id, agentId)) {
+              if (!q.answer) openCount++;
+            }
+          }
+          if (openCount === 1) return; // unambiguous answer-to-open-query
+        } catch {
+          // If the phone manager can't be constructed (e.g. missing DB
+          // table), fall through to normal agent-wake — better to wake
+          // the agent on the message than silently lose it.
+        }
+      }
     }
 
     // Bot-housekeeping commands skip the wake (still recorded by the
     // poller — visible in /telegram → "view recent messages").
     const trimmedText = (parsed.text ?? '').trim();
     if (trimmedText === '/start' || trimmedText === '/help' || trimmedText === '/stop') {
+      console.log(`[TelegramBridge] skip housekeeping command "${trimmedText}"`);
       return;
     }
-    if (!trimmedText) return;
+    if (!trimmedText) {
+      console.log('[TelegramBridge] skip empty text');
+      return;
+    }
 
-    if (!this.accountManager) return;
+    if (!this.accountManager) {
+      console.log('[TelegramBridge] no accountManager');
+      return;
+    }
     const agent = await this.accountManager.getById(agentId);
-    if (!agent) return;
+    if (!agent) {
+      console.log(`[TelegramBridge] agent ${agentId.slice(0,8)} not found`);
+      return;
+    }
     const agentName = agentNameHint ?? agent.name;
+    console.log(`[TelegramBridge] delivering synthetic mail to ${agent.email} (agentName=${agentName})`);
 
     const fromLabel = parsed.fromName
       ? `${parsed.fromName} (Telegram chat ${parsed.chatId})`
@@ -1219,21 +1262,28 @@ export class GatewayManager {
       ``,
       `=== REPLY ROUTING (important, read before responding) ===`,
       `This message arrived via Telegram, NOT email. To reply to ${senderName}`,
-      `you must use the telegram_send MCP tool — replying by email will go`,
+      `you MUST send through the Telegram bot — replying by email will go`,
       `nowhere they can see it.`,
       ``,
-      `    telegram_send({ chatId: "${parsed.chatId}", text: "<your reply>" })`,
+      `The Telegram send tool is in the deferred MCP toolset (not in your`,
+      `default tool list), so call it through the \`invoke\` meta-tool:`,
       ``,
-      `Send EXACTLY ONE telegram_send call per response — do not also narrate`,
-      `or summarise what you sent in a separate reply / email, that just shows`,
-      `up to the user as a duplicate. Keep replies concise and plain text`,
-      `(Telegram strips markdown formatting in transit). No preamble like`,
-      `"sure, here you go" — just answer the question.`,
+      `    mcp__agenticmail__invoke({`,
+      `      tool: "telegram_send",`,
+      `      args: { chatId: "${parsed.chatId}", text: "<your reply text>" }`,
+      `    })`,
+      ``,
+      `Do NOT spend a turn on \`request_tools\` first — the tool name and args`,
+      `above are exactly what \`invoke\` expects. Send EXACTLY ONE invoke call`,
+      `per response — do not also reply by email or write a duplicate summary,`,
+      `that shows up to the user as a second message. Keep replies concise and`,
+      `plain text (Telegram strips markdown). No preamble like "sure, here you`,
+      `go" — just answer.`,
       ``,
       `If the user is asking you to do an errand (call someone, look up info,`,
-      `send something), do the work FIRST, then telegram_send a single clear`,
-      `update back to chat_id ${parsed.chatId} when done — that becomes the`,
-      `whole reply.`,
+      `send something), do the work FIRST, then \`invoke\` telegram_send with a`,
+      `single clear update back to chat_id ${parsed.chatId} when done — that`,
+      `invoke call is the whole reply.`,
       `=== END REPLY ROUTING ===`,
       ``,
       `--- User's message ---`,
@@ -1255,6 +1305,7 @@ export class GatewayManager {
 
     try {
       await this.deliverInboundLocally(agentName, inbound);
+      console.log(`[TelegramBridge] delivered ok messageId=${inbound.messageId}`);
     } catch (err) {
       console.warn(`[GatewayManager] Telegram → inbox bridge failed for ${agentName}: ${(err as Error).message}`);
     }

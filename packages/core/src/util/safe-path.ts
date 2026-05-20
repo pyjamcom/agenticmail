@@ -55,14 +55,14 @@
  * # Examples
  *
  * ```ts
- * // Safe: resolves to /home/ope/.codex/agents/agenticmail-fola.toml
- * safeJoin('/home/ope/.codex/agents', 'agenticmail-fola.toml');
+ * // Safe: resolves to /home/alice/.codex/agents/agenticmail-cli.toml
+ * safeJoin('/home/alice/.codex/agents', 'agenticmail-cli.toml');
  *
  * // Throws: '../etc/passwd' resolves outside the base dir
- * safeJoin('/home/ope/.codex/agents', '../etc/passwd');
+ * safeJoin('/home/alice/.codex/agents', '../etc/passwd');
  *
  * // Throws: an absolute path bypasses the base dir
- * safeJoin('/home/ope/.codex/agents', '/etc/passwd');
+ * safeJoin('/home/alice/.codex/agents', '/etc/passwd');
  * ```
  */
 
@@ -132,8 +132,8 @@ export function safeJoin(
   const resolved = resolve(resolvedBase, ...parts);
 
   // The boundary check uses `resolvedBase + sep` so an attempt to
-  // resolve to e.g. `/home/ope/.codex/agents-evil` doesn't slip
-  // through against base `/home/ope/.codex/agents` via prefix match.
+  // resolve to e.g. `/home/alice/.codex/agents-evil` doesn't slip
+  // through against base `/home/alice/.codex/agents` via prefix match.
   if (resolved !== resolvedBase && !resolved.startsWith(resolvedBase + sep)) {
     throw new PathTraversalError(baseDir, parts);
   }
