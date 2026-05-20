@@ -1010,6 +1010,11 @@ async function cmdSetupEmail() {
       log(`    ${c.cyan('Option A')} — tell your host agent: "set my operator notification email to <you@example.com>"`);
       log(`    ${c.cyan('Option B')} — open the web UI → click your avatar → ${c.bold('Alert email')} → type, Save`);
       log('');
+      // Drop into the interactive shell — mirrors setup-phone /
+      // setup-telegram so every `setup-*` command lands the operator
+      // somewhere they can immediately USE what they just configured
+      // (check the inbox, send a test message, etc).
+      await interactiveShell({ config, onExit: () => {} });
       return;
     }
 
@@ -1423,6 +1428,15 @@ async function cmdSetupPhone() {
     log(`  ${c.dim('Get a key at https://platform.openai.com/api-keys.')}`);
     log('');
   }
+
+  // Drop into the interactive shell. Every setup-* command lands here
+  // — the operator just finished configuring something, the most
+  // natural next thing is to USE that something (place a test call,
+  // check the inbox, send a message). Bouncing back to a bare prompt
+  // forces them to remember `agenticmail shell` and re-type it. The
+  // shell exits cleanly on `/exit` and the API server keeps running
+  // either way.
+  await interactiveShell({ config, onExit: () => {} });
 }
 
 /**
@@ -1550,7 +1564,7 @@ async function cmdSetupTelegram() {
         'then visiting https://api.telegram.org/bot<TOKEN>/getUpdates and',
         'reading the numeric "from.id" out of the JSON.',
       ],
-      placeholder: '(e.g. 7096812530)',
+      placeholder: '(e.g. 1234567890)',
       current: existingTg.operatorChatId
         ?? (flag('chat-id') ?? process.env.TELEGRAM_CHAT_ID ?? '').trim(),
       required: false,
@@ -1662,6 +1676,11 @@ async function cmdSetupTelegram() {
       process.exit(1);
     }
   }
+
+  // Drop into the interactive shell — same end-state as setup-phone /
+  // setup-email so the operator has somewhere to go right after
+  // configuration. See cmdSetupPhone for the rationale.
+  await interactiveShell({ config, onExit: () => {} });
 }
 
 /**
@@ -2161,10 +2180,29 @@ async function cmdSetup() {
     log(`  ${c.dim('Needs an OpenAI API key — calls are billed by OpenAI.')}`);
     log('');
 
+    // Re-entrant check: if the operator already saved an OpenAI key
+    // (in a prior `setup` run or via `setup-phone`), don't re-prompt
+    // — just show "already configured" and offer them the dedicated
+    // command for changes. Stops the v0.9.69-era surprise where
+    // `agenticmail setup telegram` (or the full `setup` re-run) made
+    // the operator paste their OpenAI key again from scratch.
+    let existingOpenaiKey = '';
+    try {
+      const fileConfig = JSON.parse(readFileSync(result.configPath, 'utf-8'));
+      existingOpenaiKey = typeof fileConfig.openaiApiKey === 'string' ? fileConfig.openaiApiKey : '';
+    } catch { /* missing / unreadable — treat as not set */ }
+    if (existingOpenaiKey) {
+      ok('Realtime voice already configured — OpenAI API key saved.');
+      info(`Change it with: ${c.green('agenticmail setup-phone')} (re-run; pick the OpenAI key when offered).`);
+      log('');
+    }
+
     // Non-interactive mode: skip — the OpenAI key is user-owned and
     // nobody else has it. Add it later by re-running setup.
-    const wantVoice = nonInteractiveDefault<string>('N')
-      ?? await ask(`  ${c.bold('Set up realtime voice now?')} ${c.dim('(y/N)')} `);
+    const wantVoice = existingOpenaiKey
+      ? 'n'
+      : (nonInteractiveDefault<string>('N')
+          ?? await ask(`  ${c.bold('Set up realtime voice now?')} ${c.dim('(y/N)')} `));
     if (wantVoice.toLowerCase().startsWith('y')) {
       log('');
       log(`  ${c.dim('Create a key at')} ${c.cyan('https://platform.openai.com/api-keys')}`);
@@ -2204,9 +2242,33 @@ async function cmdSetup() {
     log(`  ${c.dim("carrier's credentials. Calls are billed by the carrier.")}`);
     log('');
 
+    // Re-entrant check: if a phone transport is already saved for
+    // the operator's agent, show "already configured" and point at
+    // the dedicated `setup-phone` command for re-entrant edits
+    // rather than re-asking from scratch.
+    let existingPhone: any = null;
+    try {
+      const phoneAgent = await resolveAgentApiKey(result.config);
+      if (phoneAgent) {
+        const base = `http://${result.config.api.host}:${result.config.api.port}`;
+        const r = await fetch(`${base}/api/agenticmail/phone/transport/config`, {
+          headers: { 'Authorization': `Bearer ${phoneAgent.apiKey}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (r.ok) existingPhone = (await r.json() as any)?.transport ?? null;
+      }
+    } catch { /* not yet configured */ }
+    if (existingPhone?.phoneNumber) {
+      ok(`Phone calling already configured — ${c.cyan(existingPhone.phoneNumber)} via ${c.bold(existingPhone.provider ?? '(unknown)')}`);
+      info(`Change it with: ${c.green('agenticmail setup-phone')} (re-runs the wizard with what's already saved).`);
+      log('');
+    }
+
     // Non-interactive mode: skip — carrier credentials are user-owned.
-    const wantPhone = nonInteractiveDefault<string>('N')
-      ?? await ask(`  ${c.bold('Set up phone calling now?')} ${c.dim('(y/N)')} `);
+    const wantPhone = existingPhone?.phoneNumber
+      ? 'n'
+      : (nonInteractiveDefault<string>('N')
+          ?? await ask(`  ${c.bold('Set up phone calling now?')} ${c.dim('(y/N)')} `));
     if (wantPhone.toLowerCase().startsWith('y')) {
       const agent = await resolveAgentApiKey(result.config);
       if (!agent) {
@@ -2303,9 +2365,35 @@ async function cmdSetup() {
     log(`  ${c.dim('id allowed to message the agent.')}`);
     log('');
 
+    // Re-entrant check: skip the prompt if Telegram is already
+    // configured for the operator's agent. Point at the dedicated
+    // `setup-telegram` for changes.
+    let existingTgConfigured = false;
+    try {
+      const tgAgent = await resolveAgentApiKey(result.config);
+      if (tgAgent) {
+        const base = `http://${result.config.api.host}:${result.config.api.port}`;
+        const r = await fetch(`${base}/api/agenticmail/telegram/config`, {
+          headers: { 'Authorization': `Bearer ${tgAgent.apiKey}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (r.ok) {
+          const tg = (await r.json() as any)?.telegram ?? null;
+          if (tg?.botToken) existingTgConfigured = true;
+        }
+      }
+    } catch { /* not yet configured */ }
+    if (existingTgConfigured) {
+      ok('Telegram channel already configured.');
+      info(`Change it with: ${c.green('agenticmail setup-telegram')} (re-runs the wizard with what's already saved).`);
+      log('');
+    }
+
     // Non-interactive mode: skip — the bot token is user-owned.
-    const wantTelegram = nonInteractiveDefault<string>('N')
-      ?? await ask(`  ${c.bold('Enable the Telegram channel now?')} ${c.dim('(y/N)')} `);
+    const wantTelegram = existingTgConfigured
+      ? 'n'
+      : (nonInteractiveDefault<string>('N')
+          ?? await ask(`  ${c.bold('Enable the Telegram channel now?')} ${c.dim('(y/N)')} `));
     if (wantTelegram.toLowerCase().startsWith('y')) {
       const agent = await resolveAgentApiKey(result.config);
       if (!agent) {
@@ -5128,7 +5216,27 @@ async function cmdUpdate() {
 
 const command = process.argv[2];
 
-switch (command) {
+// Sub-command sugar: `agenticmail setup phone` / `setup email` /
+// `setup telegram` are routed to their dedicated `setup-<x>` handlers
+// rather than to the full `setup` wizard. Without this, a user
+// remembering "the command starts with setup" and following with the
+// channel name kept hitting the full 9-step wizard, missing the
+// channel-specific flow entirely. Pop the second argv slot for the
+// dispatch so the downstream handlers see no extra arg.
+if (command === 'setup' && typeof process.argv[3] === 'string') {
+  const sub = process.argv[3].toLowerCase();
+  const subMap: Record<string, string> = {
+    email: 'setup-email', mail: 'setup-email', relay: 'setup-relay',
+    phone: 'setup-phone', twilio: 'setup-phone', '46elks': 'setup-phone',
+    telegram: 'setup-telegram',
+  };
+  if (subMap[sub]) {
+    process.argv.splice(3, 1);             // remove the sub-word
+    process.argv[2] = subMap[sub];          // rewrite the command
+  }
+}
+
+switch (process.argv[2]) {
   case 'setup':
     cmdSetup().catch(err => { console.error(err); process.exit(1); });
     break;

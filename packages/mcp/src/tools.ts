@@ -567,7 +567,7 @@ export const toolDefinitions = [
     inputSchema: {
       type: 'object' as const,
       properties: {
-        email: { type: 'string', description: 'Operator notification email (e.g. ope@gmail.com). Pass `null` or an empty string to clear an existing setting.' },
+        email: { type: 'string', description: 'Operator notification email (e.g. you@example.com). Pass `null` or an empty string to clear an existing setting.' },
       },
       required: ['email'],
     },

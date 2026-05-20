@@ -12,7 +12,7 @@
  * `~/.agenticmail/operator-prefs.json`:
  *
  * ```json
- * { "version": 1, "operatorEmail": "ope@gmail.com" }
+ * { "version": 1, "operatorEmail": "you@example.com" }
  * ```
  *
  * Atomic writes (tmp + rename), tolerant of missing / corrupt

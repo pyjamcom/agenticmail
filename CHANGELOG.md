@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.71] - 2026-05-20
+
+### Fixed — operator's chat id leaked into a placeholder hint
+
+The Telegram setup wizard's chat-id prompt used the maintainer's
+real chat id as its placeholder example (`(e.g. 7096812530)`).
+That number was scraped from the maintainer's own machine during
+the build and shipped to every install. Replaced with a clearly-
+fictitious `(e.g. 1234567890)` so the wizard doesn't double as
+a leak vector.
+
+Same sweep removed the maintainer's gmail handle from JSDoc
+examples in `@agenticmail/core/src/operator-prefs.ts`, the tool
+description for `setup_operator_email` in `@agenticmail/mcp`,
+and a couple of historical CHANGELOG entries. All replaced with
+the standard `you@example.com` placeholder.
+
+## [0.9.70] - 2026-05-20
+
+### Changed — full `agenticmail setup` wizard skips already-configured channels
+
+The optional channel steps in the 9-step wizard (Step 6 realtime
+voice / OpenAI key, Step 7 phone calling, Step 8 Telegram) used
+to re-ask their setup questions every time, even when the
+channel was already configured. Re-running `agenticmail setup`
+to add Telegram alone meant the operator had to dismiss the
+OpenAI-key prompt, the Twilio carrier picker, etc. before they
+ever got to the Telegram step.
+
+Each step now checks for an existing config first:
+
+- **Step 6 (Realtime voice)** — reads `openaiApiKey` from
+  `~/.agenticmail/config.json`. If set, prints "Realtime voice
+  already configured" and skips the prompt entirely.
+- **Step 7 (Phone calling)** — GETs `/phone/transport/config`
+  for the agent. If a phone number is already saved, prints
+  "Phone calling already configured — <number> via <provider>"
+  and skips.
+- **Step 8 (Telegram)** — GETs `/telegram/config`. If a bot
+  token is already saved, prints "Telegram channel already
+  configured" and skips.
+
+Each skip line includes the dedicated `setup-<channel>` command
+the operator can use to make changes. The setup wizard's job is
+only initial bootstrap; once a channel is set up, the dedicated
+command is the right place to edit it.
+
+### Changed — all `setup-*` commands now drop into the interactive shell
+
+Field run: the operator finishes a setup wizard and the terminal
+just spits them back to the bare shell prompt — they have to
+remember to type `agenticmail shell` to actually USE what they
+just configured (place a test call, check the inbox, send a DM
+to the bot). All three channel-setup commands now end by
+launching the interactive shell directly, mirroring what
+`agenticmail` (no args) and `agenticmail start` already do.
+
+### Fixed — `agenticmail setup phone` / `setup telegram` (space form) now route correctly
+
+A user who remembered "the command starts with `setup`" and
+followed it with the channel name kept hitting the full
+9-step setup wizard, missing the channel-specific flow
+entirely. The cli now special-cases the space-separated form:
+`setup phone` → `cmdSetupPhone`, `setup email` →
+`cmdSetupEmail`, `setup telegram` → `cmdSetupTelegram`, with
+`twilio` / `46elks` / `mail` / `relay` aliased to the right
+handlers. The dash form (`setup-phone`, etc.) keeps working
+unchanged.
+
 ## [0.9.69] - 2026-05-20
 
 ### Fixed — picking ONE field to update no longer fails with "Still missing required field(s)"
@@ -897,7 +966,7 @@ User reports during operator testing of the new `agenticmail setup-email` flow:
 
 Fix: a new side-effecting module `agenticmail/src/suppress-experimental-warnings.ts` imported first in all three bin entries (`cli.ts`, `bin-claudecode.ts`, `bin-codex.ts`). It hooks `process.emit('warning', …)` and drops only the SQLite ExperimentalWarning — every other warning (deprecations, unhandled promises, user-opted experimental flags) passes through to Node's default printer. Has to be a separate module imported first because ESM hoists all imports before any module body runs; inline code at the top of `cli.ts` would fire after `@agenticmail/core` is already loaded.
 
-**2. Typo'd email tore the whole flow down with a single-shot exit.** Operator typed `astrumsphere@gmail` (missing `.com`), got `✗ That doesn't look like a valid email address`, and the process exited. Forced a full re-run.
+**2. Typo'd email tore the whole flow down with a single-shot exit.** Operator typed `you@gmail` (missing `.com`), got `✗ That doesn't look like a valid email address`, and the process exited. Forced a full re-run.
 
 Fix: email prompt now loops up to 5 times with a stricter shape check (`^[^\s@]+@[^\s@]+\.[^\s@]+$` — catches missing TLDs). Same pattern for the password prompt — empty input re-prompts up to 3 times instead of exiting on the first miss.
 
@@ -988,7 +1057,7 @@ agenticmail setup-relay
 
 You'll be prompted for your Gmail address (visible) and app password (hidden). After that:
 
-- Tell your host agent: "set my operator notification email to ope@gmail.com"
+- Tell your host agent: "set my operator notification email to you@example.com"
 - Or open the web UI → avatar → Alert email → type, Save
 
 ## [0.9.36] - 2026-05-15
@@ -1030,7 +1099,7 @@ Best-effort: send failures (no relay configured, SMTP transient error) don't poi
 ### New MCP tool — `setup_operator_email`
 
 ```
-mcp__agenticmail__setup_operator_email({ email: "ope@gmail.com" })
+mcp__agenticmail__setup_operator_email({ email: "you@example.com" })
 mcp__agenticmail__setup_operator_email({ email: "" })  // clear
 ```
 
@@ -1064,7 +1133,7 @@ pm2 restart agenticmail-codex-dispatcher --update-env
 
 Then, inside `claude` or `codex`:
 
-> "set my operator notification email to ope@gmail.com"
+> "set my operator notification email to you@example.com"
 
 The host agent reads AGENTS.md, calls `setup_operator_email`, you're done. From the next bridge escalation onward, you'll get an email if the dispatcher can't resume your session.
 
