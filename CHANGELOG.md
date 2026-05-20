@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.78] - 2026-05-20
+
+### Added — `agenticmail setup-anthropic` (one-command Anthropic auth)
+
+The Telegram bridge and the claudecode dispatcher both need an
+Anthropic OAuth token to talk to Claude, but until now the docs
+just said "save it to `~/.agenticmail/anthropic-token`". The new
+command wraps Claude Code's built-in `claude setup-token` OAuth
+flow:
+
+1. `agenticmail setup-anthropic`
+2. We open the browser (via `claude setup-token`) — the user logs in
+   to console.anthropic.com and authorises.
+3. `claude setup-token` prints a long-lived `sk-ant-oat01-...` token.
+4. The wizard prompts the user to paste it back (hidden input).
+5. We save it to `~/.agenticmail/anthropic-token` with mode 0600.
+
+Both `setup-anthropic` and the space-form (`agenticmail setup
+anthropic` / `setup claude` / `setup token`) route to the same
+handler. Aliases: `setup-claude`, `setup-token`, bare `anthropic`.
+
+**Non-interactive (CI / scripted):**
+
+```bash
+ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-... agenticmail setup-anthropic
+# or
+agenticmail setup-anthropic --token sk-ant-oat01-...
+# or (pay-per-token)
+agenticmail setup-anthropic --api-key sk-ant-api03-...
+```
+
+Pre-check: surfaces a clear actionable error if `claude` isn't on
+PATH (`npm install -g @anthropic-ai/claude-code` first).
+
+The bootstrap epilogue now lists `setup-anthropic` as the **first**
+optional channel — without it, the dispatcher's spawned workers
+fail with `Your organization has disabled Claude subscription access
+for Claude Code` (the policy-flag failure mode covered in v0.9.76).
+
 ## [0.9.77] - 2026-05-20
 
 ### Fixed — removed maintainer's private project name + file paths from shipped code

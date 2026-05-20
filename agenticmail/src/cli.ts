@@ -1078,6 +1078,169 @@ async function cmdSetupEmail() {
  * webhook secret is stored encrypted at rest under the master key
  * (same as the Twilio auth token).
  */
+/**
+ * `agenticmail setup-anthropic` — wire up the Anthropic OAuth token
+ * the Telegram bridge and the claudecode dispatcher both need.
+ *
+ * Three paths, in order of friendliness:
+ *
+ *   1. **Wrap `claude setup-token`** (the default). The Claude Code
+ *      CLI ships a built-in OAuth flow that opens the user's
+ *      browser at console.anthropic.com, prompts them to authorise,
+ *      and prints a long-lived bearer token to stdout. We spawn it
+ *      with inherited stdio so the user sees + interacts with the
+ *      whole flow naturally, then ask them to paste the token back
+ *      so we can save it to `~/.agenticmail/anthropic-token` (0600).
+ *
+ *      Why we don't try to scrape `claude setup-token`'s stdout
+ *      automatically: the output format isn't a public contract and
+ *      has shifted between Claude Code versions. A one-paste step
+ *      that the operator does once after the OAuth flow is robust
+ *      across every version + future format change.
+ *
+ *   2. **Paste an existing token** via `--token` flag or
+ *      `ANTHROPIC_AUTH_TOKEN` env var. Useful if the user already
+ *      ran `claude setup-token` separately, OR if they have an
+ *      `sk-ant-oat01-...` token from a vault / CI secret.
+ *
+ *   3. **`--api-key` flag (or `ANTHROPIC_API_KEY` env)** for
+ *      pay-per-token routing. Same target file; the dispatcher /
+ *      bridge load it through the same env var the SDK reads.
+ *
+ * After the token is saved, the bridge picks it up on next startup
+ * (or the live bridge re-reads it on its next message). The
+ * dispatcher picks it up at next restart.
+ */
+async function cmdSetupAnthropic() {
+  const args = process.argv.slice(3);
+  const flag = (name: string): string | undefined => {
+    const eq = `--${name}=`;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === `--${name}` && i + 1 < args.length) return args[i + 1];
+      if (args[i].startsWith(eq)) return args[i].slice(eq.length);
+    }
+    return undefined;
+  };
+  if (args.includes('--help') || args.includes('-h')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 agenticmail setup-anthropic ')}`);
+    log('');
+    log(`  ${c.bold('Usage:')} agenticmail setup-anthropic [--token <oauth>] [--api-key <sk-ant-...>]`);
+    log('');
+    log(`  With no flags, runs ${c.cyan('claude setup-token')} interactively (browser flow),`);
+    log(`  then asks you to paste the long-lived token it prints. Saved to`);
+    log(`  ${c.dim('~/.agenticmail/anthropic-token')} (0600). The Telegram bridge and the`);
+    log(`  Claude Code dispatcher both read from that file.`);
+    log('');
+    log(`  ${c.bold('Non-interactive (scripted / CI):')}`);
+    log(`    --token <bearer>     ${c.dim('Or env ANTHROPIC_AUTH_TOKEN')}`);
+    log(`    --api-key <sk-ant->  ${c.dim('Or env ANTHROPIC_API_KEY (pay-per-token)')}`);
+    log('');
+    return;
+  }
+
+  const homedirFn = (await import('node:os')).homedir;
+  const { mkdirSync: mkdir, writeFileSync: write, chmodSync } = await import('node:fs');
+  const tokenPath = join(homedirFn(), '.agenticmail', 'anthropic-token');
+  mkdir(join(homedirFn(), '.agenticmail'), { recursive: true });
+
+  // Path 2 / 3 — non-interactive, take the value from a flag / env and persist.
+  const direct = flag('token') ?? flag('api-key')
+    ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY ?? '';
+  if (direct) {
+    write(tokenPath, direct.trim(), { mode: 0o600 });
+    chmodSync(tokenPath, 0o600);
+    log('');
+    ok(`Saved to ${c.dim(tokenPath)}`);
+    info('The Telegram bridge and Claude Code dispatcher will pick this up on next restart.');
+    log('');
+    return;
+  }
+
+  if (!process.stdin.isTTY) {
+    fail('Non-interactive run requires --token, --api-key, ANTHROPIC_AUTH_TOKEN, or ANTHROPIC_API_KEY.');
+    info(`See: ${c.green('agenticmail setup-anthropic --help')}`);
+    process.exit(1);
+  }
+
+  // Path 1 — interactive OAuth flow via `claude setup-token`.
+  log('');
+  log(`  ${c.bold('🎀 AgenticMail — connect Anthropic auth')}`);
+  log('');
+  log(`  ${c.dim('We\'ll run ' + c.cyan('claude setup-token') + ' for you. This opens a browser')}`);
+  log(`  ${c.dim('tab at console.anthropic.com, asks you to log in / authorise, and')}`);
+  log(`  ${c.dim('prints a long-lived token at the end. You\'ll paste that token back')}`);
+  log(`  ${c.dim('here and we\'ll save it to ~/.agenticmail/anthropic-token (0600).')}`);
+  log('');
+
+  // Pre-check: is `claude` on PATH? Without it the OAuth flow has
+  // no entry point. Surface a clear actionable error instead of an
+  // ENOENT five seconds later.
+  let claudeBin = '';
+  try {
+    const { execFileSync } = await import('node:child_process');
+    claudeBin = execFileSync('which', ['claude'], { timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  } catch { /* not found */ }
+  if (!claudeBin) {
+    fail('`claude` is not on your PATH.');
+    info(`Install Claude Code first: ${c.green('npm install -g @anthropic-ai/claude-code')}`);
+    info(`Then re-run: ${c.green('agenticmail setup-anthropic')}`);
+    process.exit(1);
+  }
+
+  const proceed = await ask(`  ${c.bold('Press Enter to launch the browser flow, or Ctrl-C to cancel: ')}`);
+  void proceed;
+
+  // Spawn `claude setup-token` with full inherited stdio. The user
+  // sees the URL, the prompts, and the printed token directly. We
+  // do not try to capture stdout — the format isn't stable across
+  // Claude Code versions, and the operator can simply paste the
+  // token back to us as the next step.
+  try {
+    const { spawnSync } = await import('node:child_process');
+    const result = spawnSync(claudeBin, ['setup-token'], { stdio: 'inherit' });
+    if (result.status !== 0) {
+      log('');
+      fail(`claude setup-token exited with code ${result.status ?? '(signal: ' + result.signal + ')'}.`);
+      info('If you cancelled the flow that\'s fine — re-run when ready.');
+      process.exit(result.status ?? 1);
+    }
+  } catch (err) {
+    fail(`Could not run claude setup-token: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
+  // The user has the token in front of them now. One paste back
+  // into our hidden prompt is enough.
+  log('');
+  log(`  ${c.bold('Paste the long-lived token claude just printed')} ${c.dim('— input is hidden,')}`);
+  log(`  ${c.dim('format starts with ' + c.green('sk-ant-oat01-...') + '.')}`);
+  const pasted = (await askSecret(`  ${c.cyan('Token:')} `)).trim();
+  if (!pasted) {
+    fail('No token entered.');
+    info(`Re-run when ready: ${c.green('agenticmail setup-anthropic')}`);
+    process.exit(1);
+  }
+  if (!/^sk-ant-(oat01|api03)/.test(pasted)) {
+    log('');
+    info(`That doesn\'t look like a standard Anthropic token (sk-ant-oat01-... or sk-ant-api03-...).`);
+    const confirm = (await ask(`  ${c.bold('Save it anyway?')} ${c.dim('(y/N)')} `)).trim().toLowerCase();
+    if (!confirm.startsWith('y')) {
+      info('Cancelled.');
+      process.exit(0);
+    }
+  }
+
+  write(tokenPath, pasted, { mode: 0o600 });
+  chmodSync(tokenPath, 0o600);
+  log('');
+  ok(`Saved to ${c.dim(tokenPath)} (0600).`);
+  info('The Telegram bridge picks this up on next message. Restart the dispatcher to use it:');
+  info(`  ${c.green('pm2 restart agenticmail-claudecode-dispatcher')}  ${c.dim('(or)')}`);
+  info(`  ${c.green('agenticmail stop && agenticmail start')}`);
+  log('');
+}
+
 async function cmdSetupPhone() {
   const args = process.argv.slice(3);
 
@@ -3440,6 +3603,10 @@ async function cmdBootstrap() {
   log('');
   log(`  ${c.bold('Optional — wire up external channels')} ${c.dim('(pick any you want; skip the rest)')}`);
   log('');
+  log(`  ${c.cyan('Anthropic auth')} ${c.dim('— the dispatcher\'s spawned workers + the Telegram bridge need an')}`);
+  log(`  ${c.dim('OAuth token to talk to Claude. Run once; saved to ~/.agenticmail/anthropic-token.')}`);
+  log(`    ${c.green('agenticmail setup-anthropic')}  ${c.dim('(wraps `claude setup-token` — browser flow)')}`);
+  log('');
   log(`  ${c.cyan('Real internet email')} ${c.dim('— send/receive mail to/from Gmail, Outlook, etc.')}`);
   log(`    ${c.green('agenticmail setup-email')}`);
   log('');
@@ -5229,6 +5396,7 @@ if (command === 'setup' && typeof process.argv[3] === 'string') {
     email: 'setup-email', mail: 'setup-email', relay: 'setup-relay',
     phone: 'setup-phone', twilio: 'setup-phone', '46elks': 'setup-phone',
     telegram: 'setup-telegram',
+    anthropic: 'setup-anthropic', claude: 'setup-anthropic', token: 'setup-anthropic',
   };
   if (subMap[sub]) {
     process.argv.splice(3, 1);             // remove the sub-word
@@ -5258,6 +5426,12 @@ switch (process.argv[2]) {
   case 'setup-telegram':
   case 'telegram':
     cmdSetupTelegram().catch(err => { console.error(err); process.exit(1); });
+    break;
+  case 'setup-anthropic':
+  case 'setup-claude':
+  case 'setup-token':
+  case 'anthropic':
+    cmdSetupAnthropic().catch(err => { console.error(err); process.exit(1); });
     break;
   case 'tunnel':
     cmdTunnel().catch(err => { console.error(err); process.exit(1); });
@@ -5324,6 +5498,7 @@ switch (process.argv[2]) {
     log(`    ${c.green('agenticmail setup')}     Re-run the setup wizard ${c.dim('(use --yes for non-interactive)')}`);
     log(`    ${c.green('agenticmail setup-email')}  Connect your mailbox — just email + password ${c.dim('(auto-detects Gmail/Outlook/custom)')}`);
     log(`    ${c.green('agenticmail setup-phone')}  Connect Twilio / 46elks for outbound calls ${c.dim('(--account-sid + --auth-token, or env vars)')}`);
+    log(`    ${c.green('agenticmail setup-anthropic')} Generate / save Anthropic OAuth token ${c.dim('(wraps `claude setup-token`)')}`);
     log(`    ${c.green('agenticmail setup-telegram')}  Wire up the Telegram bridge ${c.dim('(--bot-token + --chat-id, or env vars)')}`);
     log(`    ${c.green('agenticmail tunnel')}     Public HTTPS tunnel to your local API ${c.dim('(free Cloudflare quick-tunnel; needed for Twilio webhooks)')}`);
     log(`    ${c.green('agenticmail start')}     Start the server`);
