@@ -25,10 +25,77 @@
  *   CLAUDE_CODE_AGENTS_DIR       Override agents dir (for persona files).
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { Dispatcher } from './dispatcher.js';
 import { resolveDispatcherTuning } from './dispatcher-tuning.js';
 
+/**
+ * Resolve the Anthropic OAuth bearer the dispatcher should hand to
+ * `@anthropic-ai/claude-agent-sdk`'s `query()`.
+ *
+ * Background — Anthropic's recent policy lets an organisation
+ * disable Claude-subscription access for Claude Code WITHOUT
+ * disabling Claude itself. When that flips, the SDK's default auth
+ * path (subscription-routed Claude Code) fails with `Your organization
+ * has disabled Claude subscription access for Claude Code` even
+ * though the operator's interactive `claude` CLI still works AND the
+ * Telegram bridge keeps working — because the bridge spawns `claude
+ * -p` with `ANTHROPIC_AUTH_TOKEN` set, which routes the request as a
+ * direct bearer instead of through the subscription policy check.
+ *
+ * The dispatcher used to inherit `ANTHROPIC_AUTH_TOKEN` only if pm2
+ * happened to have it in env. Now we look in the standard
+ * token-file locations first (same order the Telegram bridge uses) so
+ * a default install Just Works without the operator having to edit
+ * pm2's env config or export anything globally:
+ *
+ *   1. `~/.agenticmail/anthropic-token`  — AgenticMail-owned location.
+ *   2. `~/.fola-claude-token`            — the original agent-harness
+ *                                          token file. Operators on
+ *                                          this machine already have
+ *                                          it for the Fola bridge; if
+ *                                          they used it the cli's
+ *                                          claudecode integration
+ *                                          installer copies the path
+ *                                          forward.
+ *   3. `process.env.ANTHROPIC_AUTH_TOKEN` — already set by the
+ *                                          operator / pm2 ecosystem.
+ *   4. `process.env.ANTHROPIC_API_KEY`    — pay-per-token API path
+ *                                          (different from OAuth but
+ *                                          accepted by the SDK).
+ *
+ * Sets `process.env.ANTHROPIC_AUTH_TOKEN` from the first matching
+ * file so the SDK reads it on import. No-op when the token is
+ * already set or no file is found (the SDK will then attempt its
+ * default Claude Code subscription path, which is correct for orgs
+ * that haven't flipped the policy flag).
+ */
+function ensureAnthropicTokenInEnv(): void {
+  if (process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY) return;
+  const candidates = [
+    join(homedir(), '.agenticmail', 'anthropic-token'),
+    join(homedir(), '.fola-claude-token'),
+  ];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      const token = readFileSync(path, 'utf-8').trim();
+      if (token) {
+        process.env.ANTHROPIC_AUTH_TOKEN = token;
+        // Log source (suffix only — never the whole token) so an
+        // operator debugging auth issues can see which file the
+        // dispatcher picked up without exposing the bearer.
+        console.error(`[dispatcher-bin] anthropic token source: ${path} (suffix ...${token.slice(-6)})`);
+        return;
+      }
+    } catch { /* try the next path */ }
+  }
+}
+
 async function main(): Promise<void> {
+  ensureAnthropicTokenInEnv();
   const tuning = resolveDispatcherTuning();
   console.error(
     `[dispatcher-bin] tuning: maxConcurrentWorkers=${tuning.maxConcurrentWorkers ?? '(default)'} ` +

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.76] - 2026-05-20
+
+### Fixed — claudecode dispatcher now uses the OAuth bearer like the Telegram bridge does
+
+The dispatcher's `query()` call into `@anthropic-ai/claude-agent-sdk`
+was routing through the SDK's default Claude Code subscription path,
+which Anthropic lets orgs disable independently of Claude itself. When
+that policy flag flipped, the dispatcher started failing with `Your
+organization has disabled Claude subscription access for Claude Code`
+while the Telegram bridge kept working — because the bridge spawns
+`claude -p` with `ANTHROPIC_AUTH_TOKEN` set, routing the request as a
+direct bearer instead of through the policy check.
+
+The dispatcher now does the same lookup at startup: checks
+`~/.agenticmail/anthropic-token` first, falls back to
+`~/.fola-claude-token` (same location the bridge reads), and sets
+`process.env.ANTHROPIC_AUTH_TOKEN` if either has a token. The SDK
+picks it up on import and uses bearer auth — bypassing the
+subscription policy check that Anthropic's org policy flag controls.
+
+No-op when `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` is already
+set (operator's env or pm2 config wins). No-op when no token file
+exists (the SDK then attempts its default path — correct for orgs
+that haven't flipped the policy flag).
+
+The dispatcher logs the resolved token's source path + last 6 chars
+so an operator debugging auth issues can see which file was used
+without exposing the bearer itself.
+
 ## [0.9.75] - 2026-05-20
 
 ### Fixed — Telegram bridge spawned MCP via a binary that often isn't installed
