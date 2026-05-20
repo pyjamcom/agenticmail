@@ -20,6 +20,7 @@ import {
 } from '@agenticmail/core';
 import { interactiveShell } from './shell.js';
 import { collectFields, SetupError, type SetupField } from './setup-utils.js';
+import { validateAnthropicToken, identifyTokenKind } from './anthropic-token.js';
 
 /**
  * Prompt for text input. Creates a temporary readline per call
@@ -1148,7 +1149,27 @@ async function cmdSetupAnthropic() {
   const direct = flag('token') ?? flag('api-key')
     ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY ?? '';
   if (direct) {
-    write(tokenPath, direct.trim(), { mode: 0o600 });
+    const trimmedDirect = direct.trim();
+    // Validate against the live API before writing. Skip-validation
+    // escape hatch for the rare case the operator is offline or
+    // behind a proxy and willing to trust their input.
+    const skipValidate = args.includes('--skip-validate') || process.env.AGENTICMAIL_SKIP_TOKEN_VALIDATE === '1';
+    if (!skipValidate) {
+      info('Validating against api.anthropic.com…');
+      const result = await validateAnthropicToken(trimmedDirect);
+      if (!result.ok) {
+        log('');
+        fail(`Token rejected (${result.reason}): ${result.message}`);
+        if (result.reason === 'subscription-disabled') {
+          info('Tip: use --api-key with an sk-ant-api03-... key instead, OR ask your org admin to re-enable Claude Code subscription access.');
+        } else if (result.reason === 'network') {
+          info(`Bypass the network check with: ${c.green('--skip-validate')} (saves the token without contacting Anthropic).`);
+        }
+        process.exit(1);
+      }
+      ok(`Token validated (${identifyTokenKind(trimmedDirect)}).`);
+    }
+    write(tokenPath, trimmedDirect, { mode: 0o600 });
     chmodSync(tokenPath, 0o600);
     log('');
     ok(`Saved to ${c.dim(tokenPath)}`);
@@ -1229,6 +1250,38 @@ async function cmdSetupAnthropic() {
       info('Cancelled.');
       process.exit(0);
     }
+  }
+
+  // Live-validate before persisting. A pasted-but-rejected token is
+  // the single most common cause of "the bridge silently refuses to
+  // reply" — catching it here turns a multi-hour mystery into a 5-
+  // second loop. The operator can retry with a fresh paste, or skip
+  // validation if they know they're offline.
+  log('');
+  info('Validating against api.anthropic.com…');
+  const validation = await validateAnthropicToken(pasted);
+  if (!validation.ok) {
+    log('');
+    fail(`Anthropic rejected the token (${validation.reason}): ${validation.message}`);
+    if (validation.reason === 'subscription-disabled') {
+      log('');
+      info('Your token is valid, but your org has Claude Code subscription access disabled.');
+      info('Two fixes:');
+      info(`  1. Ask your org admin to re-enable Claude Code at ${c.cyan('console.anthropic.com')}`);
+      info(`  2. Generate an API key instead and run: ${c.green('agenticmail setup-anthropic --api-key sk-ant-api03-...')}`);
+    } else if (validation.reason === 'network') {
+      info(`Offline / proxy issue. To save without validating: ${c.green('agenticmail setup-anthropic --skip-validate')}`);
+    } else if (validation.reason === 'rate-limited') {
+      info('Rate-limited at the source. Wait a minute and re-run.');
+    }
+    log('');
+    const retry = (await ask(`  ${c.bold('Save it anyway?')} ${c.dim('(y/N)')} `)).trim().toLowerCase();
+    if (!retry.startsWith('y')) {
+      info('Cancelled — nothing written.');
+      process.exit(1);
+    }
+  } else {
+    ok(`Token validated (${identifyTokenKind(pasted)}).`);
   }
 
   write(tokenPath, pasted, { mode: 0o600 });
@@ -1545,8 +1598,16 @@ async function cmdSetupPhone() {
     // The server route treats a missing `password` on update as "keep
     // the existing encrypted-at-rest value as-is", so the call still
     // succeeds and Twilio webhook signing keeps working.
+    // supportedRegions must be set explicitly per-provider. Twilio is a
+    // global carrier — without ['WORLD'] the mission gate rejects any
+    // call whose destination isn't in the EU as `transport-region-unsupported`.
+    // 46elks remains EU-only. Sending this on every save also REPAIRS
+    // pre-0.9.79 Twilio installs that got the wrong ['EU'] default written
+    // to disk: the server merges over existing config, so re-running
+    // setup-phone is enough to fix a stuck install.
+    const supportedRegions = provider === 'twilio' ? ['WORLD'] : ['EU'];
     const body: Record<string, unknown> = {
-      provider, phoneNumber, username, webhookBaseUrl, webhookSecret,
+      provider, phoneNumber, username, webhookBaseUrl, webhookSecret, supportedRegions,
     };
     if (password) body.password = password;
     const resp = await fetch(`${apiBase}/api/agenticmail/phone/transport/setup`, {
@@ -2491,6 +2552,10 @@ async function cmdSetup() {
                 password,
                 webhookBaseUrl,
                 webhookSecret,
+                // Twilio is a global carrier; 46elks is EU-only. The
+                // mission gate uses this to reject calls outside the
+                // declared regions, so the default must match reality.
+                supportedRegions: provider === 'twilio' ? ['WORLD'] : ['EU'],
               }),
               signal: AbortSignal.timeout(15_000),
             });
@@ -3673,7 +3738,7 @@ async function cmdClaudeCode() {
     log(`  ${c.bold('Usage:')} agenticmail claudecode [flags]`);
     log('');
     log('  Registers AgenticMail with Claude Code so every Claude Code session');
-    log('  can call AgenticMail agents (Fola, John, …) the same way it calls');
+    log('  can call AgenticMail agents (alice, bob, …) the same way it calls');
     log('  native subagents via the Agent tool.');
     log('');
     log('  Specifically, this command:');
@@ -3785,7 +3850,7 @@ async function cmdClaudeCode() {
     info('Already up to date — no files were modified.');
   } else {
     log(`  ${c.bold('Next:')} restart Claude Code so it picks up the new MCP server.`);
-    info(`Try inside Claude Code: ${c.green('Agent { subagent_type: "agenticmail-fola", prompt: "hi" }')}`);
+    info(`Try inside Claude Code: ${c.green('Agent { subagent_type: "agenticmail-alice", prompt: "hi" }')}`);
   }
   log('');
 }

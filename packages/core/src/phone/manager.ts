@@ -1347,11 +1347,19 @@ export function buildPhoneTransportConfig(input: {
       typeof item === 'string' && ['sms', 'call_control', 'realtime_media', 'recording_supported'].includes(item)
     ))
     : ['call_control'];
+  // Default supportedRegions is provider-aware: Twilio is a global
+  // carrier (US + international), so calls to a US/non-EU destination
+  // must not be blocked by the mission gate. 46elks is EU-only, so
+  // its default stays ['EU']. The historic blanket-['EU'] default
+  // bit us in v0.9.78 when a US Twilio install couldn't dial a US
+  // number — the mission gate rejected it as transport-region-unsupported
+  // even though Twilio could obviously place the call.
+  const defaultRegions: PhoneTransportConfig['supportedRegions'] = isTwilio ? ['WORLD'] : ['EU'];
   const supportedRegions: PhoneTransportConfig['supportedRegions'] = Array.isArray(input.supportedRegions)
     ? input.supportedRegions.filter((item): item is PhoneTransportConfig['supportedRegions'][number] => (
       typeof item === 'string' && ['AT', 'DE', 'EU', 'WORLD'].includes(item)
     ))
-    : ['EU'];
+    : defaultRegions;
 
   const config: PhoneTransportConfig = {
     provider,
@@ -1362,7 +1370,7 @@ export function buildPhoneTransportConfig(input: {
     webhookSecret,
     apiUrl: apiUrl || undefined,
     capabilities: Array.from(new Set<TelephonyTransportCapability>(['call_control', ...capabilities])),
-    supportedRegions: supportedRegions.length ? Array.from(new Set<PhoneTransportConfig['supportedRegions'][number]>(supportedRegions)) : ['EU'],
+    supportedRegions: supportedRegions.length ? Array.from(new Set<PhoneTransportConfig['supportedRegions'][number]>(supportedRegions)) : defaultRegions,
     configuredAt: input.configuredAt ?? new Date().toISOString(),
   };
 

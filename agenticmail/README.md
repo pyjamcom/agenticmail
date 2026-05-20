@@ -164,7 +164,7 @@ All commands are available via `agenticmail <command>` or `npx @agenticmail/cli@
 |---------|-------------|
 | `agenticmail bootstrap` | ✨ **One-shot, zero-question install.** Designed to be runnable by an AI agent (Claude Code itself) on a user's behalf — no prompts, no decisions, no human in the loop. Provisions Stalwart, generates keys, starts the API as a launchd service, wires Claude Code in, starts the dispatcher daemon. External email relay and SMS are SKIPPED (run `agenticmail setup` interactively later to add them). See [Autonomous install](#autonomous-install) below. |
 | `agenticmail openclaw` | **Set up AgenticMail for OpenClaw.** Starts infrastructure, creates an agent, configures the plugin, enables agent auto-spawn via hooks, and restarts the OpenClaw gateway. |
-| `agenticmail claudecode` | **Set up AgenticMail for Claude Code.** ✨ NEW — wires AgenticMail into Claude Code so every agent (Fola, John, …) becomes a callable subagent via the `Agent` tool, AND wakes automatically on incoming mail or tasks. No separate Anthropic key needed — workers ride on your existing Claude OAuth. See the [Claude Code Integration](#claude-code-integration) section below. |
+| `agenticmail claudecode` | **Set up AgenticMail for Claude Code.** ✨ NEW — wires AgenticMail into Claude Code so every agent (alice, bob, …) becomes a callable subagent via the `Agent` tool, AND wakes automatically on incoming mail or tasks. No separate Anthropic key needed — workers ride on your existing Claude OAuth. See the [Claude Code Integration](#claude-code-integration) section below. |
 
 ### Non-Interactive Setup Commands (Claude / scripted installs)
 
@@ -504,13 +504,13 @@ agenticmail claudecode --remove    # uninstall
 ### What it gives you
 
 - **Every AgenticMail agent is callable from Claude Code via the native `Agent` tool.**
-  Inside any Claude Code session: `Agent { subagent_type: "agenticmail-fola", prompt: "..." }` — the subagent IS Fola, reads Fola's real inbox, sends mail from `fola@localhost`.
+  Inside any Claude Code session: `Agent { subagent_type: "agenticmail-alice", prompt: "..." }` — the subagent IS alice, reads alice's real inbox, sends mail from `alice@localhost`.
 
 - **All 95 AgenticMail MCP tools available in Claude Code.**
   `mcp__agenticmail__send_email`, `call_agent`, `list_inbox`, `sms_send`, … — works in any Claude Code session, no further setup.
 
 - **Auto-wake on inbox / task events.**
-  Send an email to `fola@localhost`, post a `/tasks/rpc` for Fola, or `CC` her on a thread — a background dispatcher daemon (managed by PM2) spawns a Claude-powered worker to handle it. The worker submits results / replies; threads keep flowing.
+  Send an email to `alice@localhost`, post a `/tasks/rpc` for alice, or `CC` her on a thread — a background dispatcher daemon (managed by PM2) spawns a Claude-powered worker to handle it. The worker submits results / replies; threads keep flowing.
 
 - **Multi-agent coordination on email threads.**
   Because every cross-agent reply lands in the recipient's inbox and wakes them, fan-out (CC three teammates) and reply chains "just work." No new infrastructure to learn — it's email.
@@ -527,16 +527,16 @@ Each AgenticMail agent is a mailbox + persistent state + identity inside Agentic
 
 ```
 Anyone (you, an agent, a curl):
-   send mail to fola@localhost         POST /tasks/rpc { target: "Fola", task: ... }
+   send mail to alice@localhost        POST /tasks/rpc { target: "alice", task: ... }
               │                                      │
               ▼                                      ▼
    AgenticMail master API           ──── task event ────→ dispatcher daemon (PM2)
               │                                      │
-              │           SSE for fola's inbox       ▼
+              │          SSE for alice's inbox       ▼
               └──────────────────────────────→ spawns worker via Claude Agent SDK
                                                      │
                                                      ▼
-                                         Worker IS Fola for this turn:
+                                         Worker IS alice for this turn:
                                          - reads inbox / claims task
                                          - sends mail / submits result
                                          - exits
@@ -549,10 +549,10 @@ One Anthropic connection (your Claude OAuth). Many AgenticMail identities. Real 
 After `agenticmail claudecode`, restart Claude Code and try in any session:
 
 ```
-Agent { subagent_type: "agenticmail-fola", prompt: "Use call_agent to ask the 'researcher' agent to summarise AgenticMail in two sentences, then email me the summary." }
+Agent { subagent_type: "agenticmail-alice", prompt: "Use call_agent to ask the 'researcher' agent to summarise AgenticMail in two sentences, then email me the summary." }
 ```
 
-Fola will use the AgenticMail RPC pipeline to delegate to `researcher`, get a structured result back, and email the summary to her caller — all powered by Claude Code's OAuth, no separate keys, no broken enterprise dependencies.
+alice will use the AgenticMail RPC pipeline to delegate to `researcher`, get a structured result back, and email the summary to her caller — all powered by Claude Code's OAuth, no separate keys, no broken enterprise dependencies.
 
 See [`@agenticmail/claudecode` on npm](https://www.npmjs.com/package/@agenticmail/claudecode) for the full design doc, security model, and HTTP API reference.
 

@@ -74,7 +74,25 @@ The bootstrap intentionally skips everything that needs user-owned
 credentials. Most users want at least one of these wired up, and they
 won't know to ask. **Don't end the install conversation without
 walking through this checklist** — phrase it as one question per
-channel so the user can opt in or out individually:
+channel so the user can opt in or out individually.
+
+**Step 0 — Anthropic token (do this FIRST, before any of the others).**
+Without it, the Telegram bridge and the Claude Code dispatcher have
+no auth and silently fail. Most operators don't realize this is a
+separate step. Run:
+
+```bash
+agenticmail setup-anthropic
+```
+
+This wraps `claude setup-token` (browser OAuth), live-validates the
+token, and writes it to `~/.agenticmail/anthropic-token` (0600). If
+the operator already has an API key they can skip the browser flow
+with `agenticmail setup-anthropic --api-key sk-ant-api03-...`. See
+the `setup-anthropic` section below for the full runbook and the
+failure-classification table.
+
+Then ask about the channels:
 
 > "Bootstrap is done. Before I close out, want me to wire up any of
 > these now? (Yes / no for each — I'll skip the ones you say no to.)
@@ -178,6 +196,52 @@ What's actually happening under the hood (for your own model — paraphrase, don
 - Spam to any sub-agent wakes Claude / Codex turns. The `wake-budget` guard in `dispatcher.handleEvent` is the throttle; relay-level spam filtering is the cleaner long-term answer.
 
 If the operator says yes anyway (most do), continue with `setup-email`. If they say no, skip it — `*@localhost` coordination still works fully without a relay.
+
+### `setup-anthropic` — connect the Anthropic auth token (do this FIRST)
+
+The Telegram bridge and the Claude Code dispatcher both call `claude -p` under the hood, and `claude -p` needs an Anthropic auth token to do anything. Without it, the bridge silently fails (Telegram messages get an "auth-failed" reply; email mentions trigger no agent turn at all). **Walk the operator through this before phone / telegram setup** — it's the single most common reason a brand-new install looks like it "isn't doing anything".
+
+Two paths, pick the one that matches the operator's account type:
+
+**Path A — Claude Code subscription (most common, free for Pro/Team users):**
+
+```bash
+agenticmail setup-anthropic
+```
+
+This wraps `claude setup-token` — opens a browser, the operator logs into `console.anthropic.com`, copies the long-lived OAuth token (`sk-ant-oat01-...`) it prints, pastes it back into the hidden prompt. We then live-validate it against `api.anthropic.com` (one `claude-haiku-4-5` call with `max_tokens: 1` — effectively free) before writing to `~/.agenticmail/anthropic-token` (0600). If validation fails the wizard explains *why* in plain English: `auth-failed` → token's revoked; `subscription-disabled` → org has Claude Code access turned off (point them at Path B); `rate-limited` → wait a minute; `network` → use `--skip-validate`.
+
+Prereq: `claude` must be on PATH. If it isn't, the wizard prints `npm install -g @anthropic-ai/claude-code` and exits cleanly.
+
+**Path B — direct API key (pay-per-token, works for any account):**
+
+```bash
+ANTHROPIC_API_KEY='sk-ant-api03-...' agenticmail setup-anthropic
+# or:
+agenticmail setup-anthropic --api-key sk-ant-api03-...
+```
+
+Same live-validation, same destination file. Use this when the operator's org has disabled Claude Code subscription access (you'll see "🚫 subscription-disabled" in Telegram replies otherwise).
+
+**Why this matters operationally:**
+
+- The Telegram bridge reads `~/.agenticmail/anthropic-token` at every spawn — so refreshing the token via `agenticmail setup-anthropic` takes effect on the *next* inbound message, no restart needed.
+- The dispatcher reads the same file at boot and sets `ANTHROPIC_AUTH_TOKEN` before the SDK loads. Restart the dispatcher (`pm2 restart agenticmail-claudecode-dispatcher` or `agenticmail stop && agenticmail start`) after `setup-anthropic` to pick up the new token.
+- The dispatcher uses OAuth-bearer auth (with the `anthropic-beta: oauth-2025-04-20` header) on `/v1/messages` — this bypasses subscription-routed paths, so OAuth tokens keep working on `/v1/messages` even when subscription endpoints are disabled.
+
+**When things go wrong at runtime (telegram chat):**
+
+The bridge classifies `claude -p` stderr into actionable categories and forwards a friendly message to the operator's Telegram chat instead of a raw stack trace:
+
+| Category | Telegram message starts with |
+| --- | --- |
+| `rate-limited` | ⏳ |
+| `quota-exceeded` | 💳 |
+| `subscription-disabled` | 🚫 (suggests `--api-key` flow) |
+| `auth-failed` | 🔒 (suggests `agenticmail setup-anthropic`) |
+| `overloaded` | 🛠️ |
+
+If the operator says "the bot just told me it hit a quota / rate limit / auth error", that's where it came from — the bridge isn't broken, it just hit the source.
 
 ### `setup-phone` — Twilio / 46elks outbound voice (optional)
 

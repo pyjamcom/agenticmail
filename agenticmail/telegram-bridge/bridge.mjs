@@ -47,6 +47,7 @@ import {
 } from './lib/telegram-api.mjs';
 import { SessionMap } from './lib/sessions.mjs';
 import { runClaude, loadAnthropicToken } from './lib/claude-runner.mjs';
+import { classifyClaudeChildError } from './lib/error-classifier.mjs';
 
 /**
  * Generate (or refresh) the MCP config the spawned `claude -p` turn loads.
@@ -530,11 +531,17 @@ async function processChatQueue(chatId, state) {
           // User-requested kill surfaces as a SIGTERM-rejected promise — swallow it.
           log.info(`handler: run aborted by user (${err.message.slice(0, 80)})`);
         } else {
-          log.error(`handler error: ${err.message}`);
+          // Classify the failure into one of: rate-limited, quota-exceeded,
+          // subscription-disabled, auth-failed, overloaded, unknown — and
+          // send a chat-friendly message so the human on the other end
+          // knows what to do (wait, refresh token, contact admin). The
+          // raw stderr stays in the bridge log for the operator to debug.
+          const classified = classifyClaudeChildError(err.message);
+          log.error(`handler error [${classified.category}]: ${err.message.slice(0, 600)}`);
           await sendMessage(
             state.token,
             chatId,
-            `Error: ${err.message.slice(0, 400)}`,
+            classified.message,
             { replyToMessageId: firstMsg.message_id },
           ).catch(() => {});
         }
