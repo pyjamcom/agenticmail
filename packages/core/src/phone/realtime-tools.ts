@@ -241,6 +241,60 @@ export const SEARCH_EMAIL_TOOL: RealtimeToolDefinition = {
   },
 };
 
+/**
+ * Phase 3 (skill library) — find the right skill playbook for the
+ * situation just hit on the call. Always call BEFORE {@link LOAD_SKILL_TOOL}
+ * so the loaded skill actually matches the situation. Fast (file-on-
+ * disk search) — a brief "one moment" is enough; no long hold needed.
+ */
+export const SEARCH_SKILLS_TOOL: RealtimeToolDefinition = {
+  type: 'function',
+  name: 'search_skills',
+  description:
+    'Search your skill library for a playbook that fits the situation you just hit on this call '
+    + '(billing dispute, debt collector tactics, reservation deadlock, etc). Returns ranked summaries — '
+    + 'pick the best match and pass its id to load_skill. Fast.',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: 'Plain-language description of the situation, e.g. "rep insists on a commitment date", "the restaurant is fully booked", "I need to dispute a recurring charge after cancellation".',
+      },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * Phase 3 (skill library) — load a skill playbook into the session
+ * for the rest of the call. Tell the caller "hold on one moment"
+ * BEFORE calling — loading involves a `session.update` round-trip.
+ * Max two skills are loaded at once; a third FIFO-evicts the
+ * oldest (the bridge enforces this).
+ */
+export const LOAD_SKILL_TOOL: RealtimeToolDefinition = {
+  type: 'function',
+  name: 'load_skill',
+  description:
+    'Load a skill playbook by id into your context for the rest of this call. The playbook (principles, '
+    + 'scripted phrases, ordered tactics, hard boundaries, exit strategy) grounds your next turns. '
+    + 'Always call search_skills first to find the right id. Before calling, say "hold on one moment" — '
+    + 'loading is briefer than `ask_operator` but takes a beat.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'Skill id (lowercase-hyphenated), e.g. "negotiate-bill-reduction". Get it from search_skills.',
+      },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+};
+
 /** Every tool defined in this module, keyed by name. */
 export const REALTIME_TOOL_DEFINITIONS: Record<string, RealtimeToolDefinition> = {
   ask_operator: ASK_OPERATOR_TOOL,
@@ -248,6 +302,8 @@ export const REALTIME_TOOL_DEFINITIONS: Record<string, RealtimeToolDefinition> =
   recall_memory: RECALL_MEMORY_TOOL,
   get_datetime: GET_DATETIME_TOOL,
   search_email: SEARCH_EMAIL_TOOL,
+  search_skills: SEARCH_SKILLS_TOOL,
+  load_skill: LOAD_SKILL_TOOL,
 };
 
 // ─── Tool-use guidance for the session instructions ─────
@@ -281,6 +337,25 @@ export function buildRealtimeToolGuidance(tools: readonly RealtimeToolDefinition
     lines.push(
       'The lookup tools (web_search, recall_memory, get_datetime, search_email) return in seconds — '
       + 'a brief "one moment" is plenty; no long hold is needed for these.',
+    );
+  }
+  if (names.has('search_skills') && names.has('load_skill')) {
+    lines.push(
+      'Your SKILL LIBRARY contains playbooks for specific real-world phone situations — bill '
+      + 'negotiation, debt-collector handling, restaurant booking, dispute filing, etc. Each playbook '
+      + 'is a complete set of principles, scripted phrases, ordered tactics, boundaries, and exit '
+      + 'strategy for that one situation. When you find yourself on the call without a clear next '
+      + 'move — the rep brought up something you do not know how to handle, the conversation '
+      + 'reached a stage that needs a specific tactic — load a skill instead of improvising:\n'
+      + '  1. Tell the caller you need a moment: "Hold on one moment — let me check something."\n'
+      + '  2. Call search_skills with a one-line description of the situation.\n'
+      + '  3. Call load_skill with the id of the best match.\n'
+      + '  4. Resume the call grounded in the playbook the load returned. Follow the playbook\'s '
+      + 'tactic order, use its scripted phrases (paraphrased to match your voice), respect its '
+      + 'hard boundaries, watch for its success / failure signals.\n'
+      + 'A skill\'s rendered playbook is now part of your instructions for the rest of the call. '
+      + 'You can load a second skill if a new situation comes up — but the model keeps a max of '
+      + 'two loaded; a third load drops the oldest. Pick skills deliberately.',
     );
   }
   return lines.join('\n');

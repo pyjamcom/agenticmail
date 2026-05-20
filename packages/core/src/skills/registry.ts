@@ -28,6 +28,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+import { MemorySearchIndex } from '../memory/text-search.js';
 import type {
   Skill,
   SkillSummary,
@@ -52,13 +53,64 @@ function userDir(): string {
   return dir;
 }
 
-/** Coarse 5-second cache so an active skill_search loop doesn't re-read disk per call. */
+/**
+ * Coarse 5-second cache so an active skill_search loop doesn't re-read
+ * disk per call AND doesn't rebuild the BM25F index per call.
+ *
+ * Two things live in here together because they share the same
+ * invalidation moment: a fresh disk read requires a fresh index, and
+ * vice-versa. Splitting them into separate caches would create the
+ * possibility of an index built against stale documents (or fresh
+ * documents not yet indexed) for a brief window.
+ *
+ * The index implementation is `MemorySearchIndex` from the memory
+ * subsystem — same BM25F + inverted-postings + lazy-IDF + bigram-
+ * proximity scorer that powers persistent agent memory. Skills are
+ * indexed as `{ title: name, tags: tags, content: description +
+ * principles + phrases + tactic scripts }`, so the field weighting
+ * (title 3×, tags 2×, content 1×) naturally prioritises name + tag
+ * matches over tactic-body matches.
+ */
 const cache: {
   ts: number;
   byId: Map<string, Skill> | null;
-} = { ts: 0, byId: null };
+  index: MemorySearchIndex | null;
+} = { ts: 0, byId: null, index: null };
 
 const CACHE_TTL_MS = 5_000;
+
+/**
+ * Render a skill into the field-weighted-text shape `MemorySearchIndex`
+ * expects. We collapse the body fields (description + principles +
+ * tactic scripts + phrase bodies) into one `content` blob; the index's
+ * BM25F weighting then handles the title/tags/content hierarchy.
+ *
+ * Why include tactic scripts and phrase bodies in the content blob —
+ * those phrases are where the user's likely query language actually
+ * lives. A query like "rep wants me to commit to payment" should hit
+ * `cancel-subscription-graceful` because its `refuse_payment_request`
+ * phrase contains those exact words, not because the skill's name
+ * mentions them.
+ */
+function skillToIndexDoc(s: Skill): { title: string; tags: string[]; content: string } {
+  const contentParts: string[] = [
+    s.description,
+    s.context?.when_to_use ?? '',
+    ...(s.principles ?? []),
+    ...Object.values(s.phrases ?? {}),
+    ...((s.tactics ?? []).flatMap((t) => [t.name, t.when, t.script])),
+    ...(s.success_signals ?? []),
+    ...(s.failure_signals ?? []),
+  ];
+  return {
+    title: s.name,
+    // Include category as a tag for free — a query of "negotiation"
+    // hits both literal `negotiation`-category skills AND skills
+    // that tagged themselves "negotiation".
+    tags: [...(s.tags ?? []), s.category],
+    content: contentParts.filter(Boolean).join(' '),
+  };
+}
 
 function loadAllSkillsFromDisk(): Map<string, Skill> {
   const all = new Map<string, Skill>();
@@ -95,18 +147,29 @@ function loadAllSkillsFromDisk(): Map<string, Skill> {
   return all;
 }
 
-function ensureLoaded(): Map<string, Skill> {
+function ensureLoaded(): { byId: Map<string, Skill>; index: MemorySearchIndex } {
   const now = Date.now();
-  if (cache.byId && now - cache.ts < CACHE_TTL_MS) return cache.byId;
+  if (cache.byId && cache.index && now - cache.ts < CACHE_TTL_MS) {
+    return { byId: cache.byId, index: cache.index };
+  }
   const fresh = loadAllSkillsFromDisk();
+  // Build the BM25F index incrementally — `addDocument` updates the
+  // posting lists + per-doc records + (lazily) IDF. Total cost scales
+  // with the total token count, not the skill count squared.
+  const index = new MemorySearchIndex();
+  for (const [id, skill] of fresh) {
+    try { index.addDocument(id, skillToIndexDoc(skill)); } catch { /* skip — best-effort */ }
+  }
   cache.byId = fresh;
+  cache.index = index;
   cache.ts = now;
-  return fresh;
+  return { byId: fresh, index };
 }
 
 /** Manual cache invalidation — useful for tests + after a write. */
 export function invalidateSkillCache(): void {
   cache.byId = null;
+  cache.index = null;
   cache.ts = 0;
 }
 
@@ -232,7 +295,7 @@ function summarize(s: Skill): SkillSummary {
 
 /** List all skills (summaries), optionally filtered. */
 export function listSkills(opts: { category?: SkillCategory; tag?: string } = {}): SkillSummary[] {
-  const all = Array.from(ensureLoaded().values());
+  const all = Array.from(ensureLoaded().byId.values());
   const filtered = all.filter((s) => {
     if (opts.category && s.category !== opts.category) return false;
     if (opts.tag && !s.tags.includes(opts.tag.toLowerCase())) return false;
@@ -242,39 +305,68 @@ export function listSkills(opts: { category?: SkillCategory; tag?: string } = {}
 }
 
 /**
- * Fuzzy-search skills by `query` against name, description, tags, and
- * the contents of `phrases` / `tactics.script` / `principles`. Returns
- * results ranked by a simple score (matches in name > tags > body).
+ * Search skills by free-text query, ranked by BM25F.
  *
- * Intentionally low-tech — substring match, lowercased, no stemming.
- * For a corpus of <1000 skills this is fast enough that BM25 / vector
- * search is overkill, and the user-facing matcher should be
- * predictable rather than clever.
+ * Uses {@link MemorySearchIndex} — the same scorer that powers
+ * persistent agent memory. Field weighting puts name (title 3×) and
+ * tags (2×) above body content (1×), so an exact-name hit always beats
+ * a phrase-body match. Inverted posting lists mean scoring only touches
+ * docs that share at least one stem with the query — search cost grows
+ * with matches, not corpus size, so a 1,000-skill library scores in
+ * the same sub-millisecond range as a 10-skill one.
+ *
+ * Two behaviours worth knowing:
+ *
+ *   - **Stemming + stop-word removal.** "negotiating", "negotiate",
+ *     and "negotiation" all match the same skills. "the", "a", "for"
+ *     are dropped from the query.
+ *   - **Empty / no-match queries return an empty list**, not the full
+ *     library. The model should call `skill_list` if it wants
+ *     everything; `skill_search` is for "did anything match?".
+ *
+ * If the BM25F search returns nothing (typo, very rare phrase), we
+ * fall back to a tiny linear scan that catches substring hits the
+ * stemmer might have missed. Keeps the search forgiving without
+ * making the fast path slow.
  */
 export function searchSkills(query: string, limit = 20): SkillSummary[] {
-  const q = query.toLowerCase().trim();
-  if (!q) return listSkills();
-  const all = Array.from(ensureLoaded().values());
-  const scored: Array<{ skill: Skill; score: number }> = [];
-  for (const s of all) {
-    let score = 0;
-    if (s.id.toLowerCase().includes(q)) score += 10;
-    if (s.name.toLowerCase().includes(q)) score += 8;
-    if (s.tags.some((t) => t.toLowerCase().includes(q))) score += 5;
-    if (s.category.toLowerCase().includes(q)) score += 4;
-    if (s.description.toLowerCase().includes(q)) score += 3;
-    if (s.principles.some((p) => p.toLowerCase().includes(q))) score += 2;
-    if (Object.values(s.phrases).some((p) => p.toLowerCase().includes(q))) score += 2;
-    if (s.tactics.some((t) => t.script.toLowerCase().includes(q) || t.name.toLowerCase().includes(q))) score += 2;
-    if (score > 0) scored.push({ skill: s, score });
+  const q = query.trim();
+  if (!q) return [];
+
+  const { byId, index } = ensureLoaded();
+  const ranked = index.search(q);
+
+  // Substring-fallback for queries that survived stemming but still
+  // matched nothing — typically because of unusual non-English terms,
+  // brand names, or one-off slang. Cheap: only runs when BM25F was
+  // already empty.
+  if (ranked.length === 0) {
+    const qLow = q.toLowerCase();
+    const fallback: SkillSummary[] = [];
+    for (const s of byId.values()) {
+      if (s.id.toLowerCase().includes(qLow)
+          || s.name.toLowerCase().includes(qLow)
+          || s.tags.some((t) => t.toLowerCase().includes(qLow))) {
+        fallback.push(summarize(s));
+        if (fallback.length >= limit) break;
+      }
+    }
+    return fallback;
   }
-  scored.sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name));
-  return scored.slice(0, limit).map((x) => summarize(x.skill));
+
+  const out: SkillSummary[] = [];
+  for (const { id } of ranked) {
+    const skill = byId.get(id);
+    if (!skill) continue;
+    out.push(summarize(skill));
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 /** Load the FULL skill body (everything an agent needs to act on it). */
 export function loadSkill(id: string): Skill | null {
-  return ensureLoaded().get(id) ?? null;
+  return ensureLoaded().byId.get(id) ?? null;
 }
 
 /**

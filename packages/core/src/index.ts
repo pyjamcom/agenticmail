@@ -223,6 +223,8 @@ export {
   RECALL_MEMORY_TOOL,
   GET_DATETIME_TOOL,
   SEARCH_EMAIL_TOOL,
+  SEARCH_SKILLS_TOOL,
+  LOAD_SKILL_TOOL,
   REALTIME_TOOL_DEFINITIONS,
   buildRealtimeToolGuidance,
   createToolExecutor,

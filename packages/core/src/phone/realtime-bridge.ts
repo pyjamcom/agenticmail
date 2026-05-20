@@ -110,6 +110,17 @@ const MAX_PENDING_AUDIO_FRAMES = 200;
 export const REALTIME_TOOL_CALL_TIMEOUT_MS = 6 * 60_000;
 
 /**
+ * Maximum number of skill playbooks the bridge will keep loaded into a
+ * single Realtime session at once. Two is the sweet spot: it covers the
+ * "primary skill + a complementary one" pattern (e.g. negotiate-bill
+ * loaded for the main task + handle-supervisor-escalation loaded mid-
+ * call), without diluting the model's working memory across competing
+ * playbooks that may disagree on tactics or boundaries. A third load
+ * FIFO-evicts the oldest — see {@link RealtimeVoiceBridge.loadSkillIntoSession}.
+ */
+export const MAX_LOADED_SKILLS = 2;
+
+/**
  * Hard ceiling on how many tool calls the bridge will track in flight
  * at once. The model rarely fans out more than one or two; a flood is
  * either a buggy or a hostile peer, so excess calls are answered with a
@@ -403,6 +414,28 @@ export class RealtimeVoiceBridge {
   /** `call_id`s whose tool call is currently executing. */
   private readonly inFlightToolCalls = new Set<string>();
 
+  /**
+   * Mid-call skills loaded into the session so far, FIFO. Earliest at
+   * index 0; cap at {@link MAX_LOADED_SKILLS}. When a (cap+1)th skill
+   * is loaded the oldest one drops out — the model can't usefully
+   * hold five playbooks in working memory at once, so we keep the
+   * working set narrow on purpose.
+   */
+  private readonly loadedSkills: Array<{ id: string; version: string; renderedPrompt: string }> = [];
+
+  /**
+   * The original `instructions` string from the session.update sent at
+   * open. We keep a private copy because every mid-call skill load
+   * issues a fresh `session.update` whose `instructions` is built as:
+   *
+   *     baseInstructions + "\n\n" + renderedSkill1 + "\n\n" + renderedSkill2 …
+   *
+   * Without this snapshot, successive loads would compound — the second
+   * load would see "base + skill1" as the base and append skill2 to
+   * THAT, eventually drifting unboundedly.
+   */
+  private baseInstructions = '';
+
   constructor(opts: RealtimeVoiceBridgeOptions) {
     const carrier = opts.carrier ?? opts.elks;
     if (!carrier) {
@@ -449,6 +482,16 @@ export class RealtimeVoiceBridge {
   handleOpenAIOpen(): void {
     if (this.ended || this.openaiReady) return;
     this.openaiReady = true;
+    // Snapshot the base instructions BEFORE sending so future
+    // mid-call `loadSkillIntoSession` calls can rebuild the merged
+    // instructions string against an unchanging baseline. The
+    // sessionConfig shape is `{ type: 'session.update', session:
+    // {..., instructions: '...'} }` — extract carefully and fall
+    // back to the empty string if the shape ever drifts.
+    const sess = (this.sessionConfig as any)?.session;
+    if (sess && typeof sess.instructions === 'string') {
+      this.baseInstructions = sess.instructions;
+    }
     this.safeSend(this.openai, this.sessionConfig);
     // Kick the model to speak first. This is an outbound call — the agent is
     // calling the operator — so the agent should greet, not wait for the
@@ -464,6 +507,96 @@ export class RealtimeVoiceBridge {
   /** Call when the OpenAI socket closes. */
   handleOpenAIClose(): void {
     this.end('openai-closed');
+  }
+
+  /**
+   * Load a skill playbook into the live OpenAI Realtime session for
+   * the rest of the call.
+   *
+   * Mechanics:
+   *   1. Resolve the skill JSON via the skills registry (file on disk).
+   *   2. Append the rendered skill text to the agent's working
+   *      instructions and re-send a `session.update` carrying ONLY
+   *      the new `instructions` field. The OpenAI Realtime API
+   *      supports partial session.update — we don't have to re-send
+   *      audio config, tools, voice, etc.
+   *   3. Track which skills are loaded so we (a) FIFO-evict the
+   *      oldest when the cap is hit and (b) include every still-
+   *      loaded skill in the next composed instructions.
+   *   4. Emit a transcript marker so the mission record shows the
+   *      adaptation ("[skill loaded: Negotiate a Bill Reduction
+   *      v1.0.0]"). Useful for post-call review and for the build
+   *      farm's telemetry on which skills actually got reached for.
+   *
+   * Returns an object the {@link load_skill} tool handler can serialise
+   * back to the model: `ok: true` plus the skill name + version on
+   * success, `ok: false` plus a short reason on failure (unknown id,
+   * call ended, registry I/O error). Never throws — a buggy registry
+   * or a missing file must not crash the bridge mid-call.
+   *
+   * Phase 2 of the skill library (`docs/skill-library-plan.md`).
+   */
+  async loadSkillIntoSession(skillId: string): Promise<{ ok: boolean; message: string; name?: string; version?: string }> {
+    if (this.ended) return { ok: false, message: 'Call has already ended; cannot load a skill now.' };
+    if (!this.openaiReady) return { ok: false, message: 'Session is not ready yet; try again in a moment.' };
+
+    // De-dup — loading the same skill twice is a no-op success. Don't
+    // grow the loaded-list and don't re-issue session.update; nothing
+    // would change.
+    if (this.loadedSkills.some((s) => s.id === skillId)) {
+      const existing = this.loadedSkills.find((s) => s.id === skillId)!;
+      return { ok: true, message: `Skill "${skillId}" is already loaded.`, name: skillId, version: existing.version };
+    }
+
+    // Dynamic import — `../skills/index.js` is a sibling subpackage
+    // within @agenticmail/core. Static `import` would pull skills into
+    // every build of the phone module even for deployments that never
+    // use them; dynamic keeps the dependency cost on-demand only.
+    let loadSkill: typeof import('../skills/index.js').loadSkill;
+    let renderSkillAsPrompt: typeof import('../skills/index.js').renderSkillAsPrompt;
+    try {
+      ({ loadSkill, renderSkillAsPrompt } = await import('../skills/index.js'));
+    } catch (err) {
+      return { ok: false, message: `Skill registry unavailable: ${errorText(err)}` };
+    }
+
+    const skill = loadSkill(skillId);
+    if (!skill) {
+      return { ok: false, message: `No skill found with id "${skillId}". Call search_skills first to find the right id.` };
+    }
+
+    const rendered = renderSkillAsPrompt(skill);
+
+    // FIFO-evict the oldest loaded skill when we'd exceed the cap.
+    // Two concurrent playbooks is plenty; three diverges fast.
+    while (this.loadedSkills.length >= MAX_LOADED_SKILLS) {
+      const dropped = this.loadedSkills.shift();
+      if (dropped) {
+        this.emitTranscript('system', `[skill unloaded for working-memory limit: ${dropped.id} v${dropped.version}]`);
+      }
+    }
+    this.loadedSkills.push({ id: skill.id, version: skill.version, renderedPrompt: rendered });
+
+    // Compose the new instructions = original baseline + every loaded
+    // skill, in load order. Re-issue session.update with ONLY the
+    // instructions field (partial update — saves the round-trip cost
+    // of re-sending audio config etc).
+    const composed = [
+      this.baseInstructions,
+      ...this.loadedSkills.map((s) => s.renderedPrompt),
+    ].filter((s) => s && s.length > 0).join('\n\n');
+    this.safeSend(this.openai, {
+      type: 'session.update',
+      session: { instructions: composed },
+    });
+
+    this.emitTranscript('system', `[skill loaded: ${skill.name} v${skill.version}]`);
+    return { ok: true, message: `Loaded skill: ${skill.name} (v${skill.version})`, name: skill.name, version: skill.version };
+  }
+
+  /** The list of skills currently loaded into the session (FIFO-ordered). */
+  get loadedSkillIds(): readonly string[] {
+    return this.loadedSkills.map((s) => s.id);
   }
 
   /** Call when the OpenAI socket errors. */

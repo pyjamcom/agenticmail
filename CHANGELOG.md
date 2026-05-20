@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.73] - 2026-05-20
+
+### Added — Skill library Phase 2: mid-call dynamic loading + BM25F search
+
+The agent on a live Realtime call can now search the skill library
+and load a playbook INTO the live session — the loaded skill grounds
+every subsequent turn, exactly the flow Ope described:
+
+> "agent is on the phone with the insurance company → caller asks
+>  something it doesn't know how to handle → says 'hold on one
+>  moment' → finds the skill for negotiations → loads it into its
+>  own context in real-time → the next turn auto-loads it"
+
+**Realtime bridge — `loadSkillIntoSession(skillId)`**:
+
+- Resolves the skill from the registry (built-in + user-contributed)
+- Sends a PARTIAL `session.update` with the new composed
+  `instructions` = original baseline + every loaded skill's
+  rendered prompt block, joined with separators
+- Emits a transcript marker `[skill loaded: <name> v<version>]`
+  so the mission record shows the adaptation for post-call review
+- Caps at 2 loaded skills concurrently — a 3rd FIFO-evicts the
+  oldest with a `[skill unloaded for working-memory limit: <id>]`
+  transcript marker so post-call review reflects the swap
+
+**Two new Realtime tools** (in every voice mission's tool surface):
+
+- `search_skills({query})` — fuzzy search the library, returns top
+  3 ranked summaries with 120-char trimmed descriptions (context-
+  cheap so a 1,000-skill library can't blow the model's working
+  context on a single search response)
+- `load_skill({id})` — call after `search_skills`; the bridge
+  swaps the session's instructions and the next turn sees the
+  loaded playbook. Returns ok/loaded + a short success message so
+  the model knows it can continue the conversation
+
+**Tool-use guidance** added to the realtime session's
+`instructions`: walks the model through the search → load pattern
+and the "hold on one moment" stall.
+
+### Changed — `searchSkills` now uses BM25F (same scorer that powers persistent agent memory)
+
+Old: linear substring scan with weighted scoring. Fast for 9 skills,
+slow + chatty for 1,000+. New: shared `MemorySearchIndex` from the
+memory subsystem:
+
+- **BM25F field weighting** — name (3×), tags (2×), content (1×).
+  A name match always beats a tactic-body match.
+- **Inverted posting lists** — scoring touches only docs that
+  share at least one stem with the query. Cost grows with
+  matches, not corpus size.
+- **Lazy-IDF cache** — recomputed only when documents change.
+- **Bigram proximity boost** — phrases that share a word ordering
+  with the query rank higher (catches "rep wants commitment"
+  matching `refuse_payment_request` phrases).
+- **Stemming** — "negotiating", "negotiate", "negotiation" all
+  match the same skills.
+- **Substring fallback** — if BM25F returns nothing (typo, rare
+  brand name), a tiny linear scan over id/name/tags catches it.
+
+Same `searchSkills(query, limit)` API; the index is built once
+per 5-second cache window and reused across calls. New
+benchmark test asserts 100 queries against the built-in library
+complete in <1s — sub-millisecond per query and easily fits
+inside a "hold on one moment" stall during a Realtime call.
+
+3 new tests covering empty queries, stemmed variants, and
+scaling.
+
 ## [0.9.72] - 2026-05-20
 
 ### Added — Skill library (Phase 1: foundation + starter library + MCP tools)

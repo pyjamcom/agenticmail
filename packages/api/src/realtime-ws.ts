@@ -69,6 +69,8 @@ import {
   WEB_SEARCH_TOOL,
   RECALL_MEMORY_TOOL,
   GET_DATETIME_TOOL,
+  SEARCH_SKILLS_TOOL,
+  LOAD_SKILL_TOOL,
   type AgenticMailConfig,
   type RealtimeBridgePort,
   type RealtimeToolDefinition,
@@ -515,6 +517,8 @@ function buildVoiceTools(): RealtimeToolDefinition[] {
     RECALL_MEMORY_TOOL,
     GET_DATETIME_TOOL,
     WEB_SEARCH_TOOL,
+    SEARCH_SKILLS_TOOL,
+    LOAD_SKILL_TOOL,
   ];
 }
 
@@ -574,6 +578,71 @@ function createVoiceToolExecutor(params: VoiceToolExecutorParams): ToolExecutor 
       timezone: typeof args.timezone === 'string' ? args.timezone : undefined,
     }),
     web_search: (args) => webSearch(typeof args.query === 'string' ? args.query : ''),
+
+    // Skill library (Phase 2). `search_skills` is pure file-on-disk
+    // ranking — fast, no API server roundtrip. `load_skill` requires
+    // the live bridge instance (it has to issue a partial
+    // session.update on the OpenAI Realtime socket), which we get
+    // through the same `getBridge()` closure `ask_operator` uses to
+    // check `isCallEnded`.
+    search_skills: async (args) => {
+      const query = typeof args.query === 'string' ? args.query : '';
+      if (!query.trim()) {
+        return { error: 'search_skills requires a non-empty `query` describing the situation.' };
+      }
+      const { searchSkills } = await import('@agenticmail/core');
+      // Top 3 by default — the model needs enough to pick a clear
+      // winner without paying context to every loosely-relevant
+      // skill. Truncate descriptions to ~120 chars so a 1000-skill
+      // library can't blow the model's working context on a single
+      // search response. The model can re-search with a better
+      // query if the top 3 aren't right.
+      const results = searchSkills(query, 3);
+      if (results.length === 0) {
+        return {
+          query, count: 0,
+          message: 'No matching skills in the library. Improvise within the call\'s overall task and the operator\'s instructions.',
+        };
+      }
+      return {
+        query,
+        count: results.length,
+        skills: results.map((s) => ({
+          id: s.id,
+          name: s.name,
+          category: s.category,
+          // Trim description to ~120 chars — long enough to identify
+          // the skill, short enough that 3 results fit in a few
+          // hundred tokens.
+          summary: s.description.length > 120 ? s.description.slice(0, 117) + '...' : s.description,
+          disclaimer_required: s.disclaimer_required,
+        })),
+        next_step: 'Pick the best match and call load_skill with its id. Say "hold on one moment" to the caller first.',
+      };
+    },
+    load_skill: async (args) => {
+      const id = typeof args.id === 'string' ? args.id : '';
+      if (!id.trim()) {
+        return { error: 'load_skill requires `id` (get one from search_skills).' };
+      }
+      const bridge = getBridge();
+      if (!bridge) {
+        return { error: 'Bridge not available — load_skill can only run on a live call.' };
+      }
+      const result = await bridge.loadSkillIntoSession(id);
+      // Pass the result through to the model. On success, the
+      // session.update has already shipped — the model's NEXT turn
+      // will see the loaded skill in its instructions. We tell it
+      // that explicitly so it doesn't ask "did you load it?"
+      if (result.ok) {
+        return {
+          ok: true,
+          loaded: { name: result.name, version: result.version },
+          message: `${result.message}. The playbook is now in your instructions — use it for the rest of the call. Continue the conversation now (the caller is waiting).`,
+        };
+      }
+      return { ok: false, message: result.message };
+    },
   });
 }
 

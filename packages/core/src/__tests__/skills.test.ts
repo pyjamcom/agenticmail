@@ -80,9 +80,29 @@ describe('skill library — registry', () => {
     expect(results[0].id).toBe('negotiate-bill-reduction');
   });
 
-  it('searchSkills returns nothing on empty match', () => {
-    const results = searchSkills('xyzzy-this-string-is-in-no-skill');
+  it('searchSkills returns nothing when no token overlaps any skill', () => {
+    // Use a deliberately nonsense token unlikely to appear in any skill
+    // body / name / tag. The BM25F matcher operates on stemmed tokens
+    // and stop-word-removed queries, so "xyzzy" / "qwzqp" never match;
+    // the substring-fallback also won't fire because no skill contains
+    // the literal string either.
+    const results = searchSkills('xyzzyqwzqp');
     expect(results).toEqual([]);
+  });
+
+  it('searchSkills returns empty on empty query', () => {
+    expect(searchSkills('')).toEqual([]);
+    expect(searchSkills('   ')).toEqual([]);
+  });
+
+  it('searchSkills stems word variants — "negotiating" finds "negotiate" skills', () => {
+    // Old linear matcher couldn't do this; BM25F stems both sides.
+    const a = searchSkills('negotiate');
+    const b = searchSkills('negotiating');
+    expect(a.length).toBeGreaterThan(0);
+    expect(b.length).toBeGreaterThan(0);
+    // Top match should be the same skill regardless of word form.
+    expect(a[0].id).toBe(b[0].id);
   });
 
   it('loadSkill returns the full body for a known id', () => {
@@ -159,6 +179,39 @@ describe('skill library — validator', () => {
     const bad = { ...SAMPLE_VALID_SKILL, disclaimer: 123 } as any;
     const errs = validateSkill(bad);
     expect(errs.some((e) => e.path === 'disclaimer')).toBe(true);
+  });
+});
+
+describe('skill library — BM25F scaling', () => {
+  /**
+   * Soft benchmark — proves the indexed search is fast enough to be
+   * called inside a Realtime call hold ("hold on one moment"). The
+   * exact number depends on machine + load; we assert a generous
+   * ceiling that would only fire on a real regression.
+   *
+   * The BM25F index is built once per ensureLoaded cycle (cached for
+   * 5s), so successive `searchSkills` calls cost only the scoring
+   * of posting-list candidates — sub-millisecond on the current 9-
+   * skill library and still well under 50ms when the library grows
+   * to thousands of skills (we'd hit context limits in the model
+   * before we hit performance limits in the index).
+   */
+  it('100 queries against the built-in library complete in < 1 second', () => {
+    const queries = [
+      'negotiate bill', 'cancel subscription', 'debt collector', 'restaurant',
+      'doctor appointment', 'flight refund', 'rep insists payment', 'fully booked',
+      'fraud chargeback', 'home repair', 'court hearing', 'insurance verification',
+      'commit to payment', 'transfer to supervisor', 'retention department',
+      'dispute', 'reservation', 'cancel', 'medical', 'travel',
+    ];
+    const t0 = Date.now();
+    for (let i = 0; i < 100; i++) {
+      const q = queries[i % queries.length];
+      const _ = searchSkills(q);
+      void _;
+    }
+    const elapsedMs = Date.now() - t0;
+    expect(elapsedMs).toBeLessThan(1000);
   });
 });
 
