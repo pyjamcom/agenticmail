@@ -287,14 +287,19 @@ export async function collectFields(opts: {
     }
   }
 
-  // Phase 3: validate required fields. Empty-string for a required
-  // field after the interactive pass means the user picked the field
-  // for update and then hit Enter without typing — we treat that as
-  // "keep the existing value if there was one, otherwise fail".
+  // Phase 3: validate required fields. A required field is satisfied
+  // if EITHER we collected a fresh value this run OR the field has an
+  // existing encrypted-at-rest value (`hasValue: true`) the user
+  // chose to keep. Earlier versions only checked `values[f.key]` and
+  // therefore rejected the perfectly valid "keep the existing auth
+  // token, only update the OpenAI key" path with a spurious "Still
+  // missing required field(s): Twilio Auth Token" — because the
+  // secret never lived in `values` to begin with.
   const stillMissing: string[] = [];
   for (const f of fields) {
     if ((f.required ?? true) === false) continue;
-    if ((values[f.key] ?? '') === '') stillMissing.push(f.label);
+    const haveFresh = (values[f.key] ?? '') !== '';
+    if (!haveFresh && !f.hasValue) stillMissing.push(f.label);
   }
   if (stillMissing.length > 0) {
     log('');

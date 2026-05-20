@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.69] - 2026-05-20
+
+### Fixed — picking ONE field to update no longer fails with "Still missing required field(s)"
+
+`collectFields`'s required-field validation only checked the
+`values[]` map for a fresh entry — it didn't honour the
+`hasValue: true` marker on encrypted-at-rest secrets. So when the
+user picked just one field to update (e.g. only the OpenAI key)
+and left the auth token / bot token alone, the wizard correctly
+kept the encrypted value but the validator then rejected the run
+with "Still missing required field(s): Twilio Auth Token" — even
+though the field was already saved. Required fields are now
+satisfied by EITHER a fresh value OR `hasValue: true`. Same shape
+of fix for `setup-telegram`.
+
 ## [0.9.68] - 2026-05-20
 
 ### Fixed — `setup-phone` re-run kept failing with "accountSid and authToken are required"
