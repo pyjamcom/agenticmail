@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.66] - 2026-05-20
+
+### Changed — `setup-phone` + `setup-telegram` are now interactive wizards
+
+Field run: `agenticmail setup-phone --provider twilio` exited with
+"Missing required field(s): --phone-number, --account-sid, --auth-token"
+because the wizard treated those flags as mandatory even at an
+interactive terminal. A user who just typed the command at a TTY
+was expected to know the flag spelling and re-run the command from
+scratch. Both `setup-phone` and `setup-telegram` now prompt for
+every missing field when running at a real TTY.
+
+- **`setup-phone`** — picking just `agenticmail setup-phone` (no
+  args) now opens a guided picker: choose Twilio or 46elks, then
+  numbered prompts for **(1) caller phone number** (with E.164 hint),
+  **(2) Account SID / username** (with where-to-find-it text), and
+  **(3) Auth Token / password** (hidden input, with a where-to-find-it
+  hint). The Cloudflare quick-tunnel cold-start happens last as the
+  **(4) public webhook URL** step so the spinner only fires after
+  every question is answered — earlier ordering ran the spinner
+  first which made it feel like the command was going to do
+  everything itself and then failed at the end.
+- **`setup-telegram`** — same pattern. `--bot-token` is prompted
+  with a hidden input + a "from @BotFather → /newbot" hint;
+  `--chat-id` is prompted as an optional follow-up with a link to
+  `getUpdates` so the user can find their numeric id.
+- **Scripted callers unchanged.** `process.stdin.isTTY === false`
+  (piped / CI / detached) still gets the hard "missing required
+  field(s)" error — blocking on stdin when there is no human at
+  the keyboard would hang the command forever.
+
 ## [0.9.65] - 2026-05-20
 
 ### Changed — bootstrap epilogue + AGENTS.md walk-through optional channels

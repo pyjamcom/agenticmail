@@ -1115,30 +1115,126 @@ async function cmdSetupPhone() {
     return;
   }
 
-  const provider = flag('provider');
+  // Provider: --provider flag wins; otherwise prompt the user to pick
+  // when running interactively (the typical case — someone just typed
+  // `agenticmail setup-phone` at the terminal and expects a wizard).
+  // Only fall through to the hard error when there's no TTY (scripted
+  // / piped invocations where blocking on stdin would hang forever).
+  let provider = flag('provider');
   if (provider !== 'twilio' && provider !== '46elks') {
-    fail(`--provider must be "twilio" or "46elks" (got: ${provider ?? '(none)'})`);
+    if (provider !== undefined) {
+      // User passed --provider but it wasn't one of the two valid values.
+      fail(`--provider must be "twilio" or "46elks" (got: ${provider})`);
+      info(`See: ${c.green('agenticmail setup-phone --help')}`);
+      process.exit(1);
+    }
+    if (!process.stdin.isTTY) {
+      fail('--provider is required when running non-interactively (no TTY).');
+      info(`See: ${c.green('agenticmail setup-phone --help')}`);
+      process.exit(1);
+    }
+    // Interactive pick.
+    log('');
+    log(`  ${c.bold('🎀 AgenticMail — connect phone calling')}`);
+    log('');
+    log(`  ${c.dim('Pick your carrier:')}`);
+    log(`    ${c.cyan('1.')} Twilio    ${c.dim('(US/global; needs Account SID + Auth Token)')}`);
+    log(`    ${c.cyan('2.')} 46elks    ${c.dim('(EU-friendly; needs API username + password)')}`);
+    log('');
+    const choice = (await ask(`  ${c.magenta('>')} `)).trim();
+    if (choice === '1' || choice.toLowerCase() === 'twilio') provider = 'twilio';
+    else if (choice === '2' || choice.toLowerCase() === '46elks') provider = '46elks';
+    else {
+      log('');
+      fail(`Unknown choice: "${choice}". Enter 1, 2, twilio, or 46elks.`);
+      process.exit(1);
+    }
+    log('');
+  }
+
+  let phoneNumber = flag('phone-number') ?? process.env.AGENTICMAIL_PHONE_NUMBER ?? '';
+  let webhookBaseUrl = flag('webhook-url') ?? process.env.AGENTICMAIL_WEBHOOK_URL ?? '';
+  let username = provider === 'twilio'
+    ? (flag('account-sid') ?? process.env.TWILIO_ACCOUNT_SID ?? '')
+    : (flag('username') ?? process.env.ELKS_USERNAME ?? '');
+  let password = provider === 'twilio'
+    ? (flag('auth-token') ?? process.env.TWILIO_AUTH_TOKEN ?? '')
+    : (flag('password') ?? process.env.ELKS_PASSWORD ?? '');
+  // Webhook secret needs ≥24 chars of entropy; mint one if the operator
+  // didn't supply it so they don't have to invent it themselves. Same
+  // logic the interactive wizard uses.
+  const customSecret = flag('webhook-secret') ?? process.env.AGENTICMAIL_WEBHOOK_SECRET ?? '';
+  const webhookSecret = customSecret || randomBytes(24).toString('hex');
+
+  // Interactive prompts come FIRST, tunnel last. Earlier ordering tried
+  // to be clever and open the tunnel before asking — but the user just
+  // watched a 5–30s spinner before being told "now type your Account
+  // SID", which made the spinner feel like the command was going to do
+  // everything itself and then failed at the end. Doing the prompts up
+  // front matches everyone's expectation of a guided wizard, and the
+  // tunnel cold-start happens at the very end as the last "OK, working
+  // on it" step before saving the config.
+  //
+  // Each prompt has its own one-line explanation so a first-time user
+  // knows what they're being asked for and where to find it. The auth
+  // token uses `askSecret` (raw-mode `*`-masked input) — visible-input
+  // would land the token in their terminal scrollback / tmux logs.
+  if (process.stdin.isTTY) {
+    if (!phoneNumber) {
+      log(`  ${c.bold('1) Caller phone number')}`);
+      log(`  ${c.dim('   The number from your carrier — the one the agent calls FROM.')}`);
+      log(`  ${c.dim('   Must be in E.164 format (starts with +, then country code).')}`);
+      phoneNumber = (await ask(`     ${c.cyan('Number:')} ${c.dim('(e.g. +15555550100) ')}`)).trim();
+      log('');
+    }
+    if (!username) {
+      const label = provider === 'twilio' ? 'Twilio Account SID' : '46elks API username';
+      const where = provider === 'twilio'
+        ? 'Find it at console.twilio.com → top-right Account dashboard, "Account SID" (starts with AC...).'
+        : 'Find it at 46elks.com dashboard → Account → API credentials, "Username".';
+      log(`  ${c.bold('2) ' + label)}`);
+      log(`  ${c.dim('   ' + where)}`);
+      username = (await ask(`     ${c.cyan('Paste it:')} `)).trim();
+      log('');
+    }
+    if (!password) {
+      const label = provider === 'twilio' ? 'Twilio Auth Token' : '46elks API password';
+      const where = provider === 'twilio'
+        ? 'Same Twilio Account page — click "View" on the primary Auth Token. This is a SECRET; treat it like a password.'
+        : 'Same 46elks dashboard page, "Password" field. This is a SECRET; treat it like a password.';
+      log(`  ${c.bold('3) ' + label)}`);
+      log(`  ${c.dim('   ' + where)}`);
+      log(`  ${c.dim('   Input is hidden — you won\'t see what you type, that\'s expected.')}`);
+      // Hidden input — `*`-masked, never echoes to stdout, never lands
+      // in the scrollback. Same helper the setup-email wizard uses.
+      password = (await askSecret(`     ${c.cyan('Paste it:')} `)).trim();
+      log('');
+    }
+  }
+
+  const missing: string[] = [];
+  if (!phoneNumber) missing.push('--phone-number');
+  if (!username) missing.push(provider === 'twilio' ? '--account-sid' : '--username');
+  if (!password) missing.push(provider === 'twilio' ? '--auth-token' : '--password');
+  if (missing.length) {
+    log('');
+    fail(`Missing required field(s): ${missing.join(', ')}`);
     info(`See: ${c.green('agenticmail setup-phone --help')}`);
+    log('');
     process.exit(1);
   }
 
-  const phoneNumber = flag('phone-number') ?? process.env.AGENTICMAIL_PHONE_NUMBER ?? '';
-  let webhookBaseUrl = flag('webhook-url') ?? process.env.AGENTICMAIL_WEBHOOK_URL ?? '';
-  // If the operator didn't pass a webhook URL, auto-create one for
-  // them. Twilio + 46elks both need a publicly-reachable HTTPS
-  // endpoint to deliver webhooks to, and a typical local install has
-  // no public URL — so we transparently spin up a free Cloudflare
-  // quick-tunnel pointing at the local API and use the resulting
-  // `*.trycloudflare.com` URL. Free, no account, no signup.
-  //
-  // `ensureTunnelUrl` is idempotent: if a healthy tunnel is already
-  // running (from a prior `setup-phone` run or an explicit
-  // `agenticmail tunnel start`) we reuse it; otherwise we cold-start
-  // one. Returns null if cloudflared isn't installed — in which case
-  // we surface a clear actionable error below rather than silently
-  // failing on the missing-field validation.
+  // Tunnel comes LAST — by this point the user has answered every
+  // question and just wants AgenticMail to finish. A spinner here is
+  // a "working on it" indicator, not a wall of waiting before any
+  // input. Reuse a live tunnel if one's already running.
   if (!webhookBaseUrl) {
-    const tunnelSpinner = new Spinner('general', 'Opening Cloudflare quick-tunnel for webhook delivery...');
+    log(`  ${c.bold('4) Public webhook URL')}`);
+    log(`  ${c.dim('   ' + provider + ' needs to send webhooks to your machine. We\'ll open a free')}`);
+    log(`  ${c.dim('   Cloudflare quick-tunnel (https://*.trycloudflare.com) — no domain, no')}`);
+    log(`  ${c.dim('   Cloudflare account, no signup. The tunnel stays up across setup-phone runs.')}`);
+    log('');
+    const tunnelSpinner = new Spinner('general', 'Opening Cloudflare quick-tunnel...');
     tunnelSpinner.start();
     const url = await ensureTunnelUrl();
     if (url) {
@@ -1150,30 +1246,7 @@ async function cmdSetupPhone() {
       info(`Or pass your own URL: ${c.green('--webhook-url https://your-domain.example/')}`);
       process.exit(1);
     }
-  }
-  const username = provider === 'twilio'
-    ? (flag('account-sid') ?? process.env.TWILIO_ACCOUNT_SID ?? '')
-    : (flag('username') ?? process.env.ELKS_USERNAME ?? '');
-  const password = provider === 'twilio'
-    ? (flag('auth-token') ?? process.env.TWILIO_AUTH_TOKEN ?? '')
-    : (flag('password') ?? process.env.ELKS_PASSWORD ?? '');
-  // Webhook secret needs ≥24 chars of entropy; mint one if the operator
-  // didn't supply it so they don't have to invent it themselves. Same
-  // logic the interactive wizard uses.
-  const customSecret = flag('webhook-secret') ?? process.env.AGENTICMAIL_WEBHOOK_SECRET ?? '';
-  const webhookSecret = customSecret || randomBytes(24).toString('hex');
-
-  const missing: string[] = [];
-  if (!phoneNumber) missing.push('--phone-number');
-  if (!username) missing.push(provider === 'twilio' ? '--account-sid' : '--username');
-  if (!password) missing.push(provider === 'twilio' ? '--auth-token' : '--password');
-  if (!webhookBaseUrl) missing.push('--webhook-url');
-  if (missing.length) {
     log('');
-    fail(`Missing required field(s): ${missing.join(', ')}`);
-    info(`See: ${c.green('agenticmail setup-phone --help')}`);
-    log('');
-    process.exit(1);
   }
 
   const configPath = join(homedir(), '.agenticmail', 'config.json');
@@ -1295,13 +1368,40 @@ async function cmdSetupTelegram() {
     return;
   }
 
-  const botToken = flag('bot-token') ?? process.env.TELEGRAM_BOT_TOKEN ?? '';
-  const operatorChatId = (flag('chat-id') ?? process.env.TELEGRAM_CHAT_ID ?? '').trim();
+  let botToken = flag('bot-token') ?? process.env.TELEGRAM_BOT_TOKEN ?? '';
+  let operatorChatId = (flag('chat-id') ?? process.env.TELEGRAM_CHAT_ID ?? '').trim();
 
+  // Interactive prompts when running at a real TTY. Mirrors the
+  // setup-phone wizard added in v0.9.66: anyone who just types
+  // `agenticmail setup-telegram` at their terminal expects to be
+  // walked through it. Scripted callers still get the hard error
+  // (no TTY → no stdin → blocking on `ask` would hang forever).
   if (!botToken) {
-    fail('--bot-token is required (get one from @BotFather → /newbot).');
-    info(`See: ${c.green('agenticmail setup-telegram --help')}`);
-    process.exit(1);
+    if (!process.stdin.isTTY) {
+      fail('--bot-token is required when running non-interactively (no TTY).');
+      info(`See: ${c.green('agenticmail setup-telegram --help')}`);
+      process.exit(1);
+    }
+    log('');
+    log(`  ${c.bold('🎀 AgenticMail — connect Telegram')}`);
+    log('');
+    log(`  ${c.dim('Create a bot: open Telegram, message @BotFather, send /newbot,')}`);
+    log(`  ${c.dim('and copy the token it gives you.')}`);
+    // Use askSecret — the token IS a credential (anyone with it can
+    // operate the bot). Hidden input keeps it out of the scrollback.
+    botToken = (await askSecret(`  ${c.cyan('Telegram bot token:')} `)).trim();
+    if (!botToken) {
+      log('');
+      fail('A bot token is required to enable Telegram.');
+      process.exit(1);
+    }
+    log('');
+  }
+  if (!operatorChatId && process.stdin.isTTY) {
+    log(`  ${c.dim('Your chat id: message your bot, then open')}`);
+    log(`  ${c.dim('https://api.telegram.org/bot<token>/getUpdates to see it.')}`);
+    operatorChatId = (await ask(`  ${c.cyan('Your Telegram chat id')} ${c.dim('(Enter to add later):')} `)).trim();
+    log('');
   }
 
   const configPath = join(homedir(), '.agenticmail', 'config.json');
