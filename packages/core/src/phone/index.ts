@@ -73,6 +73,7 @@ export type {
   RealtimeInstructionOptions,
   RealtimeSessionConfigOptions,
   RealtimeVoiceBridgeOptions,
+  ScheduledCallbackRequest,
 } from './realtime-bridge.js';
 export {
   OPERATOR_QUERY_TIMEOUT_MS,
@@ -88,6 +89,10 @@ export {
   SEARCH_EMAIL_TOOL,
   SEARCH_SKILLS_TOOL,
   LOAD_SKILL_TOOL,
+  GET_CALL_STATUS_TOOL,
+  EXTEND_CALL_TIME_TOOL,
+  SCHEDULE_CALLBACK_TOOL,
+  END_CALL_TOOL,
   REALTIME_TOOL_DEFINITIONS,
   buildRealtimeToolGuidance,
   createToolExecutor,
