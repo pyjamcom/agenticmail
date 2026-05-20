@@ -30,7 +30,7 @@ export interface Agent {
    *  this agent on every CC-only delivery regardless of the
    *  sender's `wake` list. Coder/silent-observer agents register
    *  with `wake_on_cc: false` so a designer's `cc:` accidentally
-   *  including them never wastes a Claude turn. Defaults to true
+   *  including them never wastes a host turn. Defaults to true
    *  (preserves the 0.9.0 wake-list-respecting behaviour). */
   wakeOnCc?: boolean;
   /** Soft-stop flag. When true, the dispatcher refuses to wake

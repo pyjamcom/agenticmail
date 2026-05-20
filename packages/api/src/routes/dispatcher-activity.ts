@@ -138,7 +138,7 @@ export function _resetActivityRegistry(): void {
 
 /**
  * Ring buffer of "skipped wake" events — the dispatcher decided
- * NOT to fire a Claude turn for some reason (thread closed,
+ * NOT to fire a host turn for some reason (thread closed,
  * allowlist excluded, wake_on_cc honoured, budget exhausted,
  * dedup, rpc-suppress). Surfaced in check_activity so the host
  * sees the dispatcher's filter decisions instead of staring at

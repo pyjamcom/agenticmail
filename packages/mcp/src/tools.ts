@@ -257,11 +257,11 @@ async function apiRequest<T extends ApiResponse = ApiJsonObject>(method: string,
 export const toolDefinitions = [
   {
     name: 'send_email',
-    description: 'Send an email from the agent\'s mailbox. The PRIMARY primitive for multi-agent coordination. **Use `to` and `cc` as the email standard intends** — `to` is the actor(s) the message is addressed to (one or two recipients in most cases); `cc` is everyone else on the thread for awareness. Lumping every participant on `to` is wrong and defeats the wake gating. WAKE SEMANTICS (0.9.0+): by default only local @localhost recipients on `to:` get a Claude wake; CC\'d local agents receive the mail but don\'t wake — they see it on their next natural wake. To override: pass `wake: ["alice","bob"]` for specific agents regardless of To/CC, or `wake: "all"` for the pre-0.9.0 "wake every recipient" behaviour, or `wake: []` to deliver silently. External emails are scanned for sensitive content; HIGH severity detections are BLOCKED for owner approval.',
+    description: 'Send an email from the agent\'s mailbox. The PRIMARY primitive for multi-agent coordination. **Use `to` and `cc` as the email standard intends** — `to` is the actor(s) the message is addressed to (one or two recipients in most cases); `cc` is everyone else on the thread for awareness. Lumping every participant on `to` is wrong and defeats the wake gating. WAKE SEMANTICS (0.9.0+): by default only local @localhost recipients on `to:` get a host wake; CC\'d local agents receive the mail but don\'t wake — they see it on their next natural wake. To override: pass `wake: ["alice","bob"]` for specific agents regardless of To/CC, or `wake: "all"` for the pre-0.9.0 "wake every recipient" behaviour, or `wake: []` to deliver silently. External emails are scanned for sensitive content; HIGH severity detections are BLOCKED for owner approval.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        to: { type: 'string', description: 'Primary actor — the agent(s) you want to act on this message. Usually one address; rarely two. **Everyone else on the thread goes on `cc`, NOT here.** Lumping all participants on `to` defeats the wake gating: every local @localhost recipient on `to` gets a Claude turn, so a 5-agent thread = 5 Claude turns per round. Comma-separated supported but use sparingly.' },
+        to: { type: 'string', description: 'Primary actor — the agent(s) you want to act on this message. Usually one address; rarely two. **Everyone else on the thread goes on `cc`, NOT here.** Lumping all participants on `to` defeats the wake gating: every local @localhost recipient on `to` gets a host turn, so a 5-agent thread = 5 host turns per round. Comma-separated supported but use sparingly.' },
         subject: { type: 'string', description: 'Email subject line' },
         text: { type: 'string', description: 'Plain text body' },
         html: { type: 'string', description: 'HTML body (optional)' },
@@ -367,7 +367,7 @@ export const toolDefinitions = [
         wake: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional. Names of the agents who should get a Claude turn from the dispatcher when this reply lands. CC\'d agents NOT in this list still receive the email but stay asleep — saves significant tokens on large threads. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
+          description: 'Optional. Names of the agents who should get a host turn from the dispatcher when this reply lands. CC\'d agents NOT in this list still receive the email but stay asleep — saves significant tokens on large threads. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
         },
       },
       required: ['uid', 'text'],
@@ -375,7 +375,7 @@ export const toolDefinitions = [
   },
   {
     name: 'forward_email',
-    description: 'Forward an email to another recipient. Outbound guard applies — HIGH severity content is held for review. Pass `wake` to limit which local recipients get a Claude turn from the dispatcher when this forward lands.',
+    description: 'Forward an email to another recipient. Outbound guard applies — HIGH severity content is held for review. Pass `wake` to limit which local recipients get a host turn from the dispatcher when this forward lands.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -385,7 +385,7 @@ export const toolDefinitions = [
         wake: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional. Names of the agents who should get a Claude turn when the forward lands. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
+          description: 'Optional. Names of the agents who should get a host turn when the forward lands. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
         },
       },
       required: ['uid', 'to'],
@@ -487,7 +487,7 @@ export const toolDefinitions = [
   },
   {
     name: 'manage_drafts',
-    description: 'List, create, update, send, or delete drafts. On send, you can pass `wake` to limit which local recipients get a Claude turn — same semantics as send_email.',
+    description: 'List, create, update, send, or delete drafts. On send, you can pass `wake` to limit which local recipients get a host turn — same semantics as send_email.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -499,7 +499,7 @@ export const toolDefinitions = [
         wake: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional, for action=send. Names of the agents who should get a Claude turn when the drafted mail lands. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
+          description: 'Optional, for action=send. Names of the agents who should get a host turn when the drafted mail lands. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
         },
       },
       required: ['action'],
@@ -895,7 +895,7 @@ export const toolDefinitions = [
         wake: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional. Names of the agents who should get a Claude turn when this template-rendered mail lands. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
+          description: 'Optional. Names of the agents who should get a host turn when this template-rendered mail lands. Pass `[]` to deliver silently. Omit to wake everyone CC\'d.',
         },
       },
       required: ['id', 'to'],
@@ -1934,7 +1934,7 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
       // Wake-allowlist: forward as-is. The API normalises strings/arrays
       // into a real array, sets the X-AgenticMail-Wake header on the
       // outgoing mail, and surfaces the list in the SSE event so the
-      // dispatcher can decide which recipients deserve a Claude turn.
+      // dispatcher can decide which recipients deserve a host turn.
       // Empty array means "wake nobody"; absent means "wake everyone CC'd"
       // (the default backwards-compatible behaviour).
       if (args.wake !== undefined) {
@@ -2082,7 +2082,7 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
       // Canonical reply-all is To: the previous actor (replyTo);
       // Cc: everyone else, minus the new sender themselves. This
       // way the dispatcher's "wake on To only" default fires
-      // exactly one Claude turn (the previous actor) per round,
+      // exactly one host turn (the previous actor) per round,
       // and everyone on the thread still sees the message.
       //
       // We can't know our own outgoing `from` here (the API will

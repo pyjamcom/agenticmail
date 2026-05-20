@@ -107,6 +107,10 @@ export function loadAnthropicToken() {
  * @param {string} opts.anthropicToken    OAuth bearer from `loadAnthropicToken`
  * @param {number} [opts.timeoutMs]       Hard kill timeout (default 10min — Telegram users won't wait longer)
  * @param {string} [opts.sessionHandoff]  Tail of prior rotated session, injected as system prompt
+ * @param {string} [opts.personaPrompt]   v0.9.86 — agent persona ("soul file"), prepended to the
+ *                                          system prompt so the Telegram-chat Claude shares identity
+ *                                          with the voice runtime and the email worker. Loaded once
+ *                                          at bridge startup; same string on every call.
  * @param {string} [opts.mcpConfig]       Optional --mcp-config path (off by default)
  * @param {function} [opts.onLog]         stderr line sink for debugging
  * @param {function} [opts.onSpawn]       Called with the spawned ChildProcess so the bridge
@@ -120,6 +124,7 @@ export function runClaude(opts) {
     anthropicToken,
     timeoutMs = 10 * 60 * 1000,
     sessionHandoff,
+    personaPrompt,
     mcpConfig,
     onLog = () => {},
     onSpawn,
@@ -136,7 +141,16 @@ export function runClaude(opts) {
       ...sessionArgs,
     ];
     if (mcpConfig) args.push('--mcp-config', mcpConfig);
-    if (sessionHandoff) args.push('--append-system-prompt', sessionHandoff);
+    // v0.9.86 — persona + session-handoff both ride the SAME
+    // --append-system-prompt flag (claude accepts only one). Persona
+    // first, then the rotated-session tail, so identity context sits
+    // above conversation-resume context in the system prompt.
+    const systemParts = [];
+    if (personaPrompt) systemParts.push(personaPrompt.trim());
+    if (sessionHandoff) systemParts.push(sessionHandoff.trim());
+    if (systemParts.length > 0) {
+      args.push('--append-system-prompt', systemParts.join('\n\n---\n\n'));
+    }
     args.push('-p', prompt);
 
     const env = {

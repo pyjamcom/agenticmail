@@ -48,6 +48,7 @@ import {
 import { SessionMap } from './lib/sessions.mjs';
 import { runClaude, loadAnthropicToken } from './lib/claude-runner.mjs';
 import { classifyClaudeChildError } from './lib/error-classifier.mjs';
+import { loadBridgePersona } from './lib/persona-loader.mjs';
 
 /**
  * Generate (or refresh) the MCP config the spawned `claude -p` turn loads.
@@ -503,6 +504,7 @@ async function processChatQueue(chatId, state) {
             prompt,
             sessionId,
             sessionHandoff,
+            personaPrompt: state.personaPrompt,
             anthropicToken: state.anthropicToken,
             mcpConfig: state.mcpConfig,
             onLog: line => log.info(`claude: ${line}`),
@@ -706,12 +708,25 @@ async function main() {
   log.info(`existing sessions: ${sessions.list().length}`);
   log.info(`mcp config: ${mcpConfig || '(none)'}`);
 
+  // v0.9.86 — load the agent's persona ("soul file") so the Telegram
+  // bridge shares identity with the voice runtime and the email
+  // worker. Read once at bridge boot — the file rarely changes, and
+  // a per-message disk read would be wasteful. Empty string ⇒ no
+  // persona-prepend on the system prompt (legacy behaviour).
+  const personaPrompt = loadBridgePersona();
+  if (personaPrompt) {
+    log.info(`persona loaded (${personaPrompt.length} chars from ~/.agenticmail/agents/.../persona.md)`);
+  } else {
+    log.info('persona: none configured (set AGENTICMAIL_AGENT_NAME or create ~/.agenticmail/agents/<name>/persona.md)');
+  }
+
   const state = {
     token,
     anthropicToken,
     allowedIds,
     sessions,
     mcpConfig,
+    personaPrompt,
     running: true,
     stopServer: null,
   };

@@ -352,7 +352,7 @@ function normalizeMessageId(id: string | undefined): string {
  * Sentinel `wake` value the sender can pass to opt back into the
  * pre-0.9.0 behaviour ("wake every CC'd recipient"). Useful for
  * notification-style broadcasts where every recipient really
- * should get a Claude turn (rare).
+ * should get a host turn (rare).
  */
 export const WAKE_ALL_SENTINEL = '__wake_all__';
 
@@ -629,7 +629,7 @@ async function notifyLocalRecipientsOfNewMail(
    * `wakeAllowlist` so the @agenticmail/claudecode dispatcher can
    * decide whether to actually spawn a worker for each recipient.
    * Mail is delivered to every CC'd inbox regardless — only the
-   * "should the agent get a Claude turn" decision is gated.
+   * "should the agent get a host turn" decision is gated.
    *
    * Names are pre-normalised by the route (lowercased, @localhost
    * stripped). Empty array means "wake nobody"; undefined means
@@ -739,7 +739,7 @@ async function notifyLocalRecipientsOfNewMail(
       subject,
       messageId,
       // Wake gating signal. Present iff the sender opted in. The
-      // dispatcher reads this and spawns a Claude worker only for
+      // dispatcher reads this and spawns a host worker only for
       // recipients whose name is on the list (or for everyone if the
       // field is absent, preserving the v0.8.x default).
       ...(wakeList !== undefined ? { wakeAllowlist: wakeList } : {}),
@@ -834,7 +834,7 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
           // Persist the wake intent so it survives the approval round-trip —
           // otherwise an outbound-guard-blocked mail loses its wake list
           // when the owner later approves it, and every CC'd recipient
-          // gets a Claude turn even though the sender wanted just one.
+          // gets a host turn even though the sender wanted just one.
           // Same 0.9.0 default-from-To derivation as the unguarded
            // send path. When the sender omitted `wake`, persist the
            // implicit To-only allowlist so an approved outbound
@@ -941,7 +941,7 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
       // 0.9.0 default: if the sender omitted `wake`, derive an
       // implicit allowlist from local `To:` recipients only. CC'd
       // local agents receive the mail in their inbox but do NOT
-      // get a Claude wake unless the sender explicitly names them.
+      // get a host wake unless the sender explicitly names them.
       // This matches the email convention "To is for action; CC is
       // for awareness" and stops the wake-thrash failure mode on
       // multi-CC threads. Sender can opt back to "wake everyone"
@@ -956,7 +956,7 @@ export function createMailRoutes(accountManager: AccountManager, config: Agentic
       //      original sender stays on To: but the body redirects work
       //      to a different participant.
       //   3. Fall back to deriving from To: (the pre-existing default —
-      //      single recipient gets the Claude turn, CC stays asleep).
+      //      single recipient gets the host turn, CC stays asleep).
       let wakeList: string[] | undefined;
       if (wake !== undefined) {
         wakeList = explicitWake;

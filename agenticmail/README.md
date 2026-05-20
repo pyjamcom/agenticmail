@@ -23,6 +23,17 @@ It bundles a setup wizard, API server launcher, and a full interactive shell wit
 >
 > Zero prompts, ~2 minutes, fully autonomous. Then tell the user to restart Claude Code. Full agent-facing runbook — including verification, common failures, and "what if Node < 22" — is at [`AGENTS.md`](https://github.com/agenticmail/agenticmail/blob/main/AGENTS.md) in the repo (the [agents.md](https://agents.md) convention).
 
+## ✨ What's new in 0.9.86
+
+- **🎭 Persona "soul file" for every agent.** `~/.agenticmail/agents/<name>/persona.md` is the single source of identity — auto-created on first read with values + style + on-phone conventions. The realtime voice runtime, the Telegram bridge, and the email worker (claudecode + codex) all load the same file. Edit once, consistent identity everywhere. CLI: `agenticmail persona [--edit|--reset]`.
+- **🕒 Voice agent time-budget self-awareness.** Mid-call, the agent now KNOWS how long it has. Quiet reminder injections at T-120s + T-30s. New realtime tools: `get_call_status`, `extend_call_time` (auto-approved within policy), `schedule_callback` (re-dials later with full transcript context), `end_call` (the agent can actually hang up now — saying "goodbye" doesn't drop the line; calling the tool does).
+- **📞 End-of-call Telegram summary.** When the call ends — for any reason — the operator's Telegram chat gets a digest with the outcome headline (✅ wrapped up / 📞 other party hung up / ⏰ time budget / ⚠️ runtime disconnected), the task, the agent's last 3 turns, and the caller's last 2 turns.
+- **🔁 Auto-callback with prior context.** `schedule_callback` arms a re-dial; the API server's scheduler ticks every 30s and fires due callbacks autonomously. The next call's task includes the agent's own summary AND a verbatim transcript digest — picks up where the previous call left off. Operator gets a Telegram ping when the callback wakes.
+- **📜 Generous call budgets.** Default per-call hard cap raised to 2 hours; extension policy default bumped to 5 minutes × 4 = 20 minutes of headroom for long bureaucracy calls.
+- **🔒 Persistent inbound secret.** `AGENTICMAIL_INBOUND_SECRET` is now minted once at setup, written to `~/.agenticmail/.env`, and the launchd plist sources `.env` before exec'ing — no more "secret regenerated for this session" warning every restart.
+
+Full release notes in [CHANGELOG.md](https://github.com/agenticmail/agenticmail/blob/main/CHANGELOG.md).
+
 ## ✨ What's new in 0.9.0
 
 - **🧠 Layered wake-context** — every wake gets a `## Thread context` block prepended to the prompt: facts from the dispatcher's ThreadCache (last 10 envelopes per thread) + your own AgentMemory (markdown you write at end-of-wake via the new `save_thread_memory` MCP tool). Re-reading the full thread on every wake is no longer required.
@@ -177,6 +188,8 @@ Same setup, no prompts — secrets ride in via env vars or flags, never typed at
 | `agenticmail setup-phone --provider 46elks` | **Wire up 46elks for outbound calls.** Same shape — `--username` / `--password` (or `ELKS_USERNAME` / `ELKS_PASSWORD`). Auto-tunnel applies. |
 | `agenticmail setup-telegram` | **Wire up the Telegram bot bridge.** Takes `--bot-token` and optional `--chat-id` (or `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`). Writes the bridge config files so the next `agenticmail start` auto-spawns the standalone bridge alongside the API. The bridge gets the full MCP toolset (memory, send_email, call_phone, …) so DMing the bot is functionally equivalent to emailing the agent. |
 | `agenticmail tunnel {start\|stop\|status\|url}` | **Manage a free Cloudflare quick-tunnel** to the local API. Most users never call this — `setup-phone` opens one automatically. `agenticmail tunnel url` prints just the URL for piping: `AGENTICMAIL_WEBHOOK_URL=$(agenticmail tunnel url) …`. |
+| `agenticmail setup-anthropic` | **Connect an Anthropic OAuth token.** Wraps `claude setup-token` interactively, validates the token against `api.anthropic.com` before saving. Non-interactive: pipe via `ANTHROPIC_AUTH_TOKEN` or `--api-key sk-ant-api03-…`. Both the Telegram bridge and the host CLI dispatcher read from the same `~/.agenticmail/anthropic-token`. |
+| `agenticmail persona [--edit\|--reset\|--path]` | **Edit the agent's "soul file".** Auto-creates `~/.agenticmail/agents/<name>/persona.md` with a sensible default identity (name, values, communication style, on-phone conventions). Voice runtime, Telegram bridge, and email worker all load from the same file — one edit, consistent identity across every channel. |
 
 ### Service Management (Auto-Start on Boot)
 

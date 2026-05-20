@@ -76,7 +76,7 @@ describe('normalizeWakeList', () => {
  *   Fix: when sender omits `wake`, scan the body for explicit
  *   addressing of CC'd agents. If found, those wake instead of
  *   To:'s default. Sable still gets the mail in inbox; she just
- *   doesn't get a Claude turn unless explicitly addressed.
+ *   doesn't get a host turn unless explicitly addressed.
  */
 describe('deriveWakeFromBody', () => {
   const candidates = ['marlow', 'kepler', 'rivet', 'sable', 'codex'];

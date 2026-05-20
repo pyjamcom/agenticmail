@@ -11,7 +11,7 @@
  * message to a delivery callback — the `GatewayManager` plugs that
  * callback in and synthesises an email into the agent's INBOX, which
  * trips the existing IMAP IDLE → claudecode dispatcher path and wakes
- * the agent for a real Claude turn.
+ * the agent for a real host turn.
  *
  * Long-poll, not short-poll. Telegram's `getUpdates` supports a long-
  * poll `timeout` parameter — the request blocks on the server side for

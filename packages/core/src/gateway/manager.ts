@@ -1070,7 +1070,7 @@ export class GatewayManager {
    * agent's INBOX via the existing local-SMTP path — the very same
    * delivery the relay uses for real email. This makes the existing
    * IMAP IDLE → claudecode dispatcher path light up exactly as it
-   * would for a real inbound mail, so the agent gets a Claude turn
+   * would for a real inbound mail, so the agent gets a host turn
    * without any new dispatcher plumbing. The body of the synthetic
    * mail tells the agent the message came from Telegram and that it
    * MUST reply via the `telegram_send` MCP tool, not via email.

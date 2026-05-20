@@ -1,6 +1,6 @@
 /**
- * Resolves a persona prompt for an AgenticMail agent, with two sources
- * tried in order:
+ * Resolves a persona prompt for an AgenticMail agent, with three
+ * sources tried in order:
  *
  *   1. `~/.claude/agents/agenticmail-<name>.md` on disk (if present).
  *      Lets the operator customise an agent's behaviour by hand-editing
@@ -8,7 +8,16 @@
  *      files are both honoured — the dispatcher trusts whatever is on
  *      disk for that agent.
  *
- *   2. In-memory render from live AgenticMail account metadata via
+ *   2. `~/.agenticmail/agents/<name>/persona.md` — the canonical
+ *      "soul file" introduced in v0.9.85. Same file the voice runtime
+ *      reads, so the agent's identity is consistent across email,
+ *      Telegram, and live phone calls. Auto-created with a sensible
+ *      default on first read (see `core/src/persona/index.ts`). When
+ *      present, the dispatcher prepends it to the generated body so
+ *      the operator's edits to the canonical file flow through to
+ *      every spawn path including the email worker.
+ *
+ *   3. In-memory render from live AgenticMail account metadata via
  *      `renderPersonaBody`. This is the path for agents that were just
  *      `create_account`-ed and have no file yet — they become wake-able
  *      immediately, no install step required.
@@ -19,6 +28,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadAgentPersona } from '@agenticmail/core';
 import type { AgenticMailAccount } from './types.js';
 import { renderPersonaBody } from './subagent-template.js';
 
@@ -70,7 +80,16 @@ function stripFrontmatter(raw: string): string {
 
 /**
  * Try the disk file; fall back to live generation. Pure function — no
- * side effects, no API calls (the account metadata is passed in).
+ * side effects beyond `loadAgentPersona` lazy-creating the canonical
+ * persona file on first read (idempotent + write-once).
+ *
+ * v0.9.86 — adds the canonical-persona overlay. If the Claude Code
+ * subagent file is missing OR contains only frontmatter, we still
+ * fall back to a generated body — but we now PREPEND the canonical
+ * `~/.agenticmail/agents/<name>/persona.md` content so the dispatcher
+ * worker shares identity with the voice runtime and the Telegram
+ * bridge. The operator edits ONE file, the change reaches every
+ * spawn path.
  */
 export function loadPersonaForAgent(opts: LoadPersonaOptions): LoadedPersona {
   const { agent, agentsDir, subagentPrefix, mcpServerName } = opts;
@@ -85,7 +104,22 @@ export function loadPersonaForAgent(opts: LoadPersonaOptions): LoadedPersona {
       // Fall through to generated.
     }
   }
-  // No file — generate from live account metadata.
-  const body = renderPersonaBody({ name: basename, agent, mcpServerName });
+  // No subagent file — generate from live account metadata, prefixed
+  // with the canonical persona ("soul file"). loadAgentPersona is
+  // best-effort: a permission error / disk failure returns an in-
+  // memory default rather than throwing, so the dispatcher never
+  // crashes here for a filesystem reason.
+  let canonical = '';
+  try {
+    canonical = loadAgentPersona(agent.name).trim();
+  } catch {
+    // Defensive: an upstream change could theoretically throw despite
+    // loadAgentPersona's own try/catch. Don't take the worker down.
+    canonical = '';
+  }
+  const generated = renderPersonaBody({ name: basename, agent, mcpServerName });
+  const body = canonical
+    ? `${canonical}\n\n---\n\n${generated}`
+    : generated;
   return { body, source: 'generated' };
 }

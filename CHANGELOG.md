@@ -5,6 +5,222 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.86] - 2026-05-20
+
+### Added — persona reaches every spawn path, not just voice
+
+The persona system introduced in 0.9.85 only ran in the realtime
+voice runtime. The Telegram-chat agent and the email worker still
+spawned with no identity. Now both load the same canonical
+`~/.agenticmail/agents/<name>/persona.md`:
+
+- **Telegram bridge** — `loadBridgePersona()` reads the persona at
+  bridge startup and passes it on every `runClaude` call via
+  `--append-system-prompt`. The identity that introduces itself
+  on the phone now answers DMs.
+- **claudecode dispatcher** — `loadPersonaForAgent` prepends the
+  canonical persona to the generated subagent body when no
+  `~/.claude/agents/agenticmail-<name>.md` is present.
+- **codex dispatcher** — same overlay.
+
+`AGENTICMAIL_AGENT_NAME` env var disambiguates when an install
+has multiple agents.
+
+### Changed — neutralised host-specific wording across shared packages
+
+"Claude turn" / "Claude wake" / "Claude worker" replaced with
+"host turn" / "host wake" / "host worker" in `packages/api`,
+`packages/core`, and `packages/mcp` (and respective READMEs).
+Codex and future hosts are first-class consumers of these comments
+and tool descriptions; the wording shouldn't bias toward one
+specific integration.
+
+### Bumps
+
+`core` 0.9.31 → 0.9.32, `api` 0.9.54 → 0.9.55, `mcp` 0.9.23 →
+0.9.24, `claudecode` 0.2.28 → 0.2.29, `codex` 0.1.23 → 0.1.24,
+`cli` 0.9.85 → 0.9.86.
+
+## [0.9.85] - 2026-05-20
+
+### Added — agent persona "soul file" + end-of-call Telegram summary
+
+**Soul file.** When asked "who are you?", the voice agent used to
+say "I'm an assistant" — because the realtime bridge had a
+hardcoded generic persona. Same agent across email / Telegram /
+voice had three uncoupled personalities and zero continuity.
+
+Each agent now has `~/.agenticmail/agents/<name>/persona.md`,
+auto-created on first read with values, communication style, and
+on-phone conventions. New CLI:
+
+```bash
+agenticmail persona              # print the host agent's persona
+agenticmail persona --edit       # open in $EDITOR
+agenticmail persona --reset      # restore the default
+```
+
+**End-of-call notification.** Operators kicking off a phone task
+from Telegram got no feedback when the call ended. The realtime
+bridge's `onEnd` now DMs the operator's Telegram chat with the
+outcome (✅ agent wrapped up / 📞 other party hung up / ⏰ time
+budget / ⚠️ runtime disconnected), the task, the agent's last 3
+turns, and the caller's last 2 turns.
+
+### Bumps
+
+`core` 0.9.30 → 0.9.31, `api` 0.9.53 → 0.9.54, `cli` 0.9.84 → 0.9.85.
+
+## [0.9.84] - 2026-05-20
+
+### Fixed — persistent inbound secret + launchd env loading
+
+Two related fixes for the noisy
+`[Inbound] WARNING: AGENTICMAIL_INBOUND_SECRET is not set` log spam:
+
+1. `SetupManager.initConfig()` now mints `inboundSecret` once at
+   setup and writes it to both `~/.agenticmail/config.json` and
+   `.env`. Lazy-mints into pre-existing configs (idempotent +
+   append-only).
+2. The launchd plist's wrapper `start-server.sh` now sources
+   `~/.agenticmail/.env` before exec'ing the API, so launchd's
+   child inherits `AGENTICMAIL_MASTER_KEY`, the inbound secret,
+   and Stalwart admin creds. Previously launchd-started API
+   processes silently ran in a degraded mode (no encryption-at-
+   rest, random secret every restart).
+
+### Bumps
+
+`core` 0.9.29 → 0.9.30, `api` 0.9.52 → 0.9.53, `cli` 0.9.83 → 0.9.84.
+
+## [0.9.83] - 2026-05-20
+
+### Fixed — hotfix re-exporting new realtime tools
+
+v0.9.82 shipped the new realtime tools but only exported them from
+the deep `phone/realtime-tools.ts` module — the top-level
+`@agenticmail/core` index missed `GET_CALL_STATUS_TOOL`,
+`EXTEND_CALL_TIME_TOOL`, `SCHEDULE_CALLBACK_TOOL`, and
+`END_CALL_TOOL`. The API package imports from the package root, so
+on startup Node's ESM loader threw `SyntaxError: The requested
+module '@agenticmail/core' does not provide an export named
+'END_CALL_TOOL'` and `agenticmail start` exited with "Server did
+not start in time". Fix re-exports + the new policy helpers
+(`resolveExtensionPolicy`, `DEFAULT_EXTENSION_POLICY`, etc.) and
+types from both `phone/index.ts` and the root `index.ts`.
+
+### Bumps
+
+`core` 0.9.28 → 0.9.29, `api` 0.9.51 → 0.9.52, `cli` 0.9.82 → 0.9.83.
+
+## [0.9.82] - 2026-05-20
+
+### Added — `end_call` tool + longer call budgets + Telegram callback notifications
+
+1. **`end_call`.** The realtime voice model could *say* "I'll hang
+   up now" but had no way to actually drop the line. New
+   `end_call({ reason })` tool wires to
+   `bridge.endByAgentRequest()`; guidance is explicit that saying
+   "goodbye" is not enough — the agent must call the tool.
+2. **Longer call budgets out of the box.** Real calls to customer
+   support / government services regularly run 45–90 minutes.
+   Bumped server ceilings:
+   - max call duration 1h → **2h**
+   - max extension per request 5m → **15m**
+   - max extension requests per call 4 → **8**
+   - max total extension 10m → **1h**
+   - default extension envelope 2m × 2 → **5m × 4 = 20m**
+3. **Telegram pings when a scheduled callback fires.** Auto-
+   callbacks now DM the operator's configured Telegram chat with
+   the agent's notes when they wake and dial. Failure case also
+   surfaces ("callback to X failed: <reason>, will retry").
+
+### Bumps
+
+`core` 0.9.27 → 0.9.28, `api` 0.9.50 → 0.9.51, `cli` 0.9.81 → 0.9.82.
+
+## [0.9.81] - 2026-05-20
+
+### Added — voice agent time-budget self-awareness + auto-callback
+
+The realtime voice agent now KNOWS how long it has on a call, gets
+quiet reminders as the budget closes, can request more time (auto-
+approved within policy caps), and can schedule an auto-callback
+that re-dials with full context from the prior call.
+
+- `RealtimeVoiceBridge` runs a soft-deadline timer with reminder
+  injections at T-120s + T-30s and a 30s grace window after the
+  budget elapses.
+- Three new realtime tools: `get_call_status`,
+  `extend_call_time`, `schedule_callback`.
+- New `extensionPolicy` + `callbackPolicy` blocks on
+  `PhoneMissionPolicy` (optional, sensible defaults, server-
+  clamped).
+- `PhoneManager.armScheduledCallback` /
+  `findDueScheduledCallbacks` / `triggerScheduledCallback` for
+  the persistence + dial path.
+- `callback-scheduler.ts` in the API server ticks every 30s and
+  fires due callbacks. Continuation task carries the agent's own
+  summary + a transcript digest the bridge composes from the
+  rolling utterance buffer.
+- Chain-depth tracking on callback-of-callback chains.
+
+### Bumps
+
+`core` 0.9.26 → 0.9.27, `api` 0.9.49 → 0.9.50, `cli` 0.9.80 →
+0.9.81.
+
+## [0.9.80] - 2026-05-19
+
+### Fixed — `call_phone` policy schema corrections + TOOL_SETS partition
+
+`call_phone` tool descriptions had the wrong field names
+(`maxDurationSeconds` / `maxCostUsd` / no `policyVersion`). The
+actual validator wants `policyVersion: 1` (literal number),
+`maxCallDurationSeconds` (positive int), `maxCostPerMission`
+(plain decimal). Agents trusting the tool description hit 400s on
+every attempt. Both MCP and OpenClaw tool schemas corrected with
+exact field names + types.
+
+`TOOL_SETS` partition was also broken — `call_phone`,
+`telegram_send`, `memory`, `memory_context` were listed in
+`essential` AND their natural set; `get_datetime` + `web_search`
+were phantom entries. Restored the partition; always-loaded
+promotion now happens via the new `PROMOTED_TO_ESSENTIAL` overlay.
+
+### Bumps
+
+`mcp` 0.9.22 → 0.9.23, `openclaw` 0.5.68 → 0.5.69, `cli` 0.9.79 →
+0.9.80.
+
+## [0.9.79] - 2026-05-19
+
+### Fixed — phone region default + Anthropic token validation + bridge error UX
+
+- **Phone-region defaults.** Twilio transport's
+  `supportedRegions` was defaulting to `['EU']` for every
+  provider. Calls to US/global numbers got blocked at the mission
+  gate as `transport-region-unsupported`. Now defaults to
+  `['WORLD']` for Twilio. Re-running `agenticmail setup-phone`
+  repairs an existing install.
+- **`setup-anthropic` validates the token before saving.** One
+  `claude-haiku-4-5` call to `api.anthropic.com` with
+  `max_tokens: 1`; failures classify into `auth-failed` /
+  `subscription-disabled` / `rate-limited` / `network` with
+  reason-specific guidance.
+- **Telegram bridge translates `claude -p` errors.** Classifies
+  stderr into rate-limited / quota-exceeded / subscription-
+  disabled / auth-failed / overloaded and DMs the operator a
+  friendly emoji-prefixed message instead of raw stack traces.
+- `call_phone` MCP + OpenClaw tool descriptions embed the
+  minimal valid policy with the FIXED `confirmPolicy` enum
+  literals.
+
+### Bumps
+
+`core` 0.9.25 → 0.9.26, `api` 0.9.48 → 0.9.49, `mcp` 0.9.21 →
+0.9.22, `openclaw` 0.5.67 → 0.5.68, `cli` 0.9.78 → 0.9.79.
+
 ## [0.9.78] - 2026-05-20
 
 ### Added — `agenticmail setup-anthropic` (one-command Anthropic auth)

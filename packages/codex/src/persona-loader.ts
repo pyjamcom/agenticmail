@@ -1,30 +1,40 @@
 /**
- * Resolves a persona prompt for an AgenticMail agent, with two sources
- * tried in order:
+ * Resolves a persona prompt for an AgenticMail agent, with three
+ * sources tried in order:
  *
- *   1. `~/.claude/agents/agenticmail-<name>.md` on disk (if present).
- *      Lets the operator customise an agent's behaviour by hand-editing
- *      its file. Owned-by-us files (frontmatter marker) AND user-owned
- *      files are both honoured — the dispatcher trusts whatever is on
- *      disk for that agent.
+ *   1. The host CLI's per-agent subagent file on disk (if present).
+ *      For Codex installs this is typically under `~/.codex/agents/`;
+ *      the caller passes the directory + filename prefix. Lets the
+ *      operator customise an agent's behaviour by hand-editing its
+ *      file.
  *
- *   2. In-memory render from live AgenticMail account metadata via
- *      `renderPersonaBody`. This is the path for agents that were just
- *      `create_account`-ed and have no file yet — they become wake-able
- *      immediately, no install step required.
+ *   2. `~/.agenticmail/agents/<name>/persona.md` — the canonical
+ *      "soul file" introduced in v0.9.85. Same file the voice
+ *      runtime and the Telegram bridge read, so the agent's identity
+ *      stays consistent across email, Telegram, and live phone
+ *      calls. Auto-created with a sensible default on first read.
+ *      When present, the dispatcher prepends it to the generated
+ *      body so the operator's edits to the canonical file flow
+ *      through to every spawn path including the email worker.
+ *
+ *   3. In-memory render from live AgenticMail account metadata via
+ *      `renderPersonaBody`. This is the path for agents that were
+ *      just `create_account`-ed and have no file yet — they become
+ *      wake-able immediately, no install step required.
  *
  * Returns the persona BODY (no YAML frontmatter). That's what the
- * Claude Agent SDK consumes as a system prompt.
+ * host CLI's spawn surface consumes as a system prompt.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadAgentPersona } from '@agenticmail/core';
 import type { AgenticMailAccount } from './types.js';
 import { renderPersonaBody } from './subagent-template.js';
 
 export interface LoadPersonaOptions {
   agent: AgenticMailAccount;
-  /** Directory holding per-agent .md files. Default: ~/.claude/agents. */
+  /** Directory holding per-agent files (e.g. ~/.codex/agents). */
   agentsDir: string;
   /** Prefix for filenames. Default: "agenticmail-". */
   subagentPrefix: string;
@@ -71,8 +81,15 @@ function stripFrontmatter(raw: string): string {
 }
 
 /**
- * Try the disk file; fall back to live generation. Pure function — no
- * side effects, no API calls (the account metadata is passed in).
+ * Try the disk file; otherwise generate from live account metadata
+ * with the canonical persona prepended.
+ *
+ * v0.9.86 — canonical-persona overlay. If the host-specific subagent
+ * file is missing OR contains only frontmatter, we still fall back
+ * to a generated body — but we PREPEND `~/.agenticmail/agents/<name>/
+ * persona.md` so the dispatcher worker shares identity with the
+ * voice runtime and the Telegram bridge. The operator edits ONE
+ * file, the change reaches every spawn path.
  */
 export function loadPersonaForAgent(opts: LoadPersonaOptions): LoadedPersona {
   const { agent, agentsDir, subagentPrefix, mcpServerName } = opts;
@@ -87,7 +104,20 @@ export function loadPersonaForAgent(opts: LoadPersonaOptions): LoadedPersona {
       // Fall through to generated.
     }
   }
-  // No file — generate from live account metadata.
-  const body = renderPersonaBody({ name: basename, agent, mcpServerName });
+  // No subagent file — generate from live account metadata, prefixed
+  // with the canonical persona ("soul file"). loadAgentPersona is
+  // best-effort: a permission error / disk failure returns an in-
+  // memory default rather than throwing, so the dispatcher never
+  // crashes here for a filesystem reason.
+  let canonical = '';
+  try {
+    canonical = loadAgentPersona(agent.name).trim();
+  } catch {
+    canonical = '';
+  }
+  const generated = renderPersonaBody({ name: basename, agent, mcpServerName });
+  const body = canonical
+    ? `${canonical}\n\n---\n\n${generated}`
+    : generated;
   return { body, source: 'generated' };
 }

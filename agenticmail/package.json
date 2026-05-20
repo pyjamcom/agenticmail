@@ -1,6 +1,6 @@
 {
   "name": "@agenticmail/cli",
-  "version": "0.9.85",
+  "version": "0.9.86",
   "description": "Email, SMS & phone-call infrastructure for AI agents — real email addresses, phone numbers, and agent-driven outbound voice calls",
   "type": "module",
   "main": "dist/index.js",
@@ -33,13 +33,13 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@agenticmail/api": "^0.9.54",
-    "@agenticmail/core": "^0.9.31",
+    "@agenticmail/api": "^0.9.55",
+    "@agenticmail/core": "^0.9.32",
     "json5": "^2.2.3"
   },
   "optionalDependencies": {
-    "@agenticmail/claudecode": "^0.2.28",
-    "@agenticmail/codex": "^0.1.23"
+    "@agenticmail/claudecode": "^0.2.29",
+    "@agenticmail/codex": "^0.1.24"
   },
   "devDependencies": {
     "tsup": "^8.4.0",
