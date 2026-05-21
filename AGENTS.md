@@ -243,6 +243,28 @@ The bridge classifies `claude -p` stderr into actionable categories and forwards
 
 If the operator says "the bot just told me it hit a quota / rate limit / auth error", that's where it came from — the bridge isn't broken, it just hit the source.
 
+### `setup-voice` — pick a voice runtime (OpenAI / Grok / future)
+
+The realtime voice bridge that drives live phone calls supports multiple backends through a drop-in plugin directory at `packages/core/src/phone/voice-providers/`. Currently registered: **OpenAI Realtime** (`gpt-realtime`, the default) and **xAI Grok Voice Agent** (`grok-voice-latest`). Both speak the same OpenAI-Realtime WebSocket protocol so the bridge code is provider-agnostic.
+
+One unified command for any provider:
+
+```bash
+# OpenAI (default — keeps existing installs working)
+OPENAI_API_KEY=sk-... agenticmail setup-voice --provider openai
+
+# Grok — also set it as the install-wide default
+XAI_API_KEY=xai-... agenticmail setup-voice --provider grok --default
+```
+
+Without `--key` and without the env var, the command opens a hidden-input prompt. Without `--provider` and at a TTY, it shows a picker.
+
+**Per-call override:** even if the install-wide default is `openai`, an individual call can pin Grok by setting `policy.voiceRuntime = "grok"` on the `call_phone` MCP tool. Useful for A/B'ing voices, cost-tuning, or routing certain customer-types to a specific runtime.
+
+**Where keys land:** `~/.agenticmail/config.json` under `voiceProviderKeys.<id>` (encrypted-at-rest via the master key on the runtime side). OpenAI keeps its legacy `openaiApiKey` field for backcompat. Existing installs upgrade transparently.
+
+**Adding a new backend** (Anthropic realtime, Cartesia, ElevenLabs ConvAI, ...): drop a file into `packages/core/src/phone/voice-providers/<id>.ts` exporting a `registerVoiceProvider({...})` call, add one import line to the barrel index, rebuild. No other file in the codebase needs to change — the realtime bridge looks providers up by id through the registry.
+
 ### `setup-phone` — Twilio / 46elks outbound voice (optional)
 
 If the operator wants the agent to place phone calls, run this — same shape as `setup-email`, with secrets piped via env vars instead of typed on the command line:

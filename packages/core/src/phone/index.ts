@@ -75,6 +75,17 @@ export type {
   RealtimeVoiceBridgeOptions,
   ScheduledCallbackRequest,
 } from './realtime-bridge.js';
+
+// v0.9.93 — voice-runtime providers (drop-in plugin directory).
+// Side-effect import triggers each provider's registerVoiceProvider()
+// call; the named exports give callers the lookup API.
+export {
+  registerVoiceProvider,
+  listVoiceProviders,
+  getVoiceProvider,
+  resolveVoiceRuntime,
+} from './voice-providers/index.js';
+export type { VoiceProvider, VoiceRuntimeConnection } from './voice-providers/index.js';
 export {
   OPERATOR_QUERY_TIMEOUT_MS,
   OPERATOR_QUERY_POLL_INTERVAL_MS,

@@ -50,6 +50,7 @@ import {
   RealtimeVoiceBridge,
   buildRealtimeSessionConfig,
   buildOpenAIRealtimeUrl,
+  resolveVoiceRuntime,
   DEFAULT_REALTIME_MODEL,
   parseElksRealtimeMessage,
   createRealtimeTransport,
@@ -250,7 +251,12 @@ async function handleElksConnection(
       throw new Error('realtime voice connection failed token authentication');
     }
 
-    if (!deps.config.openaiApiKey) {
+    // v0.9.93 — preflight is now provider-aware. The resolver throws a
+    // clear error if the selected provider's key is missing; we let
+    // that error propagate (handled below by the carrier-side abort).
+    // Still keep a fast OpenAI-key check for the default-provider case
+    // to preserve the existing exact error message.
+    if (!deps.config.voiceRuntime && !deps.config.openaiApiKey && !process.env.OPENAI_API_KEY) {
       phoneManager.recordRealtimeActivity(mission.id, [systemEntry(
         'Realtime voice could not start — no OpenAI API key is configured (set OPENAI_API_KEY).',
       )]);
@@ -358,7 +364,12 @@ async function handleTwilioConnection(
       throw new Error('Twilio realtime stream failed token authentication');
     }
 
-    if (!deps.config.openaiApiKey) {
+    // v0.9.93 — preflight is now provider-aware. The resolver throws a
+    // clear error if the selected provider's key is missing; we let
+    // that error propagate (handled below by the carrier-side abort).
+    // Still keep a fast OpenAI-key check for the default-provider case
+    // to preserve the existing exact error message.
+    if (!deps.config.voiceRuntime && !deps.config.openaiApiKey && !process.env.OPENAI_API_KEY) {
       phoneManager.recordRealtimeActivity(mission.id, [systemEntry(
         'Realtime voice could not start — no OpenAI API key is configured (set OPENAI_API_KEY).',
       )]);
@@ -416,7 +427,18 @@ async function startBridge(params: StartBridgeParams): Promise<RealtimeVoiceBrid
   const { mission, carrierWs, transport, deps, getBridge } = params;
   const { config, phoneManager, memory, db } = deps;
 
-  const model = DEFAULT_REALTIME_MODEL;
+  // v0.9.93 — resolve the voice runtime through the drop-in provider
+  // registry (packages/core/src/phone/voice-providers/). Priority:
+  //   1. mission.policy.voiceRuntime — per-call override
+  //   2. config.voiceRuntime         — install-wide default
+  //   3. 'openai'                    — fall-through default
+  // Plus an optional .voiceModel field on policy lets the caller pin
+  // a specific model (e.g. 'gpt-realtime-mini', 'grok-voice-fast').
+  const missionPolicyVoice = (mission.policy as any)?.voiceRuntime as string | undefined;
+  const missionPolicyModel = (mission.policy as any)?.voiceModel as string | undefined;
+  const providerId = missionPolicyVoice || config.voiceRuntime || 'openai';
+  const runtime = resolveVoiceRuntime(providerId, config, { model: missionPolicyModel });
+  const model = runtime.model;
 
   // Render the agent's persistent memory and fold it + the mission task
   // into the OpenAI Realtime session instructions. The model is told to
@@ -472,9 +494,14 @@ async function startBridge(params: StartBridgeParams): Promise<RealtimeVoiceBrid
     recordTranscript: record,
   });
 
-  const openaiWs = new WebSocket(buildOpenAIRealtimeUrl(model), {
-    headers: { Authorization: `Bearer ${config.openaiApiKey}` },
+  // v0.9.93 — open against whichever provider the resolver picked.
+  // Variable name kept as `openaiWs` for diff-friendliness; the bridge
+  // class still refers to its OpenAI-side port by that field name since
+  // the wire protocol is the same regardless of who's terminating it.
+  const openaiWs = new WebSocket(runtime.url, {
+    headers: { Authorization: `Bearer ${runtime.apiKey}` },
   });
+  console.log(`[realtime-voice] mission=${mission.id} voice-runtime=${runtime.providerId} model=${runtime.model} key=${runtime.apiKeySource}`);
 
   const bridge = new RealtimeVoiceBridge({
     carrier: portFor(carrierWs),

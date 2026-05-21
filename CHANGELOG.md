@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.93] - 2026-05-20
+
+### Added — multi-provider voice runtime (drop-in plugin directory) + Grok Voice Agent
+
+The realtime voice bridge is no longer hardcoded to OpenAI. Voice
+runtime providers live in `packages/core/src/phone/voice-providers/`
+as independent files that register themselves with a small registry
+at module load. Two providers shipped:
+
+- **openai** — OpenAI Realtime (`gpt-realtime`), the existing default.
+- **grok** — xAI Grok Voice Agent (`grok-voice-latest`),
+  OpenAI-Realtime-compatible by design so the bridge speaks the same
+  events. Endpoint: `wss://api.x.ai/v1/realtime`. Auth: `XAI_API_KEY`.
+
+Resolver picks the provider in this priority order:
+  1. `mission.policy.voiceRuntime` — per-call override
+  2. `config.voiceRuntime` — install-wide default
+  3. `'openai'` — fallback default
+
+Adding a new backend (Anthropic, Cartesia, ElevenLabs ConvAI, etc.):
+create `voice-providers/<id>.ts` exporting one
+`registerVoiceProvider({...})` call, add one import line to the
+barrel index — no other file needs to change.
+
+**CLI:** new `agenticmail setup-voice [--provider <id>] [--key <token>]
+[--default]` is the single provider-agnostic surface. Old aliases
+`setup-openai` / `setup-grok` / `setup-xai` all route here. Keys
+land in `~/.agenticmail/config.json` under `voiceProviderKeys.<id>`
+(except OpenAI, which keeps its legacy `openaiApiKey` field for
+backcompat).
+
+**Tests:** 12 new tests for the registry — provider registration,
+URL building, key resolution priority (config legacy → keys map →
+env), error messages for unknown providers and missing keys.
+
+### Bumps
+
+`core` 0.9.38 → 0.9.39, `api` 0.9.58 → 0.9.59, `cli` 0.9.92 → 0.9.93.
+
 ## [0.9.92] - 2026-05-20
 
 ### Added — `search_skills` robustness + automatic stale-operator-query sweeper

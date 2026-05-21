@@ -1265,6 +1265,149 @@ async function cmdPersona() {
   log('');
 }
 
+/**
+ * `agenticmail setup-voice [--provider <id>] [--key <token>] [--default]`
+ *
+ * Single command for every voice-runtime backend the bridge supports
+ * (OpenAI gpt-realtime, xAI Grok Voice Agent, future plugins under
+ * `packages/core/src/phone/voice-providers/`). The registry tells us
+ * which providers exist + what env var each one expects; the command
+ * is provider-agnostic — `agenticmail setup-voice --provider grok` is
+ * the same code path as `--provider openai`, just looking up a
+ * different plugin.
+ *
+ * Without `--key`, the command runs interactively: pick a provider
+ * from the registered list, paste the key (hidden), optionally mark
+ * it as the install-wide default. The key lands in
+ * `~/.agenticmail/config.json` under `voiceProviderKeys.<id>` (or
+ * `openaiApiKey` for the legacy field — preserved for backcompat).
+ *
+ * Non-interactive: pipe `--key sk-…` or `XAI_API_KEY=…` etc.
+ */
+async function cmdSetupVoice() {
+  const args = process.argv.slice(3);
+  const flag = (name: string): string | undefined => {
+    const eq = `--${name}=`;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === `--${name}` && i + 1 < args.length) return args[i + 1];
+      if (args[i].startsWith(eq)) return args[i].slice(eq.length);
+    }
+    return undefined;
+  };
+  const has = (name: string) => args.includes(`--${name}`);
+
+  const { listVoiceProviders } = await import('@agenticmail/core');
+  const providers = listVoiceProviders();
+
+  if (has('help') || args.includes('-h')) {
+    log('');
+    log(`  ${c.pinkBg(' 🎀 agenticmail setup-voice ')}`);
+    log('');
+    log(`  ${c.bold('Usage:')} agenticmail setup-voice [--provider <id>] [--key <token>] [--default]`);
+    log('');
+    log(`  ${c.bold('Registered voice-runtime providers:')}`);
+    for (const p of providers) {
+      log(`    ${c.cyan(p.id.padEnd(8))} ${p.displayName} ${c.dim('(env: ' + p.apiKeyEnvVar + ')')}`);
+    }
+    log('');
+    log(`  ${c.bold('Flags:')}`);
+    log(`    --provider <id>   ${c.dim('Provider id (see list above); interactive picker if omitted')}`);
+    log(`    --key <token>     ${c.dim('API key; hidden prompt if omitted')}`);
+    log(`    --default         ${c.dim('Also set this provider as the install-wide voiceRuntime default')}`);
+    log('');
+    log(`  Adding a new backend: drop a file into`);
+    log(`  ${c.dim('packages/core/src/phone/voice-providers/<id>.ts')}`);
+    log(`  and add one line to its barrel index. It'll show up here on next build.`);
+    log('');
+    return;
+  }
+
+  // Resolve provider id — flag wins, else interactive pick.
+  let providerId = (flag('provider') || '').trim();
+  if (!providerId) {
+    if (!process.stdin.isTTY) {
+      fail('--provider is required when running non-interactively (no TTY).');
+      info(`See: ${c.green('agenticmail setup-voice --help')}`);
+      process.exit(1);
+    }
+    log('');
+    log(`  ${c.bold('🎀 AgenticMail — connect a voice runtime')}`);
+    log('');
+    log(`  ${c.dim('Pick a backend for the realtime voice bridge:')}`);
+    providers.forEach((p, i) => {
+      log(`    ${c.cyan(String(i + 1))}. ${p.id.padEnd(8)} ${c.dim(p.displayName)}`);
+    });
+    log('');
+    const choice = (await ask(`  ${c.magenta('>')} `)).trim().toLowerCase();
+    const byIndex = providers[parseInt(choice, 10) - 1];
+    const byId = providers.find((p) => p.id === choice);
+    const picked = byIndex || byId;
+    if (!picked) {
+      fail(`Unknown choice "${choice}".`);
+      process.exit(1);
+    }
+    providerId = picked.id;
+    log('');
+  }
+
+  const provider = providers.find((p) => p.id === providerId);
+  if (!provider) {
+    fail(`Unknown provider "${providerId}". Known: ${providers.map((p) => p.id).join(', ')}.`);
+    process.exit(1);
+  }
+
+  // Resolve the key — flag / env / prompt.
+  let key = (flag('key') || process.env[provider.apiKeyEnvVar] || '').trim();
+  if (!key) {
+    if (!process.stdin.isTTY) {
+      fail(`No API key provided. Set ${c.green(provider.apiKeyEnvVar)} in your environment or pass ${c.green('--key')}.`);
+      process.exit(1);
+    }
+    log(`  ${c.bold(`Paste your ${provider.displayName} API key`)} ${c.dim('(input is hidden)')}`);
+    key = (await askSecret(`  ${c.cyan(provider.apiKeyEnvVar)}: `)).trim();
+    if (!key) {
+      fail('No key entered.');
+      process.exit(1);
+    }
+  }
+
+  // Persist into ~/.agenticmail/config.json.
+  const configPath = join(homedir(), '.agenticmail', 'config.json');
+  if (!existsSync(configPath)) {
+    fail(`No config at ${c.dim(configPath)}. Run ${c.cyan('agenticmail setup')} first.`);
+    process.exit(1);
+  }
+  const config = JSON.parse(readFileSync(configPath, 'utf-8')) as SetupConfig & {
+    voiceProviderKeys?: Record<string, string>;
+    voiceRuntime?: string;
+    openaiApiKey?: string;
+  };
+
+  // OpenAI keeps using its dedicated legacy field for backcompat; every
+  // other provider lands in voiceProviderKeys[<id>].
+  if (provider.apiKeyConfigField === 'openaiApiKey') {
+    config.openaiApiKey = key;
+  } else {
+    config.voiceProviderKeys = config.voiceProviderKeys || {};
+    config.voiceProviderKeys[provider.id] = key;
+  }
+  if (has('default')) {
+    config.voiceRuntime = provider.id;
+  }
+  writeFileSync(configPath, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
+
+  log('');
+  ok(`Saved ${c.cyan(provider.displayName)} key to ${c.dim(configPath)}.`);
+  if (has('default')) {
+    info(`Set ${c.cyan(provider.id)} as the install-wide voice-runtime default.`);
+  } else {
+    info(`Use it for one call: pass ${c.green(`policy.voiceRuntime = "${provider.id}"`)} to call_phone.`);
+    info(`Use it for ALL calls: re-run with ${c.green('--default')}, or set ${c.green('AGENTICMAIL_VOICE_RUNTIME=' + provider.id)}.`);
+  }
+  info(`The bridge picks the new key up on the NEXT call — no restart needed.`);
+  log('');
+}
+
 async function cmdSetupAnthropic() {
   const args = process.argv.slice(3);
   const flag = (name: string): string | undefined => {
@@ -5650,6 +5793,17 @@ switch (process.argv[2]) {
   case 'setup-token':
   case 'anthropic':
     cmdSetupAnthropic().catch(err => { console.error(err); process.exit(1); });
+    break;
+  // v0.9.93 — single unified voice-runtime setup, provider-agnostic
+  // via the plugin registry. Old per-provider aliases (setup-openai,
+  // setup-grok, setup-xai) all route here; the --provider flag picks
+  // which backend's key is being set.
+  case 'setup-voice':
+  case 'setup-openai':
+  case 'setup-grok':
+  case 'setup-xai':
+  case 'voice':
+    cmdSetupVoice().catch(err => { console.error(err); process.exit(1); });
     break;
   case 'persona':
   case 'identity':

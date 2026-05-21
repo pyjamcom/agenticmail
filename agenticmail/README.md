@@ -23,6 +23,22 @@ It bundles a setup wizard, API server launcher, and a full interactive shell wit
 >
 > Zero prompts, ~2 minutes, fully autonomous. Then tell the user to restart Claude Code. Full agent-facing runbook — including verification, common failures, and "what if Node < 22" — is at [`AGENTS.md`](https://github.com/agenticmail/agenticmail/blob/main/AGENTS.md) in the repo (the [agents.md](https://agents.md) convention).
 
+## ✨ What's new in 0.9.93
+
+- **🗣 Multi-provider voice runtime.** The realtime voice bridge is no longer hardcoded to OpenAI. Drop-in plugin directory at `packages/core/src/phone/voice-providers/` registers each backend (`openai`, `grok`, future Anthropic/Cartesia/etc.) by id. Pick per call via `mission.policy.voiceRuntime` or install-wide via `AGENTICMAIL_VOICE_RUNTIME=grok`. xAI's [Grok Voice Agent API](https://docs.x.ai/docs/guides/voice/agent) is OpenAI-Realtime-compatible by design so the bridge speaks both protocols without a rewrite.
+- **🎀 `agenticmail setup-voice`** — single provider-agnostic command. `--provider openai|grok` + `--key` (or paste hidden) + optional `--default`. Old `setup-openai` / `setup-grok` aliases route here too.
+
+```bash
+# Set up Grok as the voice runtime, make it the default
+XAI_API_KEY=xai-... agenticmail setup-voice --provider grok --default
+
+# Or keep OpenAI as default + pin Grok only on specific calls via policy
+agenticmail setup-voice --provider grok          # registers the key
+# then on a call:  policy.voiceRuntime = "grok"
+```
+
+Full release notes in [CHANGELOG.md](https://github.com/agenticmail/agenticmail/blob/main/CHANGELOG.md).
+
 ## ✨ What's new in 0.9.86
 
 - **🎭 Persona "soul file" for every agent.** `~/.agenticmail/agents/<name>/persona.md` is the single source of identity — auto-created on first read with values + style + on-phone conventions. The realtime voice runtime, the Telegram bridge, and the email worker (claudecode + codex) all load the same file. Edit once, consistent identity everywhere. CLI: `agenticmail persona [--edit|--reset]`.
@@ -189,6 +205,7 @@ Same setup, no prompts — secrets ride in via env vars or flags, never typed at
 | `agenticmail setup-telegram` | **Wire up the Telegram bot bridge.** Takes `--bot-token` and optional `--chat-id` (or `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`). Writes the bridge config files so the next `agenticmail start` auto-spawns the standalone bridge alongside the API. The bridge gets the full MCP toolset (memory, send_email, call_phone, …) so DMing the bot is functionally equivalent to emailing the agent. |
 | `agenticmail tunnel {start\|stop\|status\|url}` | **Manage a free Cloudflare quick-tunnel** to the local API. Most users never call this — `setup-phone` opens one automatically. `agenticmail tunnel url` prints just the URL for piping: `AGENTICMAIL_WEBHOOK_URL=$(agenticmail tunnel url) …`. |
 | `agenticmail setup-anthropic` | **Connect an Anthropic OAuth token.** Wraps `claude setup-token` interactively, validates the token against `api.anthropic.com` before saving. Non-interactive: pipe via `ANTHROPIC_AUTH_TOKEN` or `--api-key sk-ant-api03-…`. Both the Telegram bridge and the host CLI dispatcher read from the same `~/.agenticmail/anthropic-token`. |
+| `agenticmail setup-voice [--provider <id>] [--key <token>] [--default]` | **Connect a voice runtime (OpenAI / Grok / future).** Provider-agnostic — `--provider openai` (gpt-realtime, default) or `--provider grok` (xAI Grok Voice Agent). Without `--key`, hidden prompt. `--default` sets it as the install-wide voice runtime. Aliases: `setup-openai`, `setup-grok`, `setup-xai`. New backends drop into `packages/core/src/phone/voice-providers/`. |
 | `agenticmail persona [--edit\|--reset\|--path]` | **Edit the agent's "soul file".** Auto-creates `~/.agenticmail/agents/<name>/persona.md` with a sensible default identity (name, values, communication style, on-phone conventions). Voice runtime, Telegram bridge, and email worker all load from the same file — one edit, consistent identity across every channel. |
 
 ### Service Management (Auto-Start on Boot)

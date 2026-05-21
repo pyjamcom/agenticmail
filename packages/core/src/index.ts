@@ -166,6 +166,11 @@ export {
   buildOpenAIRealtimeUrl,
   buildRealtimeInstructions,
   buildRealtimeSessionConfig,
+  // v0.9.93 — voice-runtime providers (drop-in plugin directory).
+  registerVoiceProvider,
+  listVoiceProviders,
+  getVoiceProvider,
+  resolveVoiceRuntime,
   TWILIO_MEDIA_SAMPLE_RATE,
   buildTwilioClearMessage,
   buildTwilioMarkMessage,
@@ -310,6 +315,8 @@ export type {
   OperatorQueryPollOptions,
   PhoneOperatorQuery,
   OperatorQueryUrgency,
+  VoiceProvider,
+  VoiceRuntimeConnection,
 } from './phone/index.js';
 
 // Telemetry

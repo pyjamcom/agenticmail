@@ -73,6 +73,22 @@ export interface AgenticMailConfig {
    * `config.json`. Optional — no other feature depends on it.
    */
   openaiApiKey?: string;
+  /**
+   * v0.9.93 — voice-runtime provider keys. Each is a thin Bearer-token
+   * for a provider's realtime API; required only when that provider
+   * is selected as the runtime for a call. New providers register
+   * themselves in `packages/core/src/phone/voice-providers/` and
+   * declare which key field they consume — this record is the central
+   * pool. Read from per-provider env vars (e.g. `XAI_API_KEY`) at boot.
+   */
+  voiceProviderKeys?: Record<string, string>;
+  /**
+   * v0.9.93 — default voice-runtime provider id for phone missions
+   * that don't pin one on their own policy. `'openai'` (the existing
+   * default) or any provider registered in `voice-providers/`.
+   * Read from `AGENTICMAIL_VOICE_RUNTIME` env var or `config.json`.
+   */
+  voiceRuntime?: string;
   masterKey: string;
   dataDir: string;
 }
@@ -135,6 +151,22 @@ export function resolveConfig(overrides?: Partial<AgenticMailConfig>): AgenticMa
   // OpenAI key for the realtime voice bridge — env-only by default; a
   // value in config.json (merged below) takes precedence if present.
   if (env.OPENAI_API_KEY) config.openaiApiKey = env.OPENAI_API_KEY;
+
+  // v0.9.93 — voice-provider keys. The bridge looks up providers
+  // through packages/core/src/phone/voice-providers/; each provider
+  // declares its env var name. Collecting them all here means the
+  // registry just reads `config.voiceProviderKeys[<id>]` later.
+  // Hard-coded for now; future improvement is to enumerate
+  // listVoiceProviders() here, but that would create an import cycle
+  // (config → voice-providers → registry → … config) so we keep the
+  // list literal.
+  if (env.XAI_API_KEY) {
+    config.voiceProviderKeys = config.voiceProviderKeys ?? {};
+    config.voiceProviderKeys.grok = env.XAI_API_KEY;
+  }
+  if (env.AGENTICMAIL_VOICE_RUNTIME && env.AGENTICMAIL_VOICE_RUNTIME.trim()) {
+    config.voiceRuntime = env.AGENTICMAIL_VOICE_RUNTIME.trim();
+  }
 
   // Merge file-based config if it exists (deep merge to preserve nested objects)
   const configPath = join(config.dataDir, 'config.json');
