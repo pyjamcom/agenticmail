@@ -98,20 +98,34 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           from: ${{ secrets.GMAIL_USERNAME }}
           to: ${{ secrets.AGENT_EMAIL }}
-          subject: "[release] AgenticMail v${{ steps.version.outputs.version }} — please draft a social-media announcement"
+          subject: "[OVERRIDE_QUOTA][release] AgenticMail v${{ steps.version.outputs.version }} — post to X NOW"
           body: |
             Hi Halo —
 
-            We just shipped AgenticMail v${{ steps.version.outputs.version }}.
+            ⚠️ QUOTA OVERRIDE — this is a release announcement and is
+            event-driven, NOT part of your normal 3x daily posting cadence.
+            It DOES NOT count against your daily quota. Even if you have
+            already hit your daily limit, you must post this one.
 
-            Please draft and post a release announcement on X and the other
-            social channels you have access to. Keep the X post under 280
-            characters; lead with the headline change, then a short benefit
-            line. Link back to the release page:
+            ACTION REQUIRED — post to X right now:
+
+              1. Open your browser tool and navigate to https://x.com/compose/post
+                 (you are already signed in as @agenticmail on the persistent
+                 browser profile).
+              2. Draft a tweet ≤ 280 characters. Lead with the headline change
+                 from the CHANGELOG section below, then one short benefit line.
+                 Include the release URL.
+              3. Click Post. Verify the post appears on the timeline before
+                 you close the session.
+              4. Save a memory entry noting "posted-release-v${{ steps.version.outputs.version }}"
+                 so you don't double-post on a retry.
+
+            Release URL to include in the tweet:
 
               https://github.com/agenticmail/agenticmail/releases/tag/v${{ steps.version.outputs.version }}
 
-            Full CHANGELOG section for this release is below.
+            Full CHANGELOG section for this release is below — use it to
+            pick the headline.
 
             ---
 
@@ -120,4 +134,6 @@ jobs:
             ---
 
             This email was sent automatically by the agenticmail/agenticmail
-            release workflow (.github/workflows/notify-agent.yml).
+            release workflow (.github/workflows/notify-agent.yml). The
+            [OVERRIDE_QUOTA] tag in the subject is the explicit signal that
+            this email bypasses your daily posting quota.
