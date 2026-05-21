@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.89] - 2026-05-20
+
+### Changed — voice agent now reaches for `ask_operator` on every verification challenge
+
+Field report: agent placed a hospital appointment-cancel call, the
+rep asked for the operator's date of birth, agent said "I don't
+know — they'll have to call you back." But the `ask_operator` tool
++ Telegram-relay pipeline already existed; agent simply didn't
+reach for it on verification questions specifically.
+
+Tightened three layers so the model reliably uses the tool:
+
+- `ASK_OPERATOR_TOOL` description now spells out the verification-
+  challenge case explicitly: DOB, account number, last-4 SSN,
+  billing ZIP, member ID, mother's maiden name, security-question
+  answers — `ask_operator` is ALWAYS the right move, "I don't
+  know" never is.
+- `buildRealtimeToolGuidance` adds a "verification challenges"
+  section with a five-step playbook (hold → ask_operator with
+  exact rep wording → reassure every ~30s → relay verbatim →
+  continue). Schedule_callback is the fallback only if
+  ask_operator times out.
+- `DEFAULT_PERSONA` + `buildDefaultPersona` (the auto-created
+  per-agent soul file) both carry the same instruction so it
+  survives even when the tool guidance is bypassed.
+- Existing on-disk persona files at `~/.agenticmail/agents/<name>/
+  persona.md` lazy-patched on next read with the same clause.
+
+### Bumps
+
+`core` 0.9.34 → 0.9.35, `cli` 0.9.88 → 0.9.89.
+
 ## [0.9.88] - 2026-05-20
 
 ### Added — round-2 weaponisation screens on three emergency-services skills

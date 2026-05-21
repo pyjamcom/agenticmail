@@ -144,7 +144,16 @@ export const ASK_OPERATOR_TOOL: RealtimeToolDefinition = {
   description:
     'Ask your human operator a question when you need information, a decision, or approval that '
     + 'you do not already have. Your operator may take a few minutes to reply. Before you call this, '
-    + 'tell the caller you need a moment to check.',
+    + 'tell the caller you need a moment to check.'
+    + ' \n\n'
+    + 'USE THIS — DO NOT SAY "I DON\'T KNOW" — whenever the other party asks you to verify identity '
+    + 'on the operator\'s behalf: date of birth, account number, last-4 of SSN, mother\'s maiden '
+    + 'name, billing-address ZIP, security-question answer, member ID, policy number, etc. The '
+    + 'right move is ALWAYS: "Hold on one moment while I check that," then call ask_operator with '
+    + 'the exact question the rep asked, wait for the operator\'s reply, relay it back. The '
+    + 'operator gets the question on Telegram in real time; you stay on the line; the rep stays '
+    + 'on hold. Telling the rep "I don\'t know, I\'ll have to call back" wastes everyone\'s time '
+    + 'when ask_operator would have closed the loop in 30–60 seconds.',
   parameters: {
     type: 'object',
     properties: {
@@ -461,6 +470,32 @@ export function buildRealtimeToolGuidance(tools: readonly RealtimeToolDefinition
       + 'While you wait, stay on the line and reassure the caller now and then ("still checking on '
       + 'that, thanks for holding"). If your operator does not answer in time, tell the caller you '
       + 'will follow up and call them back — do not make something up.',
+    );
+    // v0.9.89 — explicit teaching for the verification-challenge case.
+    // The agent in the field said "I don't know my operator's DOB, you'll
+    // have to call them back" on a hospital appointment-cancel call —
+    // when ask_operator would have closed the loop in under a minute.
+    // Spell it out so the model reaches for the tool reliably.
+    lines.push(
+      '# Verification challenges — DO NOT say "I don\'t know"',
+      'Hospitals, banks, insurers, utilities, and government lines routinely ask you to verify the',
+      'operator\'s identity before they\'ll act on the call — DOB, last 4 of SSN, account number,',
+      'address ZIP, mother\'s maiden name, member ID, policy number, security-question answer, etc.',
+      'You will not have most of these baked in. The CORRECT response is NEVER "I don\'t know" or',
+      '"my operator will have to call back." It is:',
+      '  1. Tell the caller: "Hold on one moment while I check that with my operator."',
+      '  2. Call ask_operator with the rep\'s exact question (e.g. "The hospital is asking for your',
+      '     date of birth to verify the appointment — what should I tell them?"). Use urgency: "high".',
+      '  3. Stay on the line. Every ~30s reassure the rep: "Still checking — thanks for holding."',
+      '  4. When the operator replies (it arrives within a minute or two via Telegram / email),',
+      '     relay the answer to the rep verbatim: "Their date of birth is March 4th, 1990."',
+      '  5. Continue the call.',
+      'The operator chose to delegate this call to YOU specifically so they would NOT have to do it',
+      'themselves. Bouncing the rep back to "call us another time" defeats the entire point of the',
+      'delegation and embarrasses the operator. Use ask_operator. Always.',
+      '',
+      'If — and only if — ask_operator times out without an answer, THEN you tell the rep you\'ll',
+      'need to follow up and offer schedule_callback for a specific later time.',
     );
   }
   if (names.has('web_search') || names.has('recall_memory')
