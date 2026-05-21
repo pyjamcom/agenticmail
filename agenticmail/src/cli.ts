@@ -1284,6 +1284,152 @@ async function cmdPersona() {
  *
  * Non-interactive: pipe `--key sk-…` or `XAI_API_KEY=…` etc.
  */
+/**
+ * Reusable interactive voice-runtime picker — shared by `setup-voice`
+ * and the tail of `setup-phone`. Walks the user through:
+ *
+ *   1. Pick a provider from the registered list (or accept a passed
+ *      providerId / skip if the operator already has one configured
+ *      and just said "skip").
+ *   2. Read the API key from `--key`, the provider's env var, or a
+ *      hidden prompt.
+ *   3. Persist into `~/.agenticmail/config.json` — legacy `openaiApiKey`
+ *      field for OpenAI, generic `voiceProviderKeys[<id>]` for the
+ *      rest. Optionally set as the install-wide default.
+ *
+ * Returns `{ skipped: true }` when the operator decided to skip the
+ * voice step from an interactive prompt (only used by setup-phone).
+ */
+interface VoiceSetupOpts {
+  providerId?: string;
+  apiKey?: string;
+  setDefault?: boolean;
+  /** When called from setup-phone, the user can skip the whole step. */
+  allowSkip?: boolean;
+}
+
+async function runVoiceSetup(opts: VoiceSetupOpts = {}): Promise<{ skipped: boolean; providerId?: string }> {
+  const { listVoiceProviders } = await import('@agenticmail/core');
+  const providers = listVoiceProviders();
+
+  // Resolve provider id — flag wins, else interactive pick (with
+  // optional "skip" branch when called from setup-phone).
+  let providerId = (opts.providerId || '').trim();
+  if (!providerId) {
+    if (!process.stdin.isTTY) {
+      fail('--provider is required when running non-interactively (no TTY).');
+      info(`See: ${c.green('agenticmail setup-voice --help')}`);
+      process.exit(1);
+    }
+    log('');
+    log(`  ${c.bold('🎀 AgenticMail — connect a voice runtime')}`);
+    log('');
+    log(`  ${c.dim('Pick a backend for the realtime voice bridge — this is the AI that actually')}`);
+    log(`  ${c.dim('talks on the call. The bridge speaks the same WebSocket protocol either way;')}`);
+    log(`  ${c.dim('the choice is about which model you want the caller to hear.')}`);
+    log('');
+    providers.forEach((p, i) => {
+      log(`    ${c.cyan(String(i + 1))}. ${p.id.padEnd(8)} ${c.dim(p.displayName)}`);
+    });
+    if (opts.allowSkip) {
+      log(`    ${c.cyan('s')}. ${c.dim('skip — set this up later with `agenticmail setup-voice`')}`);
+    }
+    log('');
+    const choice = (await ask(`  ${c.magenta('>')} `)).trim().toLowerCase();
+    if (opts.allowSkip && (choice === 's' || choice === 'skip')) {
+      log('');
+      info('Skipped voice-runtime setup. Run `agenticmail setup-voice` when you\'re ready.');
+      log('');
+      return { skipped: true };
+    }
+    const byIndex = providers[parseInt(choice, 10) - 1];
+    const byId = providers.find((p) => p.id === choice);
+    const picked = byIndex || byId;
+    if (!picked) {
+      fail(`Unknown choice "${choice}".`);
+      process.exit(1);
+    }
+    providerId = picked.id;
+    log('');
+  }
+
+  const provider = providers.find((p) => p.id === providerId);
+  if (!provider) {
+    fail(`Unknown provider "${providerId}". Known: ${providers.map((p) => p.id).join(', ')}.`);
+    process.exit(1);
+  }
+
+  // Resolve the key — flag / env / prompt.
+  let key = (opts.apiKey || process.env[provider.apiKeyEnvVar] || '').trim();
+  if (!key) {
+    if (!process.stdin.isTTY) {
+      fail(`No API key provided. Set ${c.green(provider.apiKeyEnvVar)} in your environment or pass ${c.green('--key')}.`);
+      process.exit(1);
+    }
+    log(`  ${c.bold(`Paste your ${provider.displayName} API key`)} ${c.dim('(input is hidden)')}`);
+    if (provider.id === 'grok') {
+      log(`  ${c.dim('Get one at https://console.x.ai/team/default/api-keys')}`);
+    } else if (provider.id === 'openai') {
+      log(`  ${c.dim('Get one at https://platform.openai.com/api-keys')}`);
+    }
+    key = (await askSecret(`  ${c.cyan(provider.apiKeyEnvVar)}: `)).trim();
+    if (!key) {
+      fail('No key entered.');
+      process.exit(1);
+    }
+  }
+
+  // Persist into ~/.agenticmail/config.json.
+  const configPath = join(homedir(), '.agenticmail', 'config.json');
+  if (!existsSync(configPath)) {
+    fail(`No config at ${c.dim(configPath)}. Run ${c.cyan('agenticmail setup')} first.`);
+    process.exit(1);
+  }
+  const config = JSON.parse(readFileSync(configPath, 'utf-8')) as SetupConfig & {
+    voiceProviderKeys?: Record<string, string>;
+    voiceRuntime?: string;
+    openaiApiKey?: string;
+  };
+
+  // OpenAI keeps using its dedicated legacy field for backcompat; every
+  // other provider lands in voiceProviderKeys[<id>].
+  if (provider.apiKeyConfigField === 'openaiApiKey') {
+    config.openaiApiKey = key;
+  } else {
+    config.voiceProviderKeys = config.voiceProviderKeys || {};
+    config.voiceProviderKeys[provider.id] = key;
+  }
+
+  // Whether to mark as install-wide default. Non-interactive use of
+  // setDefault is the explicit `--default` flag; interactive callers
+  // get a follow-up prompt (unless they already passed setDefault).
+  let setDefault = !!opts.setDefault;
+  if (!opts.setDefault && process.stdin.isTTY && !opts.providerId) {
+    // Only ask when we went down the interactive picker — if the
+    // caller already named a provider via flag they presumably know
+    // whether they want it as default.
+    log('');
+    const ans = (await ask(`  ${c.bold(`Use ${provider.displayName} as the default for ALL calls?`)} ${c.dim('(Y/n)')} `)).trim().toLowerCase();
+    setDefault = ans === '' || ans.startsWith('y');
+  }
+  if (setDefault) {
+    config.voiceRuntime = provider.id;
+  }
+  writeFileSync(configPath, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
+
+  log('');
+  ok(`Saved ${c.cyan(provider.displayName)} key to ${c.dim(configPath)}.`);
+  if (setDefault) {
+    info(`${c.cyan(provider.id)} is now the default voice runtime for ALL calls.`);
+  } else {
+    info(`Use it for one call: pass ${c.green(`policy.voiceRuntime = "${provider.id}"`)} on call_phone.`);
+    info(`Make it the default later: ${c.green(`agenticmail setup-voice --provider ${provider.id} --default`)}`);
+  }
+  info('The bridge picks the new key up on the NEXT call — no restart needed.');
+  log('');
+  return { skipped: false, providerId: provider.id };
+}
+
 async function cmdSetupVoice() {
   const args = process.argv.slice(3);
   const flag = (name: string): string | undefined => {
@@ -1322,90 +1468,11 @@ async function cmdSetupVoice() {
     return;
   }
 
-  // Resolve provider id — flag wins, else interactive pick.
-  let providerId = (flag('provider') || '').trim();
-  if (!providerId) {
-    if (!process.stdin.isTTY) {
-      fail('--provider is required when running non-interactively (no TTY).');
-      info(`See: ${c.green('agenticmail setup-voice --help')}`);
-      process.exit(1);
-    }
-    log('');
-    log(`  ${c.bold('🎀 AgenticMail — connect a voice runtime')}`);
-    log('');
-    log(`  ${c.dim('Pick a backend for the realtime voice bridge:')}`);
-    providers.forEach((p, i) => {
-      log(`    ${c.cyan(String(i + 1))}. ${p.id.padEnd(8)} ${c.dim(p.displayName)}`);
-    });
-    log('');
-    const choice = (await ask(`  ${c.magenta('>')} `)).trim().toLowerCase();
-    const byIndex = providers[parseInt(choice, 10) - 1];
-    const byId = providers.find((p) => p.id === choice);
-    const picked = byIndex || byId;
-    if (!picked) {
-      fail(`Unknown choice "${choice}".`);
-      process.exit(1);
-    }
-    providerId = picked.id;
-    log('');
-  }
-
-  const provider = providers.find((p) => p.id === providerId);
-  if (!provider) {
-    fail(`Unknown provider "${providerId}". Known: ${providers.map((p) => p.id).join(', ')}.`);
-    process.exit(1);
-  }
-
-  // Resolve the key — flag / env / prompt.
-  let key = (flag('key') || process.env[provider.apiKeyEnvVar] || '').trim();
-  if (!key) {
-    if (!process.stdin.isTTY) {
-      fail(`No API key provided. Set ${c.green(provider.apiKeyEnvVar)} in your environment or pass ${c.green('--key')}.`);
-      process.exit(1);
-    }
-    log(`  ${c.bold(`Paste your ${provider.displayName} API key`)} ${c.dim('(input is hidden)')}`);
-    key = (await askSecret(`  ${c.cyan(provider.apiKeyEnvVar)}: `)).trim();
-    if (!key) {
-      fail('No key entered.');
-      process.exit(1);
-    }
-  }
-
-  // Persist into ~/.agenticmail/config.json.
-  const configPath = join(homedir(), '.agenticmail', 'config.json');
-  if (!existsSync(configPath)) {
-    fail(`No config at ${c.dim(configPath)}. Run ${c.cyan('agenticmail setup')} first.`);
-    process.exit(1);
-  }
-  const config = JSON.parse(readFileSync(configPath, 'utf-8')) as SetupConfig & {
-    voiceProviderKeys?: Record<string, string>;
-    voiceRuntime?: string;
-    openaiApiKey?: string;
-  };
-
-  // OpenAI keeps using its dedicated legacy field for backcompat; every
-  // other provider lands in voiceProviderKeys[<id>].
-  if (provider.apiKeyConfigField === 'openaiApiKey') {
-    config.openaiApiKey = key;
-  } else {
-    config.voiceProviderKeys = config.voiceProviderKeys || {};
-    config.voiceProviderKeys[provider.id] = key;
-  }
-  if (has('default')) {
-    config.voiceRuntime = provider.id;
-  }
-  writeFileSync(configPath, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
-
-  log('');
-  ok(`Saved ${c.cyan(provider.displayName)} key to ${c.dim(configPath)}.`);
-  if (has('default')) {
-    info(`Set ${c.cyan(provider.id)} as the install-wide voice-runtime default.`);
-  } else {
-    info(`Use it for one call: pass ${c.green(`policy.voiceRuntime = "${provider.id}"`)} to call_phone.`);
-    info(`Use it for ALL calls: re-run with ${c.green('--default')}, or set ${c.green('AGENTICMAIL_VOICE_RUNTIME=' + provider.id)}.`);
-  }
-  info(`The bridge picks the new key up on the NEXT call — no restart needed.`);
-  log('');
+  await runVoiceSetup({
+    providerId: flag('provider'),
+    apiKey: flag('key'),
+    setDefault: has('default'),
+  });
 }
 
 async function cmdSetupAnthropic() {
@@ -1927,26 +1994,72 @@ async function cmdSetupPhone() {
     process.exit(1);
   }
 
-  // No OpenAI key configured — the carrier transport is saved, but
-  // calls cannot actually carry a spoken conversation yet. Surface
-  // this loudly so the operator doesn't discover it the first time
-  // they try `/call`. Single yellow-tinted block (no spinner, no
-  // animation — this is documentation the user re-reads).
-  if (!openaiKeyEffective) {
+  // v0.9.93 — voice runtime step. The carrier transport above only
+  // gets the dial-tone — the agent's spoken voice on the call comes
+  // from a voice-runtime provider (OpenAI Realtime, Grok Voice Agent,
+  // etc). Without one configured, an outbound call connects but the
+  // bridge fails on open and the recipient hears silence.
+  //
+  // We check whether ANY voice runtime is already wired up. If yes,
+  // we just confirm it; if no, we drop into the interactive picker.
+  const { listVoiceProviders } = await import('@agenticmail/core');
+  const allProviders = listVoiceProviders();
+  const configForVoice = JSON.parse(readFileSync(configPath, 'utf-8')) as SetupConfig & {
+    voiceProviderKeys?: Record<string, string>;
+    voiceRuntime?: string;
+    openaiApiKey?: string;
+  };
+  const configuredProviders = allProviders.filter((p) => {
+    if (p.apiKeyConfigField === 'openaiApiKey' && configForVoice.openaiApiKey) return true;
+    if (configForVoice.voiceProviderKeys?.[p.id]) return true;
+    if (process.env[p.apiKeyEnvVar]) return true;
+    return false;
+  });
+
+  log('');
+  log(`  ${c.bold('Step 2 of 2 — connect a voice runtime')}`);
+  log('');
+  log(`  ${c.dim('The carrier above (' + provider + ') gets the dial-tone. The agent\'s actual')}`);
+  log(`  ${c.dim('spoken voice on the call comes from a separate AI: OpenAI Realtime')}`);
+  log(`  ${c.dim('(gpt-realtime), xAI Grok Voice Agent, or any future provider.')}`);
+  log('');
+
+  if (configuredProviders.length > 0) {
+    log(`  ${c.green('✓')} Already configured: ${configuredProviders.map((p) => c.cyan(p.id)).join(', ')}`);
+    if (configForVoice.voiceRuntime) {
+      log(`  ${c.dim('Default for new calls:')} ${c.cyan(configForVoice.voiceRuntime)}`);
+    } else {
+      log(`  ${c.dim('Default for new calls:')} ${c.cyan('openai')} ${c.dim('(implicit)')}`);
+    }
     log('');
-    log(`  ${c.yellow('⚠')} ${c.bold('No OpenAI API key configured')} ${c.dim('— calls will not work yet.')}`);
-    log('');
-    log(`  ${c.dim('The agent\'s spoken voice on a phone call is driven by the OpenAI')}`);
-    log(`  ${c.dim('Realtime API. Without a key, an outbound call connects but the')}`);
-    log(`  ${c.dim('voice bridge fails on open and the recipient hears silence.')}`);
-    log('');
-    log(`  ${c.bold('Add a key any time:')}`);
-    log(`    ${c.green('agenticmail setup-phone --provider ' + provider)}    ${c.dim('(re-run this; we\'ll just prompt for the key)')}`);
-    log(`  ${c.dim('Or pipe via env:')}`);
-    log(`    ${c.green('OPENAI_API_KEY=… agenticmail setup-phone --provider ' + provider)}`);
-    log('');
-    log(`  ${c.dim('Get a key at https://platform.openai.com/api-keys.')}`);
-    log('');
+    if (process.stdin.isTTY) {
+      const ans = (await ask(`  ${c.bold('Add or swap a voice provider now?')} ${c.dim('(y/N)')} `)).trim().toLowerCase();
+      if (ans.startsWith('y')) {
+        await runVoiceSetup({ allowSkip: true });
+      } else {
+        info(`Keeping current voice setup. Run ${c.green('agenticmail setup-voice')} any time to change it.`);
+        log('');
+      }
+    } else {
+      info('Run `agenticmail setup-voice` if you want to add another provider or change the default.');
+      log('');
+    }
+  } else {
+    // Nothing configured — interactive picker (with skip), or non-TTY
+    // warn block.
+    if (process.stdin.isTTY) {
+      await runVoiceSetup({ allowSkip: true });
+    } else {
+      log(`  ${c.yellow('⚠')} ${c.bold('No voice runtime configured')} ${c.dim('— calls will not work yet.')}`);
+      log('');
+      log(`  ${c.bold('Set one up:')}`);
+      log(`    ${c.green('OPENAI_API_KEY=sk-… agenticmail setup-voice --provider openai --default')}`);
+      log(`    ${c.green('XAI_API_KEY=xai-… agenticmail setup-voice --provider grok --default')}`);
+      log('');
+      log(`  ${c.dim('Get OpenAI keys: https://platform.openai.com/api-keys')}`);
+      log(`  ${c.dim('Get xAI keys:    https://console.x.ai/team/default/api-keys')}`);
+      log('');
+    }
   }
 
   // Drop into the interactive shell. Every setup-* command lands here

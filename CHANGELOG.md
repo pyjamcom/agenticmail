@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.94] - 2026-05-21
+
+### Changed — `setup-phone` walks operators through voice-runtime as Step 2
+
+Field reports: operators ran `setup-phone`, the carrier wired up,
+the next call connected but the recipient heard silence — because
+no voice runtime (OpenAI / Grok) was configured. The old wizard
+only printed a yellow warning. Now the wizard treats voice-runtime
+as **Step 2 of 2** and walks the operator through it interactively:
+
+- If at least one voice provider is already configured, surfaces it
+  and offers to add/swap. ("Default: openai · Add or swap? (y/N)")
+- If none is configured (first time), drops straight into the
+  picker — pick from the registered providers, paste the key
+  (hidden), choose whether to make it the install-wide default.
+- Non-TTY (scripted installs) still get the warning block + the
+  one-liner copy-pastes.
+
+Shared `runVoiceSetup()` helper underneath; `setup-voice` and the
+tail of `setup-phone` both call it. Same `--provider` / `--key` /
+`--default` shape across both surfaces.
+
+### Bumps
+
+`cli` 0.9.93 → 0.9.94.
+
 ## [0.9.93] - 2026-05-20
 
 ### Added — multi-provider voice runtime (drop-in plugin directory) + Grok Voice Agent
