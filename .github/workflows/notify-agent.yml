@@ -120,6 +120,14 @@ jobs:
               4. Save a memory entry noting "posted-release-v${{ steps.version.outputs.version }}"
                  so you don't double-post on a retry.
 
+            ⚠️ DO NOT send an email reply to this message. This inbox is
+            polled by multiple agents — replying creates a feedback loop
+            where every reply spawns a new agent session. The memory
+            entry from step 4 IS your acknowledgement; that's all that
+            is needed. If a memory entry with the same release version
+            already exists when you check, exit silently — the work has
+            already been done.
+
             Release URL to include in the tweet:
 
               https://github.com/agenticmail/agenticmail/releases/tag/v${{ steps.version.outputs.version }}
