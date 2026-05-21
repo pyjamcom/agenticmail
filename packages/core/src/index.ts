@@ -486,4 +486,8 @@ export {
   loadAgentPersona,
   personaPathFor,
   saveAgentPersona,
+  // v0.9.95 — frontmatter-aware persona reader + writer.
+  readAgentPersonaFile,
+  updateAgentPersonaFrontmatter,
 } from './persona/index.js';
+export type { AgentPersonaFrontmatter } from './persona/index.js';

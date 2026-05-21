@@ -80,6 +80,7 @@ import {
   resolveCallbackPolicy,
   PHONE_SERVER_MAX_CALL_DURATION_SECONDS,
   loadAgentPersona,
+  readAgentPersonaFile,
   type AgenticMailConfig,
   type RealtimeBridgePort,
   type RealtimeToolDefinition,
@@ -434,10 +435,33 @@ async function startBridge(params: StartBridgeParams): Promise<RealtimeVoiceBrid
   //   3. 'openai'                    — fall-through default
   // Plus an optional .voiceModel field on policy lets the caller pin
   // a specific model (e.g. 'gpt-realtime-mini', 'grok-voice-fast').
-  const missionPolicyVoice = (mission.policy as any)?.voiceRuntime as string | undefined;
+  const missionPolicyRuntime = (mission.policy as any)?.voiceRuntime as string | undefined;
   const missionPolicyModel = (mission.policy as any)?.voiceModel as string | undefined;
-  const providerId = missionPolicyVoice || config.voiceRuntime || 'openai';
-  const runtime = resolveVoiceRuntime(providerId, config, { model: missionPolicyModel });
+  const missionPolicyVoice = (mission.policy as any)?.voice as string | undefined;
+
+  // v0.9.95 — voice resolution. Priority for the character voice:
+  //   1. mission.policy.voice
+  //   2. agent persona frontmatter `voice:` (per-agent default)
+  //   3. config.voiceProviderVoices[<providerId>] (install default)
+  //   4. provider's own defaultVoice (e.g. OpenAI "marin", Grok "ara")
+  // Same shape as the runtime resolution above.
+  let personaVoice: string | undefined;
+  let personaVoiceRuntime: string | undefined;
+  try {
+    const row0 = db.prepare('SELECT name FROM agents WHERE id = ?').get(mission.agentId) as { name?: string } | undefined;
+    const name0 = (row0?.name || '').trim();
+    if (name0) {
+      const { frontmatter } = readAgentPersonaFile(name0);
+      personaVoice = frontmatter.voice;
+      personaVoiceRuntime = frontmatter.voiceRuntime;
+    }
+  } catch { /* persona is best-effort; bridge still works without it */ }
+
+  const providerId = missionPolicyRuntime || personaVoiceRuntime || config.voiceRuntime || 'openai';
+  const runtime = resolveVoiceRuntime(providerId, config, {
+    model: missionPolicyModel,
+    voice: missionPolicyVoice || personaVoice,
+  });
   const model = runtime.model;
 
   // Render the agent's persistent memory and fold it + the mission task
@@ -501,7 +525,7 @@ async function startBridge(params: StartBridgeParams): Promise<RealtimeVoiceBrid
   const openaiWs = new WebSocket(runtime.url, {
     headers: { Authorization: `Bearer ${runtime.apiKey}` },
   });
-  console.log(`[realtime-voice] mission=${mission.id} voice-runtime=${runtime.providerId} model=${runtime.model} key=${runtime.apiKeySource}`);
+  console.log(`[realtime-voice] mission=${mission.id} voice-runtime=${runtime.providerId} model=${runtime.model} voice=${runtime.voice} (${runtime.voiceSource}) key=${runtime.apiKeySource}`);
 
   const bridge = new RealtimeVoiceBridge({
     carrier: portFor(carrierWs),
@@ -515,6 +539,11 @@ async function startBridge(params: StartBridgeParams): Promise<RealtimeVoiceBrid
       // strings fall through to the bridge's defaults (the legacy path).
       agentName: agentName || undefined,
       persona: agentPersona || undefined,
+      // v0.9.95 — voice character. Resolver picked it per priority
+      // (mission policy > persona frontmatter > install default >
+      // provider default) and it's already validated against the
+      // provider's catalogue.
+      voice: runtime.voice,
       model,
       tools,
       // v0.9.81 — fold the time-budget preamble into the instructions so

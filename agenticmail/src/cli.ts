@@ -1162,16 +1162,20 @@ async function cmdPersona() {
     log(`  ${c.pinkBg(' 🎀 agenticmail persona ')}`);
     log('');
     log(`  ${c.bold('Usage:')} agenticmail persona [--agent <name>] [--edit|--path|--reset]`);
+    log(`         agenticmail persona --voice <name> [--agent <name>]   ${c.dim('# set voice character')}`);
+    log(`         agenticmail persona --voice-runtime <id> [--agent <name>]`);
     log('');
     log(`  View or edit an agent's persona file (~/.agenticmail/agents/<name>/persona.md).`);
     log(`  The persona is loaded by the voice runtime, the Telegram bridge, and the email`);
     log(`  worker so the agent has the same identity across every channel.`);
     log('');
     log(`  ${c.bold('Flags:')}`);
-    log(`    --agent <name>   ${c.dim('Which agent (default: the host agent)')}`);
-    log(`    --edit           ${c.dim('Open in $EDITOR (then exit)')}`);
-    log(`    --path           ${c.dim('Print the file path only (for scripting)')}`);
-    log(`    --reset          ${c.dim('Overwrite with the default persona (loses local edits)')}`);
+    log(`    --agent <name>             ${c.dim('Which agent (default: the host agent)')}`);
+    log(`    --edit                     ${c.dim('Open in $EDITOR (then exit)')}`);
+    log(`    --path                     ${c.dim('Print the file path only (for scripting)')}`);
+    log(`    --reset                    ${c.dim('Overwrite with the default persona (loses local edits)')}`);
+    log(`    --voice <name>             ${c.dim('Set the voice character for this agent (e.g. cedar, ara)')}`);
+    log(`    --voice-runtime <id>       ${c.dim('Set the voice runtime for this agent (e.g. openai, grok)')}`);
     log('');
     return;
   }
@@ -1229,6 +1233,53 @@ async function cmdPersona() {
     return;
   }
 
+  // v0.9.95 — voice + voice-runtime frontmatter shortcuts. Lets the
+  // operator pin per-agent voice character ("cedar", "ara", custom
+  // voice id) and/or runtime ("openai", "grok") without hand-editing
+  // YAML. Both fields go into the persona file frontmatter; the
+  // realtime bridge reads them on every call.
+  const voiceFlag = flag('voice');
+  const voiceRuntimeFlag = flag('voice-runtime');
+  if (voiceFlag !== undefined || voiceRuntimeFlag !== undefined) {
+    const { listVoiceProviders, updateAgentPersonaFrontmatter, readAgentPersonaFile } = await import('@agenticmail/core');
+    const providers = listVoiceProviders();
+    const existing = readAgentPersonaFile(agentName).frontmatter;
+    // Validate runtime first — controls which catalogue voice gets
+    // checked against. Empty string = unset / clear.
+    const resolvedRuntime = voiceRuntimeFlag !== undefined ? voiceRuntimeFlag.trim() : (existing.voiceRuntime ?? '');
+    if (resolvedRuntime && !providers.find((p) => p.id === resolvedRuntime)) {
+      fail(`Unknown voice runtime "${resolvedRuntime}". Known: ${providers.map((p) => p.id).join(', ')}.`);
+      process.exit(1);
+    }
+    // Validate voice against the chosen runtime's catalogue. Unknown
+    // names are allowed when the provider supports custom voices
+    // (Grok via Custom Voices API).
+    const resolvedVoice = voiceFlag !== undefined ? voiceFlag.trim() : existing.voice;
+    if (resolvedVoice && resolvedRuntime) {
+      const provider = providers.find((p) => p.id === resolvedRuntime)!;
+      if (!provider.voices.includes(resolvedVoice) && !provider.customVoicesSupported) {
+        fail(`Voice "${resolvedVoice}" is not in ${provider.id}'s catalogue (${provider.voices.join(', ')}).`);
+        info(`To set a custom voice id, switch to a provider that supports it (e.g. grok).`);
+        process.exit(1);
+      }
+    }
+    const filePath = updateAgentPersonaFrontmatter(agentName, {
+      voice: voiceFlag !== undefined ? (voiceFlag.trim() || undefined) : existing.voice,
+      voiceRuntime: voiceRuntimeFlag !== undefined ? (voiceRuntimeFlag.trim() || undefined) : existing.voiceRuntime,
+    });
+    ok(`Updated ${c.cyan(agentName)}'s persona frontmatter.`);
+    if (voiceFlag !== undefined) {
+      info(`  voice: ${c.cyan(voiceFlag.trim() || '(cleared)')}`);
+    }
+    if (voiceRuntimeFlag !== undefined) {
+      info(`  voiceRuntime: ${c.cyan(voiceRuntimeFlag.trim() || '(cleared)')}`);
+    }
+    log(`  ${c.dim(filePath)}`);
+    info(`The bridge picks the new voice up on the NEXT call — no restart needed.`);
+    log('');
+    return;
+  }
+
   // Ensure the file exists (auto-creates on first load) before
   // printing or editing — saves the operator a 'file not found'
   // surprise on a fresh install.
@@ -1261,7 +1312,19 @@ async function cmdPersona() {
   log('');
   log(current);
   log('');
+  // v0.9.95 — show resolved voice + runtime if set in frontmatter.
+  try {
+    const { readAgentPersonaFile } = await import('@agenticmail/core');
+    const { frontmatter } = readAgentPersonaFile(agentName);
+    if (frontmatter.voice || frontmatter.voiceRuntime) {
+      info(`Voice frontmatter: ${[
+        frontmatter.voiceRuntime ? `runtime=${c.cyan(frontmatter.voiceRuntime)}` : '',
+        frontmatter.voice ? `voice=${c.cyan(frontmatter.voice)}` : '',
+      ].filter(Boolean).join(' · ')}`);
+    }
+  } catch { /* best-effort */ }
   info(`Edit with: ${c.green('agenticmail persona --edit' + (flag('agent') ? ` --agent ${agentName}` : ''))}`);
+  info(`Set voice: ${c.green('agenticmail persona --voice <name>' + (flag('agent') ? ` --agent ${agentName}` : ''))}`);
   log('');
 }
 
@@ -1387,6 +1450,7 @@ async function runVoiceSetup(opts: VoiceSetupOpts = {}): Promise<{ skipped: bool
   }
   const config = JSON.parse(readFileSync(configPath, 'utf-8')) as SetupConfig & {
     voiceProviderKeys?: Record<string, string>;
+    voiceProviderVoices?: Record<string, string>;
     voiceRuntime?: string;
     openaiApiKey?: string;
   };
@@ -1415,6 +1479,51 @@ async function runVoiceSetup(opts: VoiceSetupOpts = {}): Promise<{ skipped: bool
   if (setDefault) {
     config.voiceRuntime = provider.id;
   }
+
+  // v0.9.95 — voice character picker. After the key is in, offer the
+  // catalogue so the operator can pick which voice the caller hears.
+  // Non-interactive callers skip (defaults to the provider's
+  // defaultVoice on every call). Interactive callers see the list +
+  // a custom-voice-id option when the provider supports it.
+  if (process.stdin.isTTY) {
+    log('');
+    log(`  ${c.bold(`Pick a default voice character for ${provider.displayName}:`)}`);
+    log(`  ${c.dim('(this is what the caller actually hears; the model is set above)')}`);
+    log('');
+    provider.voices.forEach((v, i) => {
+      const marker = v === provider.defaultVoice ? c.dim('  ← default') : '';
+      log(`    ${c.cyan(String(i + 1))}. ${v}${marker}`);
+    });
+    if (provider.customVoicesSupported) {
+      log(`    ${c.cyan('c')}. ${c.dim('paste a custom voice id (Custom Voices API / xAI console)')}`);
+    }
+    log(`    ${c.cyan('s')}. ${c.dim('skip — use ' + provider.defaultVoice + ' (provider default)')}`);
+    log('');
+    const choice = (await ask(`  ${c.magenta('>')} `)).trim().toLowerCase();
+    let pickedVoice = '';
+    if (choice === 's' || choice === 'skip' || choice === '') {
+      // skip
+    } else if (choice === 'c' || choice === 'custom') {
+      if (provider.customVoicesSupported) {
+        pickedVoice = (await ask(`  ${c.cyan('Custom voice id')}: `)).trim();
+      } else {
+        info('Custom voice ids not supported by this provider — using default.');
+      }
+    } else {
+      const byIndex = provider.voices[parseInt(choice, 10) - 1];
+      const byName = provider.voices.find((v) => v === choice);
+      pickedVoice = byIndex || byName || '';
+      if (!pickedVoice) {
+        info(`Unknown choice "${choice}" — using ${provider.defaultVoice} for now.`);
+      }
+    }
+    if (pickedVoice) {
+      config.voiceProviderVoices = config.voiceProviderVoices || {};
+      config.voiceProviderVoices[provider.id] = pickedVoice;
+      log(`  ${c.green('✓')} Default voice for ${c.cyan(provider.id)}: ${c.cyan(pickedVoice)}`);
+    }
+  }
+
   writeFileSync(configPath, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
 
   log('');
@@ -1425,6 +1534,7 @@ async function runVoiceSetup(opts: VoiceSetupOpts = {}): Promise<{ skipped: bool
     info(`Use it for one call: pass ${c.green(`policy.voiceRuntime = "${provider.id}"`)} on call_phone.`);
     info(`Make it the default later: ${c.green(`agenticmail setup-voice --provider ${provider.id} --default`)}`);
   }
+  info(`Per-agent voice override: ${c.green('agenticmail persona --voice <name>')}`);
   info('The bridge picks the new key up on the NEXT call — no restart needed.');
   log('');
   return { skipped: false, providerId: provider.id };
@@ -2006,6 +2116,7 @@ async function cmdSetupPhone() {
   const allProviders = listVoiceProviders();
   const configForVoice = JSON.parse(readFileSync(configPath, 'utf-8')) as SetupConfig & {
     voiceProviderKeys?: Record<string, string>;
+    voiceProviderVoices?: Record<string, string>;
     voiceRuntime?: string;
     openaiApiKey?: string;
   };

@@ -1363,6 +1363,22 @@ export const toolDefinitions = [
               },
               required: ['maxTimeShiftMinutes'],
             },
+            // v0.9.95 — voice-runtime + voice character per-call
+            // overrides. All optional; if omitted, the agent's
+            // persona frontmatter wins; otherwise the install
+            // default; otherwise the provider default.
+            voiceRuntime: {
+              type: 'string',
+              description: 'Optional voice-runtime provider id (e.g. "openai", "grok"). Beats agent persona + install default.',
+            },
+            voiceModel: {
+              type: 'string',
+              description: 'Optional model override (e.g. "gpt-realtime-mini", "grok-voice-fast").',
+            },
+            voice: {
+              type: 'string',
+              description: 'Optional voice character (e.g. "cedar", "ara", or a custom voice id). Validated against the runtime\'s catalogue; unknown names fall through to the provider default with a log warning.',
+            },
           },
           required: [
             'policyVersion', 'regionAllowlist', 'maxCallDurationSeconds', 'maxCostPerMission', 'maxAttempts',

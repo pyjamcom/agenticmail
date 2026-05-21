@@ -24,4 +24,10 @@ registerVoiceProvider({
   description:
     'OpenAI Realtime (gpt-realtime). Default voice runtime; supports linear PCM @ 24 kHz '
     + '(46elks) and G.711 µ-law @ 8 kHz (Twilio) without transcoding.',
+  // v0.9.95 — voice catalogue. Names match what the Realtime session
+  // accepts under `audio.output.voice`. `marin` and `cedar` are the
+  // GA gpt-realtime additions; the rest are the legacy roster carried
+  // forward from gpt-4o-realtime-preview.
+  voices: ['alloy', 'ash', 'ballad', 'cedar', 'coral', 'echo', 'marin', 'sage', 'shimmer', 'verse'],
+  defaultVoice: 'marin',
 });

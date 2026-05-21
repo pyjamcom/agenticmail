@@ -49,7 +49,7 @@ export function getVoiceProvider(id: string): VoiceProvider | undefined {
 export function resolveVoiceRuntime(
   providerId: string | undefined,
   config: AgenticMailConfig,
-  options: { model?: string } = {},
+  options: { model?: string; voice?: string } = {},
 ): VoiceRuntimeConnection {
   const id = (providerId || 'openai').trim() || 'openai';
   const provider = PROVIDERS.get(id);
@@ -98,6 +98,41 @@ export function resolveVoiceRuntime(
   const model = (options.model && options.model.trim()) || provider.defaultModel;
   const url = `${provider.websocketBaseUrl}?model=${encodeURIComponent(model)}`;
 
+  // v0.9.95 — voice resolution. Priority: option > install default
+  // > provider default. Unknown voice names against a provider with
+  // a fixed catalogue + no customVoicesSupported get logged-and-
+  // ignored (resolver returns the provider's default), so a stale
+  // mission policy can't wedge a call.
+  let voice = '';
+  let voiceSource = '';
+  const requested = (options.voice || '').trim();
+  if (requested) {
+    if (provider.voices.includes(requested) || provider.customVoicesSupported) {
+      voice = requested;
+      voiceSource = 'mission policy';
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[voice-providers] Voice "${requested}" is not in ${provider.id}'s catalogue `
+        + `(${provider.voices.join(', ')}). Falling through to ${provider.defaultVoice}.`,
+      );
+    }
+  }
+  if (!voice) {
+    const installDefault = config.voiceProviderVoices?.[provider.id];
+    if (installDefault && installDefault.trim()) {
+      const v = installDefault.trim();
+      if (provider.voices.includes(v) || provider.customVoicesSupported) {
+        voice = v;
+        voiceSource = `config.voiceProviderVoices.${provider.id}`;
+      }
+    }
+  }
+  if (!voice) {
+    voice = provider.defaultVoice;
+    voiceSource = `${provider.id} default`;
+  }
+
   return {
     providerId: provider.id,
     providerDisplayName: provider.displayName,
@@ -105,5 +140,7 @@ export function resolveVoiceRuntime(
     model,
     apiKey,
     apiKeySource,
+    voice,
+    voiceSource,
   };
 }

@@ -30,4 +30,15 @@ registerVoiceProvider({
   description:
     'xAI Grok Voice Agent — OpenAI-Realtime-compatible WebSocket protocol; '
     + 'select via mission policy.voiceRuntime="grok" or env AGENTICMAIL_VOICE_RUNTIME=grok.',
+  // v0.9.95 — voice catalogue. xAI ships 5 expressive built-in
+  // voices for the realtime Voice Agent. Three are explicitly named
+  // in the announcement (Ara, Eve, Leo); the other two are
+  // browsable in console.x.ai's Voice Library along with the
+  // broader 80+ voice catalogue. The full live list is at
+  // GET /v1/tts/voices. We don't try to enumerate all 80+ here —
+  // customVoicesSupported lets operators paste any voice_id from
+  // their console.
+  voices: ['ara', 'eve', 'leo'],
+  defaultVoice: 'ara',
+  customVoicesSupported: true,
 });

@@ -265,6 +265,8 @@ Without `--key` and without the env var, the command opens a hidden-input prompt
 
 **Adding a new backend** (Anthropic realtime, Cartesia, ElevenLabs ConvAI, ...): drop a file into `packages/core/src/phone/voice-providers/<id>.ts` exporting a `registerVoiceProvider({...})` call, add one import line to the barrel index, rebuild. No other file in the codebase needs to change — the realtime bridge looks providers up by id through the registry.
 
+**Picking the voice character.** Each provider declares its catalogue (`voices: ['ara', 'eve', 'leo']` for Grok; `voices: ['alloy', ..., 'cedar', ..., 'marin', ...]` for OpenAI). `setup-voice` shows a picker after the key step. Operator can also pin a voice per-agent with `agenticmail persona --voice <name> --agent <agent>` — the choice lives in the persona file's YAML frontmatter (`voice: cedar` / `voiceRuntime: openai`) and the bridge reads it on every call. Per-call overrides ride on `mission.policy.voice` / `policy.voiceRuntime` / `policy.voiceModel` — useful for A/B'ing voices or routing different customer-types to different runtimes. Resolution order: **mission policy > agent persona > install default > provider default.**
+
 ### `setup-phone` — Twilio / 46elks outbound voice (optional)
 
 If the operator wants the agent to place phone calls, run this — same shape as `setup-email`, with secrets piped via env vars instead of typed on the command line:

@@ -83,6 +83,15 @@ export interface AgenticMailConfig {
    */
   voiceProviderKeys?: Record<string, string>;
   /**
+   * v0.9.95 — install-wide default voice CHARACTER per provider
+   * (e.g. `{ openai: 'cedar', grok: 'ara' }`). Optional — when a
+   * provider's slot is empty, the bridge falls back to the
+   * provider's own `defaultVoice`. Per-agent persona + per-call
+   * mission policy still beat this. The CLI's `agenticmail
+   * setup-voice` voice picker writes here.
+   */
+  voiceProviderVoices?: Record<string, string>;
+  /**
    * v0.9.93 — default voice-runtime provider id for phone missions
    * that don't pin one on their own policy. `'openai'` (the existing
    * default) or any provider registered in `voice-providers/`.

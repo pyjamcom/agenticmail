@@ -73,6 +73,31 @@ export interface VoiceProvider {
    * Optional — defaults are fine for the standard providers.
    */
   description?: string;
+
+  /**
+   * v0.9.95 — built-in voice catalogue. The names the operator can
+   * pick when configuring a default voice for the agent or pinning
+   * one per-call. Empty array means "use whatever defaultVoice we
+   * ship" — used by providers like Grok that support arbitrary
+   * voice ids (cloned voices) instead of a fixed list.
+   */
+  voices: string[];
+
+  /**
+   * v0.9.95 — default voice the bridge picks when neither the
+   * mission policy nor the agent persona pins one. Per-provider:
+   * OpenAI defaults to "marin"; Grok lets the provider pick.
+   */
+  defaultVoice: string;
+
+  /**
+   * v0.9.95 — true when the provider accepts arbitrary voice ids
+   * beyond `voices` (e.g. Grok's Custom Voices API returns a
+   * `voice_id` that plugs in here). Tells the CLI picker to show a
+   * free-text input + a "paste a custom voice id" option after the
+   * built-in list.
+   */
+  customVoicesSupported?: boolean;
 }
 
 /**
@@ -91,4 +116,15 @@ export interface VoiceRuntimeConnection {
   apiKey: string;
   /** Human-readable source of the key, for boot logs only (e.g. `"env XAI_API_KEY"`). */
   apiKeySource: string;
+  /**
+   * v0.9.95 — resolved voice name (sent in session.update under
+   * `audio.output.voice`). Picked from (in order):
+   *   1. caller-passed `options.voice` (mission policy)
+   *   2. agent persona's `voice:` frontmatter
+   *   3. install default in `config.voiceProviderVoices[<providerId>]`
+   *   4. provider's `defaultVoice` (e.g. OpenAI "marin", Grok "ara")
+   */
+  voice: string;
+  /** Human-readable source of the voice pick, for boot logs / audit. */
+  voiceSource: string;
 }

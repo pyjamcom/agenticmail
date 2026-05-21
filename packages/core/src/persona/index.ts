@@ -123,18 +123,37 @@ export function personaPathFor(agentName: string): string {
 }
 
 /**
- * Load the persona for {@link agentName}. Auto-creates the file with
- * {@link buildDefaultPersona} content on first read. Idempotent: a
- * second call returns whatever's on disk. Never throws — a permission
- * error or filesystem quirk falls back to the in-memory default so the
- * voice / email / telegram path is never crashed by a missing file.
+ * Load the persona BODY for {@link agentName}. Auto-creates the file
+ * with {@link buildDefaultPersona} content on first read. Idempotent.
+ * Never throws — a permission error or filesystem quirk falls back
+ * to the in-memory default so the voice / email / telegram path is
+ * never crashed by a missing file.
+ *
+ * v0.9.95 — if the file has YAML frontmatter (voice / voiceRuntime
+ * keys, written by `agenticmail persona --voice <name>`), the
+ * frontmatter is stripped from the returned string. Use
+ * {@link readAgentPersonaFile} to get the parsed frontmatter too.
  */
 export function loadAgentPersona(agentName: string): string {
   const path = personaPathFor(agentName);
   try {
     if (existsSync(path)) {
-      const content = readFileSync(path, 'utf-8').trim();
-      if (content) return content;
+      const raw = readFileSync(path, 'utf-8');
+      if (raw.trim()) {
+        // v0.9.95 — strip frontmatter if present so callers that only
+        // want the prose body don't have to special-case YAML they
+        // didn't expect.
+        const text = raw.replace(/\r\n/g, '\n');
+        if (text.startsWith('---\n')) {
+          const close = text.indexOf('\n---', 4);
+          if (close > 0) {
+            let cursor = close + 4;
+            while (cursor < text.length && (text[cursor] === '\n' || text[cursor] === '\r')) cursor++;
+            return text.slice(cursor).trim();
+          }
+        }
+        return text.trim();
+      }
     }
   } catch { /* fall through */ }
 
@@ -159,5 +178,95 @@ export function saveAgentPersona(agentName: string, content: string): string {
   const dir = path.substring(0, path.lastIndexOf('/'));
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(path, content.trim() + '\n', { mode: 0o644 });
+  return path;
+}
+
+/**
+ * v0.9.95 — structured per-agent voice preferences. Stored as YAML
+ * frontmatter at the top of the persona file:
+ *
+ *   ---
+ *   voice: cedar
+ *   voiceRuntime: openai
+ *   ---
+ *   # Who you are
+ *   ...
+ *
+ * Both fields optional. Unknown keys are ignored on read. The CLI's
+ * `agenticmail persona --voice <name>` writes here. The realtime
+ * bridge consults this between the mission policy and the install
+ * default so an agent can have a consistent voice across every call
+ * without the caller pinning it on every invocation.
+ */
+export interface AgentPersonaFrontmatter {
+  voice?: string;
+  voiceRuntime?: string;
+}
+
+/**
+ * Read frontmatter + body from the persona file. Best-effort; missing
+ * file returns empty frontmatter + an auto-seeded body. Robust to:
+ *   - No frontmatter at all (legacy files written before 0.9.95).
+ *   - Frontmatter with leading whitespace / CRLF.
+ *   - Junk lines in the YAML block — we only pick the keys we know.
+ */
+export function readAgentPersonaFile(agentName: string): { frontmatter: AgentPersonaFrontmatter; body: string } {
+  const path = personaPathFor(agentName);
+  let raw = '';
+  try {
+    if (existsSync(path)) raw = readFileSync(path, 'utf-8');
+  } catch { /* fall through to seeded body */ }
+  if (!raw.trim()) {
+    return { frontmatter: {}, body: loadAgentPersona(agentName) };
+  }
+  const text = raw.replace(/\r\n/g, '\n');
+  if (!text.startsWith('---\n')) {
+    return { frontmatter: {}, body: text.trim() };
+  }
+  const close = text.indexOf('\n---', 4);
+  if (close < 0) {
+    return { frontmatter: {}, body: text.trim() };
+  }
+  const yamlBlock = text.slice(4, close);
+  const bodyStart = close + 4;
+  // Skip trailing newline(s) after the closing ---.
+  let cursor = bodyStart;
+  while (cursor < text.length && (text[cursor] === '\n' || text[cursor] === '\r')) cursor++;
+  const body = text.slice(cursor).trim();
+  const frontmatter: AgentPersonaFrontmatter = {};
+  for (const line of yamlBlock.split('\n')) {
+    const m = /^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$/.exec(line);
+    if (!m) continue;
+    const key = m[1];
+    const value = m[2].replace(/^["']|["']$/g, '');
+    if (key === 'voice') frontmatter.voice = value;
+    else if (key === 'voiceRuntime') frontmatter.voiceRuntime = value;
+  }
+  return { frontmatter, body };
+}
+
+/**
+ * Update one or more frontmatter keys on an agent's persona file.
+ * Preserves the existing body. Auto-seeds the body if the file
+ * didn't exist yet.
+ */
+export function updateAgentPersonaFrontmatter(agentName: string, patch: AgentPersonaFrontmatter): string {
+  const { frontmatter, body } = readAgentPersonaFile(agentName);
+  const merged: AgentPersonaFrontmatter = { ...frontmatter };
+  if (patch.voice !== undefined) merged.voice = patch.voice;
+  if (patch.voiceRuntime !== undefined) merged.voiceRuntime = patch.voiceRuntime;
+
+  // Drop empty values so we don't write `voice: ` lines.
+  const lines: string[] = [];
+  if (merged.voice && merged.voice.trim()) lines.push(`voice: ${merged.voice.trim()}`);
+  if (merged.voiceRuntime && merged.voiceRuntime.trim()) lines.push(`voiceRuntime: ${merged.voiceRuntime.trim()}`);
+
+  const path = personaPathFor(agentName);
+  const dir = path.substring(0, path.lastIndexOf('/'));
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const content = lines.length > 0
+    ? `---\n${lines.join('\n')}\n---\n\n${body}\n`
+    : `${body}\n`;
+  writeFileSync(path, content, { mode: 0o644 });
   return path;
 }

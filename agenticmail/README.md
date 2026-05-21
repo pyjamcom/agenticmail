@@ -23,6 +23,23 @@ It bundles a setup wizard, API server launcher, and a full interactive shell wit
 >
 > Zero prompts, ~2 minutes, fully autonomous. Then tell the user to restart Claude Code. Full agent-facing runbook — including verification, common failures, and "what if Node < 22" — is at [`AGENTS.md`](https://github.com/agenticmail/agenticmail/blob/main/AGENTS.md) in the repo (the [agents.md](https://agents.md) convention).
 
+## ✨ What's new in 0.9.95
+
+- **🎙 Voice-character switching.** Each provider declares its built-in voice catalogue; pick per-call, per-agent, or install-wide. OpenAI: `alloy / ash / ballad / cedar / coral / echo / marin / sage / shimmer / verse`. Grok: `ara / eve / leo` + custom voice ids from xAI's Custom Voices API.
+
+```bash
+# Per-agent default — persona frontmatter, applies to every call by that agent
+agenticmail persona --voice cedar --agent vesper
+
+# Install-wide — interactive picker after the key step in setup-voice
+agenticmail setup-voice --provider grok --default
+
+# Per-call — mission policy on mcp__agenticmail__call_phone
+call_phone({ to, task, policy: { ..., voice: "ara" } })
+```
+
+Resolution priority: mission policy > agent persona frontmatter > install default > provider default. Unknown voice names against a fixed-catalogue provider log a warning and fall through.
+
 ## ✨ What's new in 0.9.93
 
 - **🗣 Multi-provider voice runtime.** The realtime voice bridge is no longer hardcoded to OpenAI. Drop-in plugin directory at `packages/core/src/phone/voice-providers/` registers each backend (`openai`, `grok`, future Anthropic/Cartesia/etc.) by id. Pick per call via `mission.policy.voiceRuntime` or install-wide via `AGENTICMAIL_VOICE_RUNTIME=grok`. xAI's [Grok Voice Agent API](https://docs.x.ai/docs/guides/voice/agent) is OpenAI-Realtime-compatible by design so the bridge speaks both protocols without a rewrite.
@@ -207,6 +224,7 @@ Same setup, no prompts — secrets ride in via env vars or flags, never typed at
 | `agenticmail setup-anthropic` | **Connect an Anthropic OAuth token.** Wraps `claude setup-token` interactively, validates the token against `api.anthropic.com` before saving. Non-interactive: pipe via `ANTHROPIC_AUTH_TOKEN` or `--api-key sk-ant-api03-…`. Both the Telegram bridge and the host CLI dispatcher read from the same `~/.agenticmail/anthropic-token`. |
 | `agenticmail setup-voice [--provider <id>] [--key <token>] [--default]` | **Connect a voice runtime (OpenAI / Grok / future).** Provider-agnostic — `--provider openai` (gpt-realtime, default) or `--provider grok` (xAI Grok Voice Agent). Without `--key`, hidden prompt. `--default` sets it as the install-wide voice runtime. Aliases: `setup-openai`, `setup-grok`, `setup-xai`. New backends drop into `packages/core/src/phone/voice-providers/`. |
 | `agenticmail persona [--edit\|--reset\|--path]` | **Edit the agent's "soul file".** Auto-creates `~/.agenticmail/agents/<name>/persona.md` with a sensible default identity (name, values, communication style, on-phone conventions). Voice runtime, Telegram bridge, and email worker all load from the same file — one edit, consistent identity across every channel. |
+| `agenticmail persona --voice <name> [--agent <name>]` | **Pin a voice character per agent.** Writes `voice:` into the persona file's YAML frontmatter. Validated against the provider's catalogue (OpenAI: cedar/marin/etc; Grok: ara/eve/leo or any custom voice id). Pair with `--voice-runtime <id>` to also pin which provider this agent uses. |
 
 ### Service Management (Auto-Start on Boot)
 

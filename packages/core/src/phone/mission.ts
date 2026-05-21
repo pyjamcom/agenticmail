@@ -183,6 +183,25 @@ export interface OpenClawPhoneMissionPolicy {
    * {@link DEFAULT_CALLBACK_POLICY} when omitted.
    */
   callbackPolicy?: PhoneCallbackPolicy;
+  /**
+   * v0.9.95 — voice-runtime provider id ('openai', 'grok', any
+   * future plugin). Per-call override that beats agent persona
+   * frontmatter, install default, and bridge default. Optional.
+   */
+  voiceRuntime?: string;
+  /**
+   * v0.9.95 — model name override (e.g. `'gpt-realtime-mini'` for
+   * cost-tuning, `'grok-voice-fast'` for latency). Optional.
+   */
+  voiceModel?: string;
+  /**
+   * v0.9.95 — voice CHARACTER override (e.g. `'cedar'`, `'ara'`, or
+   * a custom-voice id from Grok). Optional. Validated against the
+   * provider's catalogue at session-open time; unknown names against
+   * a fixed-catalogue provider fall through to the provider default
+   * with a log warning.
+   */
+  voice?: string;
 }
 
 export interface StartPhoneMissionInput {
@@ -496,6 +515,19 @@ export function validatePhoneMissionPolicy(policy: unknown): PhoneMissionValidat
       // Caller-omitted → DEFAULT_*. Caller-set → clamped to server caps.
       extensionPolicy: resolveExtensionPolicy(policy.extensionPolicy as PhoneExtensionPolicy | undefined),
       callbackPolicy: resolveCallbackPolicy(policy.callbackPolicy as PhoneCallbackPolicy | undefined),
+      // v0.9.95 — voice-runtime overrides. Pass-through; the registry
+      // validates the provider id and voice-against-catalogue at
+      // session-open time so we don't have to import the registry
+      // here (would create a cycle with realtime-bridge.ts).
+      voiceRuntime: typeof policy.voiceRuntime === 'string' && policy.voiceRuntime.trim()
+        ? policy.voiceRuntime.trim()
+        : undefined,
+      voiceModel: typeof policy.voiceModel === 'string' && policy.voiceModel.trim()
+        ? policy.voiceModel.trim()
+        : undefined,
+      voice: typeof policy.voice === 'string' && policy.voice.trim()
+        ? policy.voice.trim()
+        : undefined,
     },
     issues: [],
   };

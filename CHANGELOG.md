@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.95] - 2026-05-21
+
+### Added — voice-character switching (per provider) + interactive voice picker
+
+The realtime voice bridge was always shipping every call with one
+hardcoded voice (`marin` for OpenAI; provider default for Grok).
+Now operators can pick which voice the caller actually hears, at
+three levels — per-call, per-agent, or install-wide.
+
+**Voice catalogues (declared by each provider plugin):**
+
+- **OpenAI Realtime** — `alloy, ash, ballad, cedar, coral, echo, marin, sage, shimmer, verse`. Default: `marin`.
+- **Grok Voice Agent** — `ara, eve, leo` (built-in roster from xAI's announcement) + custom voice ids from the Custom Voices API. Default: `ara`. `customVoicesSupported: true` flag lets the CLI pasted-id flow surface for Grok specifically.
+
+**Resolution priority (highest first):**
+
+1. `mission.policy.voice` — per-call override (set by callers of `call_phone` MCP).
+2. Agent persona YAML frontmatter `voice:` — per-agent default.
+3. `config.voiceProviderVoices[<providerId>]` — install-wide default.
+4. Provider's own `defaultVoice` — final fallback.
+
+Same shape for `voiceRuntime` (already in 0.9.93) and the new
+`voiceModel` field.
+
+**CLI:**
+
+- `agenticmail persona --voice <name>` — sets the per-agent voice in the persona file's frontmatter. `--voice-runtime <id>` companion for per-agent runtime pin. Validated against the provider's catalogue.
+- `agenticmail setup-voice` — interactive voice picker after the API-key step. Shows the catalogue, marks the provider's default, supports paste-a-custom-voice-id for Grok.
+
+**Persona frontmatter** — new structured prelude on the persona file
+the bridge / Telegram bridge / email worker all read:
+
+```markdown
+---
+voice: cedar
+voiceRuntime: openai
+---
+# Who you are
+...
+```
+
+`loadAgentPersona()` strips frontmatter from the returned body so
+existing callers still get a clean system prompt. New
+`readAgentPersonaFile()` returns parsed frontmatter +
+`updateAgentPersonaFrontmatter()` patches it in place.
+
+**MCP `call_phone` tool** schema gains three new optional policy
+fields: `voiceRuntime`, `voiceModel`, `voice`. All optional; all
+fall through cleanly.
+
+### Bumps
+
+`core` 0.9.39 → 0.9.40, `api` 0.9.59 → 0.9.60, `mcp` 0.9.24 →
+0.9.25, `cli` 0.9.94 → 0.9.95.
+
 ## [0.9.94] - 2026-05-21
 
 ### Changed — `setup-phone` walks operators through voice-runtime as Step 2
