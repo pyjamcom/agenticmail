@@ -2714,6 +2714,71 @@ WHERE filters support operators: {column: value} for equality, {column: {$gt: 5,
     },
   });
 
+  // v0.9.97 — operator-query inspection + answer injection on live
+  // phone missions. Lets the host CLI (claudecode / codex / openclaw
+  // workflows) read pending `ask_operator` queries AND inject an
+  // answer directly — ~30× faster than redialing with the answer in
+  // the brief, and preserves the original call's context.
+  reg('agenticmail_call_open_queries', {
+    description:
+      'List PENDING ask_operator queries on a phone mission (or all of your agent\'s missions when id is omitted). '
+      + 'Use this BEFORE assuming a verification-style message from the operator is a fresh chat question — if there\'s '
+      + 'an open query, the operator is most likely answering it. Pair with agenticmail_call_answer_query.',
+    parameters: {
+      id: { type: 'string', description: 'Phone mission id. Omit to scan all your agent\'s missions for open queries.' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        if (params.id) {
+          return await apiRequest(c, 'GET', `/calls/${encodeURIComponent(params.id)}/operator-queries`);
+        }
+        const listing = await apiRequest(c, 'GET', '/calls') as { missions?: Array<{ id: string }> };
+        const missions = Array.isArray(listing?.missions) ? listing.missions : [];
+        const out: Array<{ missionId: string; queries: any[] }> = [];
+        for (const m of missions) {
+          try {
+            const detail = await apiRequest(c, 'GET', `/calls/${encodeURIComponent(m.id)}/operator-queries`) as any;
+            const queries = Array.isArray(detail?.operatorQueries) ? detail.operatorQueries : [];
+            const open = queries.filter((q: any) => !q.answer);
+            if (open.length > 0) out.push({ missionId: m.id, queries: open });
+          } catch { /* one bad mission shouldn't break the scan */ }
+        }
+        return { openByMission: out, count: out.reduce((n, m) => n + m.queries.length, 0) };
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
+  reg('agenticmail_call_answer_query', {
+    description:
+      'Inject an answer to a pending ask_operator query on a live phone call. The voice agent\'s next poll picks it '
+      + 'up within ~3 seconds and relays the answer verbatim to the other party on the line. Use when the operator '
+      + 'has provided info the call needs (DOB / account # / address / yes-or-no decision) — this beats redialing by '
+      + 'a factor of 30× in wall-clock time and preserves the original call\'s context. If the mission was already '
+      + 'terminated and the query auto-closed, this returns alreadyAnswered=true and is a no-op.',
+    parameters: {
+      mission_id: { type: 'string', required: true, description: 'Phone mission id (from agenticmail_call_open_queries).' },
+      query_id: { type: 'string', required: true, description: 'Operator-query id, e.g. "oq_abc-123…".' },
+      answer: { type: 'string', required: true, description: 'The literal answer to relay back to the call (e.g. "11/26/1998", "Yes go ahead", "Approved up to $200").' },
+    },
+    handler: async (params: any) => {
+      try {
+        const c = await ctxForParams(ctx, params);
+        if (!params.mission_id) return { success: false, error: 'mission_id is required' };
+        if (!params.query_id) return { success: false, error: 'query_id is required' };
+        if (!params.answer || (typeof params.answer === 'string' && !params.answer.trim())) {
+          return { success: false, error: 'answer is required (non-empty string)' };
+        }
+        return await apiRequest(
+          c,
+          'POST',
+          `/calls/${encodeURIComponent(params.mission_id)}/operator-queries/${encodeURIComponent(params.query_id)}/answer`,
+          { answer: String(params.answer) },
+        );
+      } catch (err) { return { success: false, error: (err as Error).message }; }
+    },
+  });
+
   // ─── Media toolset ─────────────────────────────────────────────────
   // Local, opt-in media tools — text-to-speech, image / video / audio
   // editing, probing, video understanding, voice cloning. Thin clients

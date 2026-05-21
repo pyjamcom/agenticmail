@@ -2,7 +2,7 @@
  * Catalogue ↔ tool-definition consistency tests.
  *
  * These are the only tests this package needs — most of the MCP server is
- * data-shaped (84 tool wrappers around HTTP calls). What CAN silently rot
+ * data-shaped (100 tool wrappers around HTTP calls). What CAN silently rot
  * is the link between:
  *
  *   1. The catalogue in tool-catalog.ts (what request_tools advertises).
@@ -87,6 +87,9 @@ describe('tool catalogue ↔ tool definitions', () => {
       'call_status',
       'call_transcript',
       'call_cancel',
+      // v0.9.97 — operator-query inspection + injection for live calls.
+      'call_open_queries',
+      'call_answer_query',
     ]);
   });
 

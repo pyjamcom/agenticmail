@@ -211,7 +211,7 @@ const SERVER_INSTRUCTIONS = [
   'identity, or pass it to read/write a specific agent\'s mailbox directly.',
   'From inside an agent\'s own context, ALWAYS pass `_account: "<self>"`.',
   '',
-  'Tool surface: ~84 tools across email, SMS, phone, Telegram, contacts,',
+  'Tool surface: ~100 tools across email, SMS, phone, Telegram, contacts,',
   'drafts, templates, rules, tags, search, scheduling, RPC. Only ~10 are',
   'pre-loaded; the rest are reachable via `request_tools` (discover) +',
   '`invoke` (call).',

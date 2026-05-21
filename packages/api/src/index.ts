@@ -76,7 +76,7 @@ const server = app.listen(port, host, async () => {
   console.log('  ║                        task state survives crashes.         ║');
   console.log('  ║                        Push-based — no wasted poll cycles.  ║');
   console.log('  ║                                                             ║');
-  console.log('  ║  54 tools • MIT license • Contributions welcome             ║');
+  console.log('  ║  100 tools • MIT license • Contributions welcome            ║');
   console.log('  ║                                                             ║');
   console.log('  ╚═══════════════════════════════════════════════════════════════╝');
   console.log('');

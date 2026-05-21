@@ -708,7 +708,7 @@ for programmatic work driven by you.**
 |---|---|
 | `packages/core/` | `@agenticmail/core` — DB layer, account/mail/gateway managers, spam filter, search index, `AGENT_ROLES` (including `'bridge'`), `MESSAGE_NOT_FOUND` sentinel. Uses `node:sqlite` (Node 22+). |
 | `packages/api/` | `@agenticmail/api` — Express REST API. Mounts integration routes when `@agenticmail/claudecode` is installed. Also serves the Gmail-style web UI under `public/`, including the per-host avatar registry (`public/js/avatar.js` + `/branding/`). |
-| `packages/mcp/` | `@agenticmail/mcp` — MCP server (95 tools + `request_tools`/`invoke` meta-tools + `_account` per-call identity). `create_account` auto-stamps `metadata.host` from `AGENTICMAIL_MCP_HOST`. |
+| `packages/mcp/` | `@agenticmail/mcp` — MCP server (100 tools + `request_tools`/`invoke` meta-tools + `_account` per-call identity). `create_account` auto-stamps `metadata.host` from `AGENTICMAIL_MCP_HOST`. |
 | `packages/claudecode/` | `@agenticmail/claudecode` — Claude Code integration. Dispatcher daemon, persona engine, HTTP install endpoint, subagent `.md` generator, `claim` CLI. |
 | `packages/codex/` | `@agenticmail/codex` — OpenAI Codex CLI integration. Same shape as `claudecode`: TOML config writers (`~/.codex/config.toml`), subagent `.toml` generator (`~/.codex/agents/`), lifecycle hooks (`~/.codex/hooks.json`), PM2 dispatcher that wakes via `@openai/codex-sdk`. Supports `--workspace <dir>` to bind every worker to a shared project tree. |
 | `packages/openclaw/` | `@agenticmail/openclaw` — OpenClaw runtime integration. Older code path, still pinned to `@agenticmail/core@^0.5`. |

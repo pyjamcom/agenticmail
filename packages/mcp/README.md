@@ -6,7 +6,7 @@
 
 The MCP (Model Context Protocol) server for [AgenticMail](https://github.com/agenticmail/agenticmail) — gives any MCP-compatible AI client full email and SMS capabilities.
 
-When connected, your AI agent can send emails and texts, check inboxes, reply to messages, receive verification codes, manage contacts, schedule emails, assign tasks to other agents, and more — all through natural language. The server provides 95 tools that cover every email, SMS, and agent management operation.
+When connected, your AI agent can send emails and texts, check inboxes, reply to messages, receive verification codes, manage contacts, schedule emails, assign tasks to other agents, and more — all through natural language. The server provides 100 tools that cover every email, SMS, and agent management operation.
 
 ## ✨ What's new in 0.9.0
 
@@ -122,10 +122,10 @@ This is what powers the [`@agenticmail/claudecode`](https://www.npmjs.com/packag
 
 ### Meta-tools for cheap discovery (`request_tools` + `invoke`)
 
-To keep host context windows small, only ~10 of the 95 tools are pre-declared in a typical subagent's `tools:` whitelist. The other ~50 stay reachable through two always-on meta-tools:
+To keep host context windows small, only ~10 of the 100 tools are pre-declared in a typical subagent's `tools:` whitelist. The other ~50 stay reachable through two always-on meta-tools:
 
 - **`request_tools({ query?, sets? })`** — Returns a text catalogue of the unloaded tools, grouped by set (`mail_extras`, `mail_compose`, `sms`, `account_admin`, …). Optional substring filter or set-name filter.
-- **`invoke({ tool, args, _account? })`** — Dispatches to any of the 95 tools by name. The agent uses `request_tools` to discover, `invoke` to call.
+- **`invoke({ tool, args, _account? })`** — Dispatches to any of the 100 tools by name. The agent uses `request_tools` to discover, `invoke` to call.
 
 Token impact: a typical subagent spawn loads ~3K tokens of tool schemas instead of ~15K. The cost is one extra round trip for uncommon operations (discover → invoke), which is almost always a worthwhile trade.
 

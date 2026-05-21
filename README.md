@@ -188,7 +188,7 @@ AI agents need to communicate with the real world. Email is the universal commun
 - **Realtime voice calls** — bridge a phone mission to an OpenAI Realtime (`gpt-realtime`) session so an agent can hold a live two-way conversation, with its persistent memory folded into the call.
 - **Persistent agent memory** — every agent has a categorised, confidence-decaying, searchable long-term memory that survives across conversations and is injected into prompts and voice sessions.
 - **Smart orchestration** — `call_agent` replaces basic sub-agent spawning with auto mode detection, dynamic timeouts, runtime tool discovery, and async execution for long-running tasks.
-- **Tool integrations** — 95 MCP tools for any AI client, 87 OpenClaw tools, and a 44-command interactive shell.
+- **Tool integrations** — 100 MCP tools for any AI client, 89 OpenClaw tools, and a 44-command interactive shell.
 - **Self-updating** — `agenticmail update` checks npm, verifies OpenClaw compatibility, and updates both packages automatically.
 
 ---
@@ -335,9 +335,9 @@ That's a real multi-agent thread captured in the REPL — the host kicked off on
                   ┌──────────────────────────────────────────────────┐
                   │                    AgenticMail                    │
                   │                                                  │
- AI Client ─MCP─> │  @agenticmail/mcp   (95 tools, stdio transport) │
+ AI Client ─MCP─> │  @agenticmail/mcp   (100 tools, stdio transport)│
                   │       │                                          │
- OpenClaw ─────>  │  @agenticmail/openclaw  (87 tools, plugin)       │
+ OpenClaw ─────>  │  @agenticmail/openclaw  (89 tools, plugin)       │
                   │       │                                          │
  HTTP clients──>  │       ▼                                          │
                   │  @agenticmail/api     (Express, 75+ endpoints)   │
@@ -697,10 +697,10 @@ This is a TypeScript monorepo. Seven packages, each shipped to npm independently
 | [`@agenticmail/cli`](./agenticmail) | CLI, setup wizard, interactive shell. Install this to get started. | `npm i -g @agenticmail/cli` |
 | [`@agenticmail/core`](./packages/core) | Core SDK — accounts, SMTP/IMAP, gateway, spam filter, outbound guard, storage | `npm i @agenticmail/core` |
 | [`@agenticmail/api`](./packages/api) | Express REST API server with 75+ endpoints | `npm i @agenticmail/api` |
-| [`@agenticmail/mcp`](./packages/mcp) | MCP server with 95 tools for any MCP-compatible AI client | `npm i -g @agenticmail/mcp` |
+| [`@agenticmail/mcp`](./packages/mcp) | MCP server with 100 tools for any MCP-compatible AI client | `npm i -g @agenticmail/mcp` |
 | [`@agenticmail/claudecode`](./packages/claudecode) | Anthropic Claude Code integration — registers MCP server + native subagents + lifecycle hooks + dispatcher daemon | `npm i -g @agenticmail/claudecode` |
 | [`@agenticmail/codex`](./packages/codex) | OpenAI Codex CLI integration — same architecture as `@agenticmail/claudecode`, adapted to Codex's TOML config and `spawn_agent` tool | `npm i -g @agenticmail/codex` |
-| [`@agenticmail/openclaw`](./packages/openclaw) | OpenClaw plugin with 87 tools and skill definition | `openclaw plugin install agenticmail` |
+| [`@agenticmail/openclaw`](./packages/openclaw) | OpenClaw plugin with 89 tools and skill definition | `openclaw plugin install agenticmail` |
 
 **Plugin folders** (host marketplace manifests, separate from npm packages):
 
@@ -816,7 +816,7 @@ See the [MCP package README](./packages/mcp) for the full tool list.
 
 AgenticMail is host-agnostic at the protocol level (it's just SMTP/IMAP/HTTP/MCP under the hood), but each agentic CLI host expects its config + hooks + subagent definitions in a slightly different shape. We ship one **host integration package** per supported host. Each one:
 
-1. Registers the AgenticMail MCP server in the host's config so the model can see all 95 tools.
+1. Registers the AgenticMail MCP server in the host's config so the model can see all 100 tools.
 2. Surfaces every AgenticMail account as a native sub-agent the model can dispatch to.
 3. Wires up the host's lifecycle hooks (`SessionStart`, `UserPromptSubmit`, `Stop`) so the agent gets a fresh-mail digest and capabilities preamble at the right moments.
 4. Runs a long-lived **dispatcher daemon** that watches every account's inbox via SSE and spawns a one-shot model turn whenever new mail or a task arrives — so agents wake on each other's replies automatically without polling.
@@ -1149,7 +1149,7 @@ agenticmail/
 │   │       └── resources.ts
 │   └── openclaw/          # @agenticmail/openclaw
 │       ├── index.ts       # Plugin entry, system prompt
-│       ├── src/tools.ts   # 87 tool definitions and handlers
+│       ├── src/tools.ts   # 89 tool definitions and handlers
 │       └── skill/         # SKILL.md, reference docs, scripts
 ├── docker-compose.yml     # Stalwart mail server
 ├── .env.example           # Environment variable template

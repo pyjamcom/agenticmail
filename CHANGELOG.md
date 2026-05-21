@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.97] - 2026-05-20
+
+### Added — operator-query MCP/OpenClaw tools (`call_open_queries` + `call_answer_query`)
+
+When a live phone call asks the operator a question (via the
+realtime bridge's `ask_operator` tool-call surface), the question
+gets persisted to the mission's operator-query log on the API
+side. There was no way to *read those queries from MCP / OpenClaw,
+or inject the operator's answer back into the live call* — agents
+ended up flailing through 6 nonexistent tool names
+(`call_answer`, `phone_answer_query`, `answer_ask_operator`,
+`ask_operator_reply`, `submit_result`, `telegram_poll`) before
+giving up.
+
+**New MCP tools (under `phone` set):**
+
+- `call_open_queries({ id? })` — `GET /api/agenticmail/calls/:id/operator-queries`. If `id` omitted, scans active missions and returns all open queries across them.
+- `call_answer_query({ id, queryId, answer })` — `POST /api/agenticmail/calls/:id/operator-queries/:queryId/answer` with `{ answer }`. Returns the updated mission state. The realtime bridge picks up the answered query within ~1s and feeds the text back into the model's conversation as a tool result.
+
+**OpenClaw counterparts** — `agenticmail_call_open_queries` and
+`agenticmail_call_answer_query` with identical parameter shapes.
+
+**Subagent template fix** — `packages/claudecode/src/subagent-template.ts`
+referenced a tool name that never existed (`answer_operator_query`).
+Replaced with the real names so generated subagent `.md` files
+point dispatchers at the working tools.
+
+### Bumps
+
+`mcp` 0.9.25 → 0.9.26, `openclaw` plugin 0.5.67 → 0.5.68,
+`claudecode` patch bump, `cli` 0.9.96 → 0.9.97.
+
 ## [0.9.96] - 2026-05-21
 
 ### Added — Cloudflare quick-tunnel watchdog (auto-respawn + auto-repoint)

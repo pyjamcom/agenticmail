@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@agenticmail/core": "^0.9.37",
-    "@agenticmail/mcp": "^0.9.24",
+    "@agenticmail/mcp": "^0.9.26",
     "@iarna/toml": "^2.2.5"
   },
   "peerDependencies": {

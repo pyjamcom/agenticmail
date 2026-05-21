@@ -153,6 +153,9 @@ export const TOOL_SETS = {
     'call_status',
     'call_transcript',
     'call_cancel',
+    // v0.9.97 — operator-query inspection + answer injection for live calls.
+    'call_open_queries',
+    'call_answer_query',
   ],
 
   /** Telegram channel — bot setup, send/list messages, poll for updates. */

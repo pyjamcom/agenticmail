@@ -1426,6 +1426,37 @@ export const toolDefinitions = [
       required: ['id'],
     },
   },
+  // v0.9.97 — operator-query inspection + answer-injection for live
+  // calls. Lets the dispatcher (claudecode / codex) read pending
+  // ask_operator queries on a live mission AND inject an answer
+  // directly, so a verification-challenge mid-call (DOB, account #,
+  // etc.) closes in sub-second through the existing bridge poll,
+  // without redialing.
+  {
+    name: 'call_open_queries',
+    description:
+      'List PENDING ask_operator queries on a phone mission (or all of an agent\'s missions when id is omitted). Use this BEFORE assuming a verification-style message from the operator is a fresh chat question — if there\'s an open query, the operator is most likely answering it. Pair with call_answer_query to inject the answer.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        id: { type: 'string', description: 'Phone mission id. Omit to scan all of your agent\'s missions for open queries.' },
+      },
+    },
+  },
+  {
+    name: 'call_answer_query',
+    description:
+      'Inject an answer to a pending ask_operator query on a live phone call. The voice agent\'s next poll picks it up within ~3 seconds and relays the answer verbatim to the other party on the line. Use when the operator has provided info the call needs (DOB / account # / address / yes-or-no decision) — this beats redialing by a factor of 30× in wall-clock time and preserves the original call\'s context. If the mission was already terminated and the query auto-closed, this returns alreadyAnswered=true and is a no-op. When the call had already dropped, the answer arms a callback-on-disconnect that the scheduler dials a few seconds later with the answer baked into the continuation task.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        mission_id: { type: 'string', description: 'Phone mission id (oq_ ids are bound to one mission; you can get this from call_open_queries).' },
+        query_id: { type: 'string', description: 'Operator-query id, e.g. "oq_abc-123…". From call_open_queries.' },
+        answer: { type: 'string', description: 'The literal answer to relay back to the call (e.g. "11/26/1998", "Yes go ahead", "Approved up to $200"). The voice agent reads this verbatim to the other party.' },
+      },
+      required: ['mission_id', 'query_id', 'answer'],
+    },
+  },
   // ─── Media toolset ─────────────────────────────────────────────────
   //
   // Local, opt-in media tools (text-to-speech, image / video / audio
@@ -3660,6 +3691,51 @@ async function dispatchToolCall(name: string, args: Record<string, unknown>, use
     case 'call_cancel': {
       if (!args.id) throw new Error('id is required');
       const result = await apiRequest('POST', `/calls/${encodeURIComponent(String(args.id))}/cancel`);
+      return JSON.stringify(result, null, 2);
+    }
+
+    // v0.9.97 — operator-query inspection + answer injection.
+    // call_open_queries(id?)        → GET /calls/:id/operator-queries
+    //                                  (or scans listMissions when id omitted)
+    // call_answer_query(mission_id, query_id, answer)
+    //                              → POST /calls/:id/operator-queries/:qid/answer
+    case 'call_open_queries': {
+      if (args.id) {
+        const result = await apiRequest('GET', `/calls/${encodeURIComponent(String(args.id))}/operator-queries`);
+        return JSON.stringify(result, null, 2);
+      }
+      // Scan ALL of the agent's missions for open queries. Cheap: the
+      // listMissions endpoint returns mission summaries; we then ask
+      // each for its operator-queries. Wins when the dispatcher wants
+      // "is there ANY pending query right now I should answer?".
+      const missions = await apiRequest('GET', '/calls') as { missions?: Array<{ id: string }> };
+      const list = Array.isArray(missions?.missions) ? missions.missions : [];
+      const out: Array<{ missionId: string; queries: any[] }> = [];
+      for (const m of list) {
+        try {
+          const detail = await apiRequest('GET', `/calls/${encodeURIComponent(m.id)}/operator-queries`) as any;
+          const queries = Array.isArray(detail?.operatorQueries) ? detail.operatorQueries : [];
+          const open = queries.filter((q: any) => !q.answer);
+          if (open.length > 0) out.push({ missionId: m.id, queries: open });
+        } catch { /* one bad mission shouldn't break the scan */ }
+      }
+      return JSON.stringify({ openByMission: out, count: out.reduce((n, m) => n + m.queries.length, 0) }, null, 2);
+    }
+
+    case 'call_answer_query': {
+      const missionId = args.mission_id ?? args.missionId;
+      const queryId = args.query_id ?? args.queryId;
+      const answer = args.answer;
+      if (!missionId) throw new Error('mission_id is required');
+      if (!queryId) throw new Error('query_id is required');
+      if (!answer || (typeof answer === 'string' && !answer.trim())) {
+        throw new Error('answer is required (non-empty string)');
+      }
+      const result = await apiRequest(
+        'POST',
+        `/calls/${encodeURIComponent(String(missionId))}/operator-queries/${encodeURIComponent(String(queryId))}/answer`,
+        { answer: String(answer) },
+      );
       return JSON.stringify(result, null, 2);
     }
 

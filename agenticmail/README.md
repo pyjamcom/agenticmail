@@ -514,7 +514,7 @@ That's the whole flow. The pipeline:
 3. Waits up to 60 s for the API to answer `/health`.
 4. `agenticmail claudecode` — provisions the Claude Code bridge agent, writes `~/.claude.json` + `~/.claude/agents/agenticmail-*.md`, starts the dispatcher daemon under PM2.
 
-After it finishes, you restart Claude Code and you've got 95 `mcp__agenticmail__*` tools plus one Claude Code subagent per AgenticMail agent.
+After it finishes, you restart Claude Code and you've got 100 `mcp__agenticmail__*` tools plus one Claude Code subagent per AgenticMail agent.
 
 ### What it does NOT set up
 
@@ -558,7 +558,7 @@ agenticmail claudecode --remove    # uninstall
 - **Every AgenticMail agent is callable from Claude Code via the native `Agent` tool.**
   Inside any Claude Code session: `Agent { subagent_type: "agenticmail-alice", prompt: "..." }` — the subagent IS alice, reads alice's real inbox, sends mail from `alice@localhost`.
 
-- **All 95 AgenticMail MCP tools available in Claude Code.**
+- **All 100 AgenticMail MCP tools available in Claude Code.**
   `mcp__agenticmail__send_email`, `call_agent`, `list_inbox`, `sms_send`, … — works in any Claude Code session, no further setup.
 
 - **Auto-wake on inbox / task events.**
