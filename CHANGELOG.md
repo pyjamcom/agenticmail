@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.98] - 2026-05-22
+
+### Fixed — tunnel-watchdog couldn't find `cloudflared` on Apple Silicon
+
+The Cloudflare quick-tunnel watchdog (shipped in 0.9.96) was silently
+failing to respawn dead tunnels on Apple Silicon. Symptom: Twilio
+played its stock "an application error has occurred" message on
+every outbound call, because the trycloudflare URL was NXDOMAIN
+and the watchdog couldn't bring a new one up.
+
+Root cause: `agenticmail start` launches the API process with a
+`PATH` that doesn't include `/opt/homebrew/bin` (where Homebrew on
+ARM macs installs `cloudflared`). The watchdog's
+`resolveCloudflaredBinary()` called `which cloudflared`, got an
+empty string, and `spawn('', [...])` failed instantly — which the
+watchdog mis-reported as "cloudflared did not emit a URL within 30s"
+on every retry (190+ times in the wild before being noticed).
+
+- `resolveCloudflaredBinary()` now falls back to absolute paths
+  (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`) when `which`
+  comes up empty. Apple Silicon Homebrew installs are no longer
+  invisible to daemon-launched API processes.
+- `respawnTunnel()` now returns a structured `reason` for each
+  failure mode (binary-not-found, spawn-error, exit-before-URL,
+  timeout), so future debugging shows what actually happened
+  instead of a misleading generic timeout message.
+
+### Bumps
+
+`api` 0.9.61 → 0.9.62, `cli` 0.9.97 → 0.9.98.
+
 ## [0.9.97] - 2026-05-20
 
 ### Added — operator-query MCP/OpenClaw tools (`call_open_queries` + `call_answer_query`)

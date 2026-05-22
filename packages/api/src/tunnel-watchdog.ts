@@ -141,9 +141,9 @@ export function startTunnelWatchdog(
     try {
       onEvent({ kind: 'tunnel-dead', url: state.url });
       const oldUrl = state.url;
-      const newState = await respawnTunnel(state.port);
+      const { state: newState, reason } = await respawnTunnel(state.port);
       if (!newState) {
-        onEvent({ kind: 'tunnel-respawn-failed', oldUrl, reason: 'cloudflared did not emit a URL within 30s' });
+        onEvent({ kind: 'tunnel-respawn-failed', oldUrl, reason: reason ?? 'unknown' });
         return;
       }
       writeTunnelState(newState);
@@ -216,9 +216,14 @@ async function pingTunnel(url: string, timeoutMs: number): Promise<boolean> {
  * resolve to the new state once we see the URL in its stdout/stderr.
  * Resolves to null if cloudflared doesn't emit a URL within 30s.
  */
-async function respawnTunnel(port: number): Promise<TunnelStateFile | null> {
+async function respawnTunnel(port: number): Promise<{ state: TunnelStateFile | null; reason?: string }> {
   const bin = resolveCloudflaredBinary();
-  if (!bin) return null;
+  if (!bin) {
+    return {
+      state: null,
+      reason: 'cloudflared binary not found (looked in ~/.agenticmail/bin, $PATH, /opt/homebrew/bin, /usr/local/bin, /usr/bin)',
+    };
+  }
 
   const child = spawn(bin, ['tunnel', '--no-autoupdate', '--config', '/dev/null', '--url', `http://127.0.0.1:${port}`], {
     detached: true,
@@ -226,17 +231,17 @@ async function respawnTunnel(port: number): Promise<TunnelStateFile | null> {
     env: process.env,
   });
 
-  return new Promise<TunnelStateFile | null>((resolve) => {
+  return new Promise<{ state: TunnelStateFile | null; reason?: string }>((resolve) => {
     let resolved = false;
-    const finish = (state: TunnelStateFile | null) => {
+    const finish = (state: TunnelStateFile | null, reason?: string) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(timer);
-      resolve(state);
+      resolve({ state, reason });
     };
     const timer = setTimeout(() => {
       try { child.kill('SIGTERM'); } catch { /* ignore */ }
-      finish(null);
+      finish(null, 'cloudflared did not emit a URL within 30s');
     }, 30_000);
     const onChunk = (chunk: Buffer) => {
       const m = chunk.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
@@ -252,14 +257,24 @@ async function respawnTunnel(port: number): Promise<TunnelStateFile | null> {
     };
     child.stdout?.on('data', onChunk);
     child.stderr?.on('data', onChunk);
-    child.on('error', () => finish(null));
-    child.on('exit', () => finish(null));
+    child.on('error', (err) => finish(null, `cloudflared spawn error: ${err.message}`));
+    child.on('exit', (code) => finish(null, `cloudflared exited (code=${code}) before emitting a URL`));
   });
 }
 
 /**
- * Find the cloudflared binary — managed install first, then PATH. The
- * same resolution order the CLI's `cmdTunnel` uses.
+ * Find the cloudflared binary — managed install first, then PATH, then
+ * well-known package-manager install locations. The same resolution
+ * order the CLI's `cmdTunnel` uses.
+ *
+ * Important on Apple Silicon: launchd / pm2 / forever-managed Node
+ * processes often inherit a PATH that excludes `/opt/homebrew/bin`
+ * (Homebrew-on-ARM's default install prefix). When the operator's
+ * shell can find `cloudflared` but the API process can't, the watchdog
+ * was previously stuck reporting "did not emit a URL within 30s"
+ * because `spawn('')` exits immediately. The absolute-path fallbacks
+ * below cover that case for both Apple Silicon (`/opt/homebrew/bin`)
+ * and Intel mac / Linux (`/usr/local/bin`, `/usr/bin`).
  */
 function resolveCloudflaredBinary(): string {
   const managed = join(homedir(), '.agenticmail', 'bin', 'cloudflared');
@@ -272,6 +287,14 @@ function resolveCloudflaredBinary(): string {
     }).toString().trim();
     if (out) return out;
   } catch { /* not on PATH */ }
+  // PATH-less fallbacks for daemon-launched API processes.
+  for (const candidate of [
+    '/opt/homebrew/bin/cloudflared',  // Homebrew on Apple Silicon
+    '/usr/local/bin/cloudflared',     // Homebrew on Intel mac, manual installs
+    '/usr/bin/cloudflared',           // apt/dnf system installs on Linux
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
   return '';
 }
 
