@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.100] - 2026-05-22
+
+### Fixed — `@agenticmail/core` failed to load with "Dynamic require of 'events' is not supported"
+
+Hotfix on top of v0.9.99. Any fresh install of `@agenticmail/cli`
+(or any consumer importing `@agenticmail/core@0.9.41`) crashed at
+startup with:
+
+    Error: Dynamic require of "events" is not supported
+      at .../core/dist/chunk-XXX.js
+      at .../node_modules/ws/lib/websocket.js (in core/dist/index.js)
+
+Root cause: v0.9.99's `voice-providers/preview.ts` added an
+`import WebSocket from 'ws'`. `ws` was not in core's package.json
+dependencies and not in core's tsup `external` list, so esbuild
+resolved it via workspace hoisting and inlined the entire `ws`
+source tree into `core/dist/index.js`. `ws` does CommonJS
+`require('events')` / `require('stream')` for Node built-ins,
+and tsup's ESM polyfill `__require2` throws on those.
+
+Fix: add `ws` to `@agenticmail/core`'s `dependencies` (so npm
+install resolves it on consumer machines) AND to `tsup.config.ts`'s
+`external` array (so it stays as a runtime import instead of being
+inlined). Net diff: 3 lines of config, no API surface change.
+
+### Bumps
+
+`core` 0.9.41 → 0.9.42, `cli` 0.9.99 → 0.9.100.
+
 ## [0.9.99] - 2026-05-22
 
 ### Added — `agenticmail setup-voice` plays a live audio preview before you commit

@@ -32,7 +32,16 @@ export default defineConfig({
   // keeps esbuild from trying to bundle it when it isn't installed —
   // the media module feature-detects it at runtime and degrades
   // gracefully with an install hint when it is absent.
-  external: ['node:*', 'node-edge-tts'],
+  // `ws` is a CommonJS package that internally uses `require('events')`
+  // / `require('stream')`. tsup's ESM bundler wraps require() in a
+  // helper that throws on Node built-ins, so the moment we inline `ws`
+  // every import of @agenticmail/core dies at startup with
+  // "Dynamic require of \"events\" is not supported" (regression
+  // shipped in 0.9.41 / cli 0.9.99 — the moment voice-providers/preview.ts
+  // started using ws in core). Keep `ws` external so it loads natively
+  // at runtime — declared in package.json `dependencies` so npm install
+  // resolves it cleanly.
+  external: ['node:*', 'node-edge-tts', 'ws'],
   // Built-in skills are JSON files loaded at runtime by
   // `packages/core/src/skills/registry.ts` (which resolves them
   // relative to its own dist location). esbuild won't move data
