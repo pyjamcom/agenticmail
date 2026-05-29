@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.101] - 2026-05-28
+
+### Security — fixes GHSA-63gr-g7jc-v8rg (missing auth on `@agenticmail/mcp --http`)
+
+The optional Streamable HTTP transport (`agenticmail-mcp --http` /
+`MCP_HTTP=1`) listened on all interfaces with no `Authorization`
+check. A client that could reach the port could initialize an MCP
+session and invoke master-key-only tools (`setup_email_relay`,
+`setup_email_domain`, `delete_agent`, `cleanup_agents`,
+`send_test_email`, …) because the server forwarded those calls
+using its own `AGENTICMAIL_MASTER_KEY`.
+
+Stdio mode (the default) was never affected. If you didn't pass
+`--http` or set `MCP_HTTP=1`, nothing changes for you — but upgrade
+anyway.
+
+Fix in `packages/mcp/src/index.ts`:
+
+- Default-bind `/mcp` to `127.0.0.1`. Override with `--host=0.0.0.0`
+  or `MCP_HTTP_HOST=...`. Startup logs an explicit warning when
+  bound to a non-loopback interface.
+- Require `Authorization: Bearer <token>` on every `/mcp` request
+  (constant-time compare via `crypto.timingSafeEqual`).
+- Auto-mint the token on first start, persist to
+  `~/.agenticmail/mcp-http-token` (chmod 600). Override with
+  `MCP_HTTP_TOKEN` env or `--token=<value>`.
+- `--insecure` brings back the old behavior for sandboxed test
+  environments only, with a loud warning at startup.
+- `GET /health` stays open (returns only the session count).
+
+Reported by @SecurePatchOps. CVE assignment requested via GitHub;
+the CVE ID will populate on the advisory page automatically once
+MITRE assigns it.
+
+Release: `@agenticmail/mcp@0.9.27`, `@agenticmail/claudecode@0.2.32`,
+`@agenticmail/codex@0.1.26`, `@agenticmail/cli@0.9.101`.
+
 ## [0.9.100] - 2026-05-22
 
 ### Fixed — `@agenticmail/core` failed to load with "Dynamic require of 'events' is not supported"
