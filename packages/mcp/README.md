@@ -8,6 +8,18 @@ The MCP (Model Context Protocol) server for [AgenticMail](https://github.com/age
 
 When connected, your AI agent can send emails and texts, check inboxes, reply to messages, receive verification codes, manage contacts, schedule emails, assign tasks to other agents, and more — all through natural language. The server provides 100 tools that cover every email, SMS, and agent management operation.
 
+## ✨ Security — 0.9.27
+
+**Fixes [GHSA-63gr-g7jc-v8rg](https://github.com/agenticmail/agenticmail/security/advisories/GHSA-63gr-g7jc-v8rg)** — missing authentication on the optional Streamable HTTP transport (`--http` / `MCP_HTTP=1`).
+
+- `--http` mode now **binds to `127.0.0.1` by default** and **requires `Authorization: Bearer <token>`** on every `/mcp` request.
+- The bearer token is auto-minted on first start and persisted to `~/.agenticmail/mcp-http-token` (chmod 600). Override with `MCP_HTTP_TOKEN` env or `--token=<value>`.
+- Bind to other interfaces with `--host=0.0.0.0` or `MCP_HTTP_HOST=...` — startup logs an explicit warning when the endpoint is reachable from the network.
+- `--insecure` brings back the old no-auth behavior for sandboxed test environments only. Startup prints a loud warning.
+- Stdio mode (the default) was never affected.
+
+If you weren't using `--http` / `MCP_HTTP=1`, no action is needed.
+
 ## ✨ What's new in 0.9.0
 
 - **🧠 `get_thread_id` + `save_thread_memory`** — two new tools in the `multi_agent_extras` tier. Workers call `get_thread_id({uid})` once after reading a new message, then `save_thread_memory({threadId, summary, commitments?, openQuestions?, lastAction?, lastUid?})` at end-of-wake. The dispatcher reads the memory back into the next wake's prompt automatically. Pairs with the dispatcher-side ThreadCache to flatten wake cost — agents no longer have to re-read 10 prior messages every time.
@@ -113,6 +125,20 @@ For desktop AI applications, add to your MCP configuration file. Example paths:
 | `AGENTICMAIL_ACCOUNT_KEYS_JSON` | No | JSON map of `{"<agentName>": "<apiKey>"}` for per-call identity switching. When the caller passes `_account: "Fola"` (etc.), the server authenticates AS that agent for the duration of the call. Populated automatically by `agenticmail claudecode install` for the Claude Code integration. |
 
 ¹ Either `AGENTICMAIL_API_KEY` OR `AGENTICMAIL_MASTER_KEY` (or `AGENTICMAIL_ACCOUNT_KEYS_JSON`) must be set, but you don't strictly need all three.
+
+### Optional Streamable HTTP transport (`--http`)
+
+Most users should stick with the default stdio transport — that's what every MCP client config above uses. For environments that need a long-lived HTTP endpoint (browser-based clients, remote-development tunnels, multi-host setups), pass `--http`:
+
+```bash
+agenticmail-mcp --http                       # 127.0.0.1:8014, auth required
+agenticmail-mcp --http --port=9001
+agenticmail-mcp --http --host=0.0.0.0        # expose on network (token still required)
+agenticmail-mcp --http --token=mcphttp_xxx   # use a known token instead of the minted one
+agenticmail-mcp --http --insecure            # sandbox/test only — disables auth
+```
+
+The token is read from (in order): `--token=...` flag, `MCP_HTTP_TOKEN` env, `~/.agenticmail/mcp-http-token` (auto-minted on first run). Clients must send `Authorization: Bearer <token>` on every request to `/mcp`. `GET /health` stays open and returns only the session count.
 
 ### Per-call identity switching (`_account`)
 
