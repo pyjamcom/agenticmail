@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.103] - 2026-05-29
+
+### Fixed — `stop_agent` now actually stops the running worker
+
+Before this release, `stop_agent` set the `stopped` flag and the
+dispatcher refused to wake the agent on FUTURE events, but any
+worker that was already running (mid-tool-call, mid-Claude-turn)
+continued to completion. From the operator's point of view this
+looked like "I called stop_agent and the agent kept on working".
+
+Fix in both dispatchers (`@agenticmail/claudecode`,
+`@agenticmail/codex`):
+
+- Each spawned worker now registers an `AbortController` under
+  its account id in `dispatcher.activeAborts`.
+- When the `account_stopped` system event arrives, every registered
+  controller for that account gets `.abort()` — the SDK honours
+  the signal by ending its message loop, `runWorker` catches the
+  thrown error, and `spawnWorker`'s `finally` posts the standard
+  worker-finished event so the host's `check_activity` shows the
+  agent as idle right away.
+- Queued coalesced wakes for the stopped account are cleared so
+  they don't fire after the stop.
+- Deferred rate-limit retries for the stopped account are also
+  cancelled so they don't re-fire after the stop.
+- `spawnWorker` also late-checks the `stopped` flag right before
+  the SDK call to catch the race where a wake was already
+  coalesced and waiting on the agent-serial lock when stop_agent
+  fired.
+
+MCP tool description for `stop_agent` updated to reflect the new
+behavior — the tool is now a true hard-stop on running work, not
+just a future-wake block.
+
+Release: `@agenticmail/mcp@0.9.29`, `@agenticmail/claudecode@0.2.34`,
+`@agenticmail/codex@0.1.28`, `@agenticmail/cli@0.9.103`.
+
 ## [0.9.102] - 2026-05-29
 
 ### Added — `broadcast_email` MCP tool: fan-out one email to N agents privately

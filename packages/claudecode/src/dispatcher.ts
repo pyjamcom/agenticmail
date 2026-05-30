@@ -464,6 +464,7 @@ async function runWorkerWithCompaction(
   log: (level: 'info' | 'warn' | 'error', msg: string) => void,
   observer: WorkerObserver,
   cwd: string,
+  abortSignal?: AbortSignal,
   maxIterations = 4,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   let prompt = initialPrompt;
@@ -488,9 +489,10 @@ async function runWorkerWithCompaction(
     lastResult = await runWorker(
       query, persona, prompt, agent,
       mcpServerName, mcpCommand, mcpArgs, mcpEnv,
-      log, undefined, captureObserver, cwd,
+      log, abortSignal, captureObserver, cwd,
     );
     if (lastResult.ok) return lastResult;
+    if (abortSignal?.aborted) return lastResult;
     if (!isContextOverflowError(lastResult.error)) return lastResult;
     if (iter === maxIterations - 1) {
       return { ok: false, error: `compaction budget exhausted (${maxIterations} iters): ${lastResult.error}` };
@@ -958,6 +960,18 @@ export class Dispatcher {
     firstScheduledAt: number;
   }>();
   private wakeCoalesceMs: number;
+
+  /**
+   * Per-account live AbortControllers — one per in-flight worker. Used
+   * by `stop_agent` (via the `account_stopped` system event) to kill
+   * running Claude sessions immediately instead of waiting for them to
+   * finish naturally. Without this, a stop_agent issued while a long
+   * tool call is mid-flight (e.g. reading 50 emails, calling another
+   * agent) would block FUTURE wakes but let the current one run to
+   * completion — which is what "they kept on working" looked like
+   * before this fix.
+   */
+  private activeAborts = new Map<string, Set<AbortController>>();
 
   /**
    * In-memory queue of wakes the SDK rejected with a rate-limit
@@ -1571,6 +1585,47 @@ export class Dispatcher {
       const nextStopped = type === 'account_stopped';
       (ch.account as { stopped?: boolean }).stopped = nextStopped;
       this.log('info', `[dispatcher] ${type} "${ch.account.name}" — in-memory stopped=${nextStopped}`);
+      if (nextStopped) {
+        // Kill any in-flight workers for this account. The SDK
+        // honours AbortController.abort() by ending the
+        // for-await loop with an error, which runWorker catches
+        // and returns as {ok:false}; spawnWorker's finally then
+        // posts worker-finished and releases gates. This is what
+        // makes stop_agent actually stop work — before this, only
+        // future wakes were blocked while the current one ran to
+        // completion.
+        const aborts = this.activeAborts.get(event.accountId);
+        if (aborts && aborts.size > 0) {
+          this.log('info', `[dispatcher] aborting ${aborts.size} in-flight worker(s) for "${ch.account.name}"`);
+          for (const ac of aborts) {
+            try { ac.abort(); } catch { /* ignore */ }
+          }
+          this.activeAborts.delete(event.accountId);
+        }
+        // Drop queued coalesced wakes for this account so they
+        // don't fire after the stop. The late-check in
+        // spawnWorker would catch them too, but clearing here
+        // avoids wasting timers + log noise.
+        const prefix = `${event.accountId}::`;
+        let droppedQueued = 0;
+        for (const [key, entry] of this.wakeCoalesce.entries()) {
+          if (!key.startsWith(prefix)) continue;
+          try { clearTimeout(entry.timer); } catch { /* ignore */ }
+          droppedQueued += entry.events.length;
+          this.wakeCoalesce.delete(key);
+        }
+        if (droppedQueued > 0) {
+          this.log('info', `[dispatcher] dropped ${droppedQueued} queued wake event(s) for stopped "${ch.account.name}"`);
+        }
+        // Cancel any deferred rate-limit retries for this account
+        // so they don't re-fire after the stop.
+        const retryPrefix = `${event.accountId}:`;
+        for (const [key, entry] of this.deferredRetries.entries()) {
+          if (!key.startsWith(retryPrefix)) continue;
+          try { clearTimeout(entry.timer); } catch { /* ignore */ }
+          this.deferredRetries.delete(key);
+        }
+      }
       return;
     }
     // type === 'connected' or unknown — no action
@@ -2060,6 +2115,29 @@ export class Dispatcher {
     // post a matching finished event even if persona load throws.
     const workerId = `${account.id}:${ctx.kind}:${ctx.uid ?? ctx.taskId ?? ''}:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     let workerResult: { ok: true; text: string } | { ok: false; error: string } | null = null;
+    // AbortController for this worker — registered under the account
+    // id so the `account_stopped` system event can yank it (and any
+    // sibling workers) when stop_agent fires. Without this the SDK
+    // call would run to completion regardless of stop_agent.
+    const workerAbort = new AbortController();
+    let abortsForAccount = this.activeAborts.get(account.id);
+    if (!abortsForAccount) {
+      abortsForAccount = new Set();
+      this.activeAborts.set(account.id, abortsForAccount);
+    }
+    abortsForAccount.add(workerAbort);
+    // Late-check: if stop_agent already flipped the flag between
+    // queueing this wake and arriving here, bail before paying the
+    // SDK cost. Covers the race where a wake was already coalesced
+    // and waiting on the agent-serial lock when stop_agent fired.
+    if ((account as { stopped?: boolean }).stopped === true) {
+      this.log('info', `[dispatcher] "${account.name}" is soft-stopped — aborting spawn before SDK call (kind=${ctx.kind})`);
+      abortsForAccount.delete(workerAbort);
+      if (abortsForAccount.size === 0) this.activeAborts.delete(account.id);
+      this.releaseSlot();
+      try { releaseAgentLock(); } catch { /* ignore */ }
+      return;
+    }
     // Push "started" — host can now see this agent is working via
     // `check_activity` or wait_for_email on /system/events. We fire
     // and forget; never let observer failures block worker spawn.
@@ -2182,10 +2260,20 @@ export class Dispatcher {
         this.log,
         observer,
         cwdDir,
+        workerAbort.signal,
       );
     } finally {
       clearInterval(heartbeatHandle);
       this.releaseSlot();
+      // Deregister this worker's abort controller — whether it
+      // finished naturally, errored, or was aborted by stop_agent.
+      // Always runs (in finally) so a thrown SDK call can't leave
+      // the registry permanently pinned.
+      const set = this.activeAborts.get(account.id);
+      if (set) {
+        set.delete(workerAbort);
+        if (set.size === 0) this.activeAborts.delete(account.id);
+      }
       // Dedupe the coalesce queue against UIDs the worker just
       // explicitly handled. If Vesper proactively `read_email`'d
       // UID 43 while running and a wake for UID 43 was queued

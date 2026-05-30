@@ -759,7 +759,7 @@ export const toolDefinitions = [
   },
   {
     name: 'stop_agent',
-    description: 'Soft-stop an agent mid-task WITHOUT deleting it. Sets the agent\'s `stopped` flag — the dispatcher then refuses to wake the agent for any reason (allowlists, To/Cc, task events all silently no-op). Mail STILL lands in the mailbox, so the email-thread audit trail is preserved. Use this instead of `delete_agent` when you want to halt a churning sub-agent partway through a task and keep the option to read the thread later or resume it. Resume with `resume_agent`. Requires master API key.',
+    description: 'HARD-stop an agent mid-task WITHOUT deleting it. Sets the agent\'s `stopped` flag and (0.9.29+) immediately ABORTS any in-flight worker for that agent — the running SDK call is killed via AbortController, any queued coalesced wakes are dropped, and any deferred rate-limit retries are cancelled. After the stop, the dispatcher refuses to wake the agent for any reason (allowlists, To/Cc, task events all silently no-op). Mail STILL lands in the mailbox, so the email-thread audit trail is preserved. Use this instead of `delete_agent` when you want to halt a churning sub-agent right now and keep the option to read the thread later or resume it. Resume with `resume_agent`. Requires master API key.',
     inputSchema: {
       type: 'object' as const,
       properties: {
