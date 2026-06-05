@@ -6068,6 +6068,26 @@ if (command === 'setup' && typeof process.argv[3] === 'string') {
 }
 
 switch (process.argv[2]) {
+  case 'startup':
+  case 'autostart': {
+    // Repair / verify the launchd plist so PM2 resurrects on
+    // boot. Delegates to scripts/ensure-pm2-startup.cjs which is
+    // the same helper the postinstall hook runs — single source
+    // of truth.
+    Promise.all([
+      import('node:child_process'),
+      import('node:path'),
+      import('node:url'),
+    ]).then(([cp, p, u]) => {
+      const here = p.dirname(u.fileURLToPath(import.meta.url));
+      const helper = p.join(here, '..', 'scripts', 'ensure-pm2-startup.cjs');
+      const child = cp.spawn(process.execPath,
+        [helper, ...process.argv.slice(3)],
+        { stdio: 'inherit' });
+      child.on('exit', (code) => process.exit(code ?? 0));
+    }).catch(err => { console.error(err); process.exit(1); });
+    break;
+  }
   case 'setup':
     cmdSetup().catch(err => { console.error(err); process.exit(1); });
     break;

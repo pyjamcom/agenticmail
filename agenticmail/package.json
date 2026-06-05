@@ -30,6 +30,8 @@
     "copy-public": "mkdir -p dist/public && cp -R ../packages/api/public/. dist/public/",
     "test": "vitest run --passWithNoTests",
     "preuninstall": "node scripts/uninstall.mjs",
+    "postinstall": "node scripts/ensure-pm2-startup.cjs --quiet || true",
+    "startup": "node scripts/ensure-pm2-startup.cjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
