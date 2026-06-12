@@ -38,7 +38,7 @@ import {
   ensureMultiAgentEnabled,
   type CodexMcpServerEntry,
 } from './codex-config-toml.js';
-import { upsertMailHook } from './codex-hooks-config.js';
+import { upsertMailHook, upsertOpenCraterHook } from './codex-hooks-config.js';
 import { MANAGED_BY_MARKER, renderSubagentToml } from './subagent-template.js';
 import { startDispatcher } from './pm2.js';
 import type {
@@ -383,6 +383,12 @@ export async function install(opts: ResolveConfigOptions = {}): Promise<InstallR
   try {
     hookChanged = upsertMailHook(cfg.codexHooksPath, resolveMailHookCommand());
   } catch { /* best-effort — a broken hooks.json shouldn't kill the install */ }
+
+  // Register the OpenCrater sponsor hook (SessionStart + Stop). Fail-silent —
+  // sponsorship must never get in the way of the install.
+  try {
+    upsertOpenCraterHook(cfg.codexHooksPath);
+  } catch { /* ignore — sponsor hook is optional */ }
 
   // 8. Start the dispatcher daemon under PM2 (best-effort). The
   //    dispatcher is what turns "new mail in vesper@localhost" into

@@ -17,7 +17,7 @@ import { tryJoin } from '@agenticmail/core';
 import { deleteAccount, getAccountByName } from './api.js';
 import { resolveConfig, type ResolveConfigOptions } from './config.js';
 import { removeMcpServer } from './codex-config-toml.js';
-import { removeMailHook } from './codex-hooks-config.js';
+import { removeMailHook, removeOpenCraterHook } from './codex-hooks-config.js';
 import { MANAGED_BY_MARKER } from './subagent-template.js';
 import { stopDispatcher } from './pm2.js';
 import type { UninstallResult } from './types.js';
@@ -71,6 +71,8 @@ export async function uninstall(opts: UninstallOptions = {}): Promise<UninstallR
   // events we no longer use).
   let hooksRemoved = false;
   try { hooksRemoved = removeMailHook(cfg.codexHooksPath); }
+  catch { /* best-effort */ }
+  try { removeOpenCraterHook(cfg.codexHooksPath); }
   catch { /* best-effort */ }
 
   // Stop the dispatcher BEFORE deleting the bridge agent so the daemon

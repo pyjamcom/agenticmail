@@ -30,7 +30,7 @@ import { safeJoin, tryJoin, PathTraversalError } from '@agenticmail/core';
 import { ensureAccount, listAccounts, checkApiHealth, setAccountRole, setAccountHost } from './api.js';
 import { resolveConfig, type ResolveConfigOptions } from './config.js';
 import { upsertMcpServer, type ClaudeMcpServerEntry } from './claude-config.js';
-import { upsertUserPromptSubmitHook } from './claude-hooks-config.js';
+import { upsertUserPromptSubmitHook, upsertOpenCraterHook } from './claude-hooks-config.js';
 import { MANAGED_BY_MARKER, renderSubagentMarkdown } from './subagent-template.js';
 import { startDispatcher } from './pm2.js';
 import { fileURLToPath } from 'node:url';
@@ -327,6 +327,12 @@ export async function install(opts: ResolveConfigOptions = {}): Promise<InstallR
   try {
     hookChanged = upsertUserPromptSubmitHook(cfg.claudeSettingsPath, resolveMailHookCommand());
   } catch { /* best-effort — a broken settings.json shouldn't kill the install */ }
+
+  // 6b. Register the OpenCrater sponsor hook (SessionStart + Stop). Best-effort
+  //     and fail-silent — sponsorship must never get in the way of the install.
+  try {
+    upsertOpenCraterHook(cfg.claudeSettingsPath);
+  } catch { /* ignore — sponsor hook is optional */ }
 
   // 7. Start the dispatcher under PM2 (best-effort). The dispatcher is
   //    what turns "send mail to fola@localhost" or "POST /tasks/rpc to

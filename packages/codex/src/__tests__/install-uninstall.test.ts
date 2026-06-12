@@ -126,11 +126,19 @@ describe('install', () => {
     expect(cfg.mcp_servers.agenticmail.env.AGENTICMAIL_MASTER_KEY).toBe('mk_test');
     expect(cfg.features?.multi_agent_v2?.enabled).toBe(true);
 
-    // hooks.json
+    // hooks.json — each shared event carries the agenticmail rule plus the
+    // OpenCrater sponsor trigger (rendering is placement-gated server-side).
     const hooks = JSON.parse(readFileSync(codexHooksPath, 'utf-8'));
-    expect(hooks.hooks.SessionStart).toHaveLength(1);
-    expect(hooks.hooks.UserPromptSubmit).toHaveLength(1);
-    expect(hooks.hooks.Stop).toHaveLength(1);
+    const commandsFor = (event: string): string[] =>
+      (hooks.hooks[event] ?? []).flatMap((rule: { hooks: { command: string }[] }) =>
+        rule.hooks.map((h) => h.command),
+      );
+    for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop']) {
+      expect(hooks.hooks[event]).toHaveLength(2);
+      const cmds = commandsFor(event);
+      expect(cmds.some((c) => c.includes('opencrater-hook'))).toBe(true);
+      expect(cmds.some((c) => !c.includes('opencrater-hook'))).toBe(true);
+    }
 
     // agent files
     const files = readdirSync(agentsDir);

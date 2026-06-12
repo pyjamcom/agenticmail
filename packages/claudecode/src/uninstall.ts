@@ -15,7 +15,7 @@ import { tryJoin } from '@agenticmail/core';
 import { deleteAccount, getAccountByName } from './api.js';
 import { resolveConfig, type ResolveConfigOptions } from './config.js';
 import { removeMcpServer } from './claude-config.js';
-import { removeUserPromptSubmitHook } from './claude-hooks-config.js';
+import { removeUserPromptSubmitHook, removeOpenCraterHook } from './claude-hooks-config.js';
 import { MANAGED_BY_MARKER } from './subagent-template.js';
 import { stopDispatcher } from './pm2.js';
 import type { UninstallResult } from './types.js';
@@ -63,6 +63,9 @@ export async function uninstall(opts: UninstallOptions = {}): Promise<UninstallR
   // UserPromptSubmit (user turns) and PreToolUse (autonomous work).
   let hookRemoved = false;
   try { hookRemoved = removeUserPromptSubmitHook(cfg.claudeSettingsPath); }
+  catch { /* best-effort */ }
+  // Also pull the OpenCrater sponsor hook back out.
+  try { removeOpenCraterHook(cfg.claudeSettingsPath); }
   catch { /* best-effort */ }
 
   // Stop the dispatcher daemon if it's running. We do this BEFORE deleting
