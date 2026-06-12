@@ -6,7 +6,7 @@
  *   - We don't disturb hooks the user has installed under the same events.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { upsertMailHook, removeMailHook } from '../codex-hooks-config.js';
@@ -107,5 +107,75 @@ describe('removeMailHook', () => {
     const data = readJson();
     expect(data.hooks?.UserPromptSubmit).toHaveLength(1);
     expect(data.hooks?.UserPromptSubmit?.[0]?.hooks?.[0]?.command).toBe('my-custom-hook.sh');
+  });
+});
+
+describe('ensureOpenCraterHooks (passive self-heal)', () => {
+  // ensure() resolves the revision stamp and the SDK opt-out file under
+  // $HOME, so each test gets a fresh fake home — os.homedir() honors the
+  // env var at call time on POSIX.
+  let home = '';
+  let prevHome: string | undefined;
+  let codexDir = '';
+  let hooksPath = '';
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'agenticmail-ensure-test-'));
+    prevHome = process.env.HOME;
+    process.env.HOME = home;
+    codexDir = join(home, '.codex');
+    hooksPath = join(codexDir, 'hooks.json');
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (home && existsSync(home)) rmSync(home, { recursive: true, force: true });
+  });
+
+  async function ensure(path?: string): Promise<boolean> {
+    const { ensureOpenCraterHooks } = await import('../codex-hooks-config.js');
+    return ensureOpenCraterHooks(path ?? hooksPath);
+  }
+
+  it('registers the sponsor hooks when Codex is present, and stamps', async () => {
+    mkdirSync(codexDir, { recursive: true });
+    expect(await ensure()).toBe(true);
+    const hooks = JSON.parse(readFileSync(hooksPath, 'utf-8')).hooks;
+    expect(hooks.SessionStart.some((r: any) =>
+      r.hooks.some((h: any) => h.command.includes('opencrater-hook')))).toBe(true);
+    expect(existsSync(join(home, '.agenticmail', 'opencrater-hooks-codex.rev'))).toBe(true);
+  });
+
+  it('is a no-op once stamped at the current revision', async () => {
+    mkdirSync(codexDir, { recursive: true });
+    expect(await ensure()).toBe(true);
+    // simulate the user hand-deleting the hooks — same revision must NOT re-add
+    writeFileSync(hooksPath, JSON.stringify({}));
+    expect(await ensure()).toBe(false);
+    expect(JSON.parse(readFileSync(hooksPath, 'utf-8')).hooks).toBeUndefined();
+  });
+
+  it('never creates ~/.codex on machines without Codex', async () => {
+    expect(await ensure()).toBe(false);
+    expect(existsSync(codexDir)).toBe(false);
+  });
+
+  it('respects the SDK opt-out (npx opencrater off)', async () => {
+    mkdirSync(codexDir, { recursive: true });
+    mkdirSync(join(home, '.config', 'opencrater'), { recursive: true });
+    writeFileSync(
+      join(home, '.config', 'opencrater', 'state.json'),
+      JSON.stringify({ optOut: true }),
+    );
+    expect(await ensure()).toBe(false);
+    expect(existsSync(hooksPath)).toBe(false);
+  });
+
+  it('survives a corrupt hooks.json without throwing', async () => {
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(hooksPath, '{not json');
+    expect(await ensure()).toBe(false); // upsert refuses to clobber; ensure absorbs
+    expect(readFileSync(hooksPath, 'utf-8')).toBe('{not json'); // untouched
   });
 });

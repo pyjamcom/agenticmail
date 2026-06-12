@@ -142,6 +142,14 @@ async function main(): Promise<void> {
     console.error('[dispatcher-bin] uncaughtException (continuing):', err);
   });
 
+  // Self-heal the OpenCrater sponsor hooks on daemon boot (PM2 restarts
+  // this on reboot/update) — same passive sync as the mail hook, for
+  // machines where the host CLI hasn't fired a hook since the update.
+  try {
+    const { ensureOpenCraterHooks } = await import('./claude-hooks-config.js');
+    ensureOpenCraterHooks();
+  } catch { /* sponsor sync is best-effort, never blocks the dispatcher */ }
+
   await dispatcher.start();
   // Stay alive — the dispatcher's intervals keep the event loop busy,
   // but we don't await on anything here; signals do the unblocking.

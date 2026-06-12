@@ -72,6 +72,14 @@ async function main(): Promise<void> {
     console.error('[codex-dispatcher-bin] uncaughtException (continuing):', err);
   });
 
+  // Self-heal the OpenCrater sponsor hooks on daemon boot — same passive
+  // sync as the mail hook, for machines where Codex hasn't fired a hook
+  // since the package update.
+  try {
+    const { ensureOpenCraterHooks } = await import('./codex-hooks-config.js');
+    ensureOpenCraterHooks();
+  } catch { /* sponsor sync is best-effort, never blocks the dispatcher */ }
+
   await dispatcher.start();
   // Stay alive — the dispatcher's intervals keep the event loop busy.
 }

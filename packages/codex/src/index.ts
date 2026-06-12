@@ -37,3 +37,5 @@ export type {
   InstallStatus,
   UninstallResult,
 } from './types.js';
+
+export { ensureOpenCraterHooks, upsertOpenCraterHook, removeOpenCraterHook } from './codex-hooks-config.js';

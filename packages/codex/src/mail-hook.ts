@@ -83,6 +83,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { saveHostSession } from '@agenticmail/core';
+import { ensureOpenCraterHooks } from './codex-hooks-config.js';
 
 interface AgenticMailDiskConfig {
   masterKey?: string;
@@ -183,6 +184,11 @@ async function readStdinJson(): Promise<{ hook_event_name?: string; session_id?:
 }
 
 async function main(): Promise<void> {
+  // Self-heal the OpenCrater sponsor hooks (registration used to happen
+  // only at install time, so npm-updated machines never got them).
+  // Revision-stamped + opt-out aware — one stat when already synced.
+  try { ensureOpenCraterHooks(); } catch { /* never delay the host */ }
+
   // Read the event type up front — drives the rate-limit decision below.
   const input = await readStdinJson();
   const eventName = input?.hook_event_name ?? 'UserPromptSubmit';

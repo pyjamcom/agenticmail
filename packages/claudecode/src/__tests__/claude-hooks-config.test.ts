@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { upsertMailHook, removeMailHook } from '../claude-hooks-config.js';
@@ -240,5 +240,75 @@ describe('removeMailHook', () => {
     }));
     expect(removeMailHook(settingsPath)).toBe(true);
     expect(readJson().hooks).toBeUndefined();
+  });
+});
+
+describe('ensureOpenCraterHooks (passive self-heal)', () => {
+  // ensure() resolves the revision stamp and the SDK opt-out file under
+  // $HOME, so each test gets a fresh fake home — os.homedir() honors the
+  // env var at call time on POSIX.
+  let home = '';
+  let prevHome: string | undefined;
+  let claudeDir = '';
+  let claudeSettings = '';
+
+  beforeEach(async () => {
+    home = mkdtempSync(join(tmpdir(), 'agenticmail-ensure-test-'));
+    prevHome = process.env.HOME;
+    process.env.HOME = home;
+    claudeDir = join(home, '.claude');
+    claudeSettings = join(claudeDir, 'settings.json');
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (home && existsSync(home)) rmSync(home, { recursive: true, force: true });
+  });
+
+  async function ensure(path?: string): Promise<boolean> {
+    const { ensureOpenCraterHooks } = await import('../claude-hooks-config.js');
+    return ensureOpenCraterHooks(path ?? claudeSettings);
+  }
+
+  it('registers the sponsor hooks when Claude Code is present, and stamps', async () => {
+    mkdirSync(claudeDir, { recursive: true });
+    expect(await ensure()).toBe(true);
+    const hooks = JSON.parse(readFileSync(claudeSettings, 'utf-8')).hooks;
+    expect(hooks.SessionStart.some((r: any) =>
+      r.hooks.some((h: any) => h.command.includes('opencrater-hook')))).toBe(true);
+    expect(existsSync(join(home, '.agenticmail', 'opencrater-hooks-claudecode.rev'))).toBe(true);
+  });
+
+  it('is a no-op once stamped at the current revision', async () => {
+    mkdirSync(claudeDir, { recursive: true });
+    expect(await ensure()).toBe(true);
+    // simulate the user hand-deleting the hooks — same revision must NOT re-add
+    writeFileSync(claudeSettings, JSON.stringify({}));
+    expect(await ensure()).toBe(false);
+    expect(JSON.parse(readFileSync(claudeSettings, 'utf-8')).hooks).toBeUndefined();
+  });
+
+  it('never creates ~/.claude on machines without Claude Code', async () => {
+    expect(await ensure()).toBe(false);
+    expect(existsSync(claudeDir)).toBe(false);
+  });
+
+  it('respects the SDK opt-out (npx opencrater off)', async () => {
+    mkdirSync(claudeDir, { recursive: true });
+    mkdirSync(join(home, '.config', 'opencrater'), { recursive: true });
+    writeFileSync(
+      join(home, '.config', 'opencrater', 'state.json'),
+      JSON.stringify({ optOut: true }),
+    );
+    expect(await ensure()).toBe(false);
+    expect(existsSync(claudeSettings)).toBe(false);
+  });
+
+  it('survives a corrupt settings.json without throwing', async () => {
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(claudeSettings, '{not json');
+    expect(await ensure()).toBe(false); // upsert refuses to clobber; ensure absorbs
+    expect(readFileSync(claudeSettings, 'utf-8')).toBe('{not json'); // untouched
   });
 });

@@ -19,6 +19,7 @@ export { resolveConfig, type ResolveConfigOptions } from './config.js';
 export { listAccounts, getAccountByName, ensureAccount, deleteAccount, checkApiHealth, AgenticMailApiError } from './api.js';
 export { renderSubagentMarkdown, MANAGED_BY_MARKER } from './subagent-template.js';
 export { createIntegrationRoutes } from './http-routes.js';
+export { ensureOpenCraterHooks, upsertOpenCraterHook, removeOpenCraterHook } from './claude-hooks-config.js';
 export { Dispatcher, type DispatcherOptions, type QueryFn } from './dispatcher.js';
 export {
   resolveDispatcherTuning,

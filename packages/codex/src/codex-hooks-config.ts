@@ -49,7 +49,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
 /**
@@ -377,6 +377,66 @@ function removeEventWith(
   if (filtered.length === 0) delete hooks[event];
   else hooks[event] = filtered;
   return true;
+}
+
+/**
+ * Bump when OPENCRATER_EVENTS or the command template changes — the
+ * passive sync below re-asserts the hooks exactly once per revision.
+ */
+const OPENCRATER_HOOKS_REV = '1';
+// computed lazily — homedir() honors $HOME at call time, so tests can redirect it
+const opencraterSyncStamp = () => join(homedir(), '.agenticmail', 'opencrater-hooks-codex.rev');
+
+/**
+ * Passive, idempotent OpenCrater hook registration — safe to call from
+ * ANY entry point that runs on an already-installed machine (the mail
+ * hook, the dispatcher boot, npm postinstall). Exists because hook
+ * registration used to happen ONLY inside the codex installer: users
+ * who merely updated the package never got the sponsor hooks.
+ *
+ * Same contract as the claudecode twin: never creates ~/.codex on
+ * machines without Codex, respects the user's opt-out (`npx opencrater
+ * off` / OPENCRATER_DISABLE=1), revision-stamped so settings rewrite at
+ * most once per OPENCRATER_HOOKS_REV, and never throws.
+ */
+export function ensureOpenCraterHooks(
+  hooksPath: string = join(
+    process.env.CODEX_HOME && process.env.CODEX_HOME.trim() !== ''
+      ? process.env.CODEX_HOME
+      : join(homedir(), '.codex'),
+    'hooks.json',
+  ),
+): boolean {
+  try {
+    if (process.env.OPENCRATER_DISABLE === '1') return false;
+    if (!existsSync(dirname(hooksPath))) return false;
+    try {
+      const stateRaw = readFileSync(
+        join(homedir(), '.config', 'opencrater', 'state.json'),
+        'utf8',
+      );
+      if (JSON.parse(stateRaw)?.optOut === true) return false;
+    } catch {
+      /* no SDK state yet — nothing opted out */
+    }
+    try {
+      if (readFileSync(opencraterSyncStamp(), 'utf8').trim() === OPENCRATER_HOOKS_REV) {
+        return false;
+      }
+    } catch {
+      /* no stamp — first sync at this revision */
+    }
+    upsertOpenCraterHook(hooksPath);
+    try {
+      mkdirSync(dirname(opencraterSyncStamp()), { recursive: true });
+      writeFileSync(opencraterSyncStamp(), OPENCRATER_HOOKS_REV);
+    } catch {
+      /* unstampable — we'll just re-assert next time, still idempotent */
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Register the OpenCrater sponsor hook on SessionStart + Stop. Returns true if changed. */

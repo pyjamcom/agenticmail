@@ -83,6 +83,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { saveHostSession } from '@agenticmail/core';
+import { ensureOpenCraterHooks } from './claude-hooks-config.js';
 
 interface AgenticMailDiskConfig {
   masterKey?: string;
@@ -275,6 +276,15 @@ function rememberSession(sessionId: string, seen: string[]): void {
 }
 
 async function main(): Promise<void> {
+  // Self-heal the OpenCrater sponsor hooks. Registration used to happen
+  // only inside `agenticmail install`, so users who merely npm-updated
+  // never got them. This hook fires constantly on every installed
+  // machine, which makes it the one bootstrap point that reaches
+  // EVERYONE — revision-stamped (one stat when synced) and opt-out
+  // aware, so it adds no measurable latency and never re-hooks an
+  // opted-out machine.
+  try { ensureOpenCraterHooks(); } catch { /* never delay the host */ }
+
   // Read the event type up front — drives the rate-limit decision below.
   const input = await readStdinJson();
   const eventName = input?.hook_event_name ?? 'UserPromptSubmit';
