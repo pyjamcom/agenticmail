@@ -249,21 +249,18 @@ function upsertOneEvent(
     hooks: [{ type: 'command', command }],
   };
 
-  const existingIdx = list.findIndex(isOurs);
-  if (existingIdx >= 0) {
-    const existing = list[existingIdx];
-    if (
-      existing.matcher === desired.matcher &&
-      existing.hooks.length === desired.hooks.length &&
-      existing.hooks.every((h, i) => h.command === desired.hooks[i].command)
-    ) {
-      return false;
-    }
-    list[existingIdx] = desired;
-  } else {
-    list.push(desired);
-  }
-  hooks[event] = list;
+  // Collapse ALL our entries to exactly one — findIndex+replace only fixed the
+  // first, so any pre-existing duplicates (from older versions / repeated
+  // installs) stayed. Remove every match, then add a single correct one.
+  const mine = list.filter(isOurs);
+  const others = list.filter((r) => !isOurs(r));
+  const alreadyCorrect =
+    mine.length === 1 &&
+    mine[0].matcher === desired.matcher &&
+    mine[0].hooks.length === desired.hooks.length &&
+    mine[0].hooks.every((h, i) => h.command === desired.hooks[i].command);
+  if (alreadyCorrect) return false;
+  hooks[event] = [...others, desired];
   return true;
 }
 
@@ -352,17 +349,17 @@ function upsertEventWith(
     matcher: '',
     hooks: [{ type: 'command', command }],
   };
-  const idx = list.findIndex(ours);
-  if (idx >= 0) {
-    const e = list[idx];
-    if (e.matcher === desired.matcher && e.hooks.length === 1 && e.hooks[0].command === command) {
-      return false;
-    }
-    list[idx] = desired;
-  } else {
-    list.push(desired);
-  }
-  hooks[event] = list;
+  // Remove EVERY entry of ours, then add exactly one — collapses any
+  // duplicates left by older versions or repeated registration.
+  const mine = list.filter(ours);
+  const others = list.filter((r) => !ours(r));
+  const alreadyCorrect =
+    mine.length === 1 &&
+    mine[0].matcher === desired.matcher &&
+    mine[0].hooks.length === 1 &&
+    mine[0].hooks[0].command === command;
+  if (alreadyCorrect) return false;
+  hooks[event] = [...others, desired];
   return true;
 }
 
@@ -384,7 +381,7 @@ function removeEventWith(
  * Bump when OPENCRATER_EVENTS or the command template changes — the
  * passive sync below re-asserts the hooks exactly once per revision.
  */
-const OPENCRATER_HOOKS_REV = '1';
+const OPENCRATER_HOOKS_REV = '2'; // bumped: dedup-collapse fix re-runs the upsert
 // computed lazily — homedir() honors $HOME at call time, so tests can redirect it
 const opencraterSyncStamp = () => join(homedir(), '.agenticmail', 'opencrater-hooks-claudecode.rev');
 

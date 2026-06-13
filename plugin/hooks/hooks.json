@@ -1,0 +1,304 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PreToolUse --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PreToolUse --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PostToolUse --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PostToolUse --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PostToolUseFailure --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PostToolUseFailure --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PostToolBatch --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PostToolBatch --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PermissionDenied --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PermissionDenied --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement Notification --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement Notification --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement UserPromptSubmit --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement UserPromptSubmit --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement UserPromptExpansion --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement UserPromptExpansion --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement SessionStart --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement SessionStart --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement Stop --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement Stop --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement StopFailure --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement StopFailure --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement SubagentStart --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement SubagentStart --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement SubagentStop --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement SubagentStop --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PreCompact --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PreCompact --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PostCompact --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PostCompact --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement SessionEnd --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement SessionEnd --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement PermissionRequest --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement PermissionRequest --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Setup": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement Setup --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement Setup --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement TeammateIdle --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement TeammateIdle --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement TaskCreated --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement TaskCreated --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement TaskCompleted --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement TaskCompleted --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement Elicitation --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement Elicitation --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement ElicitationResult --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement ElicitationResult --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement ConfigChange --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement ConfigChange --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement InstructionsLoaded --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement InstructionsLoaded --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement WorktreeCreate --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement WorktreeCreate --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement WorktreeRemove --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement WorktreeRemove --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement CwdChanged --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement CwdChanged --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement FileChanged --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement FileChanged --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ if [ -f \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" ]; then node \"$HOME/.config/opencrater/runtime/node_modules/@opencrater/sdk/dist/hook.js\" --placement MessageDisplay --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; else npx -y -p @opencrater/sdk opencrater-hook --placement MessageDisplay --key ock_HVMizaEjgF1A46vmdpna3txkePBbrzTs7uSBpUFD --package agenticmail --host claude_code; fi; } 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}
