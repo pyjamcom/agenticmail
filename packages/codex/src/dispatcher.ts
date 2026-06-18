@@ -55,6 +55,7 @@ import {
   ThreadCache,
   AgentMemoryStore,
   forgetHostSession,
+  getOperatorEmail,
   loadHostSession,
   normalizeSubject,
   planBridgeWake,
@@ -119,6 +120,21 @@ function extractFrom(event: SSEEvent): string | undefined {
     if (first?.name) return first.name;
   }
   return undefined;
+}
+
+/**
+ * Domains whose senders are internal teammate agents on THIS instance,
+ * for the bridge-wake sender gate (GHSA-fq4x-789w-jg5h). Teammates share
+ * the bridge agent's own mail domain, so we derive it from the bridge
+ * account's email and always include `localhost` (the default local
+ * deployment domain). Mail from any other domain is external and must not
+ * trigger a privileged resume unless it matches the configured operator.
+ */
+function localBridgeDomains(bridgeEmail: string | undefined): string[] {
+  const domain = bridgeEmail?.split('@')[1]?.trim().toLowerCase();
+  const domains = ['localhost'];
+  if (domain && !domains.includes(domain)) domains.push(domain);
+  return domains;
 }
 
 /**
@@ -2270,7 +2286,21 @@ export class Dispatcher {
       const route = planBridgeWake({
         session: saved,
         mail: { bridgeName: account.name, uid: event.uid, subject, from, preview },
+        operatorEmail: getOperatorEmail(),
+        localDomains: localBridgeDomains(account.email),
       });
+      if (route.action === 'skip-untrusted') {
+        // Security gate (GHSA-fq4x-789w-jg5h / CWE-306): the sender is neither
+        // the configured operator nor an internal teammate, so we must NOT
+        // resume the operator's privileged session on attacker-controlled
+        // mail. The message is already in the inbox; the operator surfaces it
+        // themselves on their next keystroke.
+        this.log('warn', `[bridge-wake] skip — untrusted sender "${from ?? '(unknown)'}" for uid=${event.uid}; refusing privileged resume`);
+        this.postActivity('/dispatcher/bridge-skipped', {
+          uid: event.uid, agentName: account.name, reason: route.reason,
+        });
+        return;
+      }
       if (route.action === 'skip-live') {
         this.log('info', `[bridge-wake] skip — operator is live (lastSeen=${route.ageMs}ms ago); their hook will surface uid=${event.uid}`);
         this.postActivity('/dispatcher/bridge-skipped', {

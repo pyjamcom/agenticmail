@@ -384,6 +384,7 @@ export {
   bridgeWakeLastSeenAgeMs,
   classifyResumeError,
   composeBridgeWakePrompt,
+  isTrustedBridgeWakeSender,
   planBridgeWake,
   shouldSkipBridgeWakeForLiveOperator,
   type BridgeWakeError,
@@ -391,6 +392,7 @@ export {
   type BridgeWakePromptArgs,
   type BridgeWakeResult,
   type BridgeWakeRoute,
+  type BridgeWakeSenderAuthArgs,
   type PlanBridgeWakeArgs,
   type ResumeErrorClassificationOptions,
 } from './host-bridge.js';

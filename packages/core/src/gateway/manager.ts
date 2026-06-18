@@ -22,6 +22,7 @@ import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import type { SendMailOptions, SendResult, ParsedEmail, AddressInfo, ParsedAttachment } from '../mail/types.js';
 import type { SendResultWithRaw } from '../mail/sender.js';
 import { scoreEmail } from '../mail/spam-filter.js';
+import { isOperatorReplySender } from '../phone/realtime-tools.js';
 import type { StalwartAdmin } from '../stalwart/admin.js';
 import type { AccountManager } from '../accounts/manager.js';
 import type { Agent, AgentRole } from '../accounts/types.js';
@@ -274,6 +275,23 @@ export class GatewayManager {
       if (row) break;
     }
     if (!row) return false;
+
+    // Sender authentication (GHSA-fq4x-789w-jg5h, same root cause / CWE-306):
+    // the In-Reply-To / notification_message_id is only a correlation token —
+    // it rides in plaintext headers and is NOT a secret. Releasing a held
+    // outbound email is a privileged effect, so honour an "approve"/"reject"
+    // reply ONLY when its `From` matches the configured owner (the address
+    // the approval notification was sent to). Fail-closed: with no owner
+    // relay email configured, nobody is trusted and the reply is inert —
+    // mirroring the operator-query email-reply sibling.
+    const ownerEmail = this.config.relay?.email;
+    if (!isOperatorReplySender(mail.from, ownerEmail)) {
+      console.warn(
+        `[GatewayManager] approval reply for ${row.id} rejected — `
+        + `sender "${mail.from || '(unknown)'}" is not the configured owner`,
+      );
+      return false;
+    }
 
     // Parse the reply body for approval/rejection keywords
     const body = (mail.text || '').trim();

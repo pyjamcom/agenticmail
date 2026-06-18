@@ -1,5 +1,6 @@
 import {
   bridgeWakeLastSeenAgeMs,
+  getOperatorEmail,
   loadHostSession,
   planBridgeWake,
   type BridgeMailContext,
@@ -26,6 +27,7 @@ export interface OpenClawBridgeWakeArgs {
 export type OpenClawBridgeWakeOutcome =
   | { handled: true; action: 'duplicate'; uid: number }
   | { handled: true; action: 'skip-live'; uid: number; ageMs: number }
+  | { handled: true; action: 'skip-untrusted'; uid: number }
   | { handled: true; action: 'escalate'; uid: number; reason: 'no-fresh-session' | 'wake-unavailable' }
   | { handled: true; action: 'wake-queued'; uid: number; sessionKey: string };
 
@@ -59,7 +61,22 @@ export async function handleOpenClawBridgeWake(args: OpenClawBridgeWakeArgs): Pr
   try {
     const mail = buildOpenClawBridgeMailContext(args.email, uid);
     const session = args.loadSession ? args.loadSession() : loadHostSession('openclaw');
-    const route = planBridgeWake({ session, mail, nowMs: args.nowMs });
+    const route = planBridgeWake({
+      session,
+      mail,
+      nowMs: args.nowMs,
+      operatorEmail: getOperatorEmail(),
+      // OpenClaw bridge is openclaw@localhost; teammates share `localhost`.
+      localDomains: ['localhost'],
+    });
+
+    if (route.action === 'skip-untrusted') {
+      // Security gate (GHSA-fq4x-789w-jg5h / CWE-306): untrusted external
+      // sender — never resume the operator's privileged session on attacker-
+      // controlled mail. The message is still delivered to the inbox.
+      args.log?.warn?.(`[agenticmail] bridge wake skipped; untrusted sender "${mail.from ?? '(unknown)'}" for UID ${uid}`);
+      return { handled: true, action: 'skip-untrusted', uid };
+    }
 
     if (route.action === 'skip-live') {
       args.log?.info?.(`[agenticmail] bridge wake skipped; operator live (lastSeen=${route.ageMs}ms)`);
