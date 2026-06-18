@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { MailSender, type AccountManager, type AgenticMailConfig, type Database } from '@agenticmail/core';
 import { requireAgent, requireAuth, touchActivity } from '../middleware/auth.js';
@@ -9,6 +9,26 @@ import { validate as validateSchema, type Schema } from '../lib/schema-validator
 // Promise-based RPC completion notification — resolves the long-poll instantly
 // when the target agent submits the task result, instead of relying on polling.
 const rpcResolvers = new Map<string, (row: { status: string; result?: string; error?: string }) => void>();
+
+/**
+ * Authorization for a single task (GHSA-hjwc-26pj-v3pm, CWE-639/862).
+ *
+ * The task ID is NOT a bearer capability: it leaks to unrelated agents
+ * through `GET /tasks/pending?assignee=<name>` and `/accounts/directory`,
+ * so "knowing the ID" must not, by itself, grant read/claim/complete/fail.
+ * A caller may act on a task only when they are the master, the agent the
+ * task was assigned to, or the agent that assigned it.
+ */
+function callerOwnsTask(
+  req: Request,
+  task: { assigner_id?: string; assignee_id?: string } | undefined | null,
+): boolean {
+  if (!task) return false;
+  if (req.isMaster) return true;
+  const callerId = req.agent?.id;
+  if (!callerId) return false;
+  return callerId === task.assigner_id || callerId === task.assignee_id;
+}
 
 export function createTaskRoutes(db: Database, accountManager: AccountManager, config: AgenticMailConfig): Router {
   const router = Router();
@@ -88,14 +108,23 @@ export function createTaskRoutes(db: Database, accountManager: AccountManager, c
   });
 
   // Get tasks assigned TO current agent (pending)
-  // Supports ?assignee=name to check tasks for a different agent (e.g., sub-agent checking parent's tasks)
+  // Supports ?assignee=name ONLY for the caller's own identity (e.g. a
+  // sub-agent running under the parent's API key naming the parent). Listing
+  // another agent's queue by name is an authorization bypass — it discloses
+  // that agent's task IDs + payloads (GHSA-hjwc-26pj-v3pm), so it is refused
+  // unless the caller holds the master key.
   router.get('/tasks/pending', requireAgent, async (req, res, next) => {
     try {
       let assigneeId = req.agent!.id;
       const assigneeName = req.query.assignee as string | undefined;
       if (assigneeName) {
         const target = await accountManager.getByName(assigneeName);
-        if (target) assigneeId = target.id;
+        if (!target) { res.status(404).json({ error: `Agent "${assigneeName}" not found` }); return; }
+        if (target.id !== req.agent!.id && !req.isMaster) {
+          res.status(403).json({ error: 'Not authorized to view another agent\'s tasks' });
+          return;
+        }
+        assigneeId = target.id;
       }
       const rows = db.prepare(
         "SELECT * FROM agent_tasks WHERE assignee_id = ? AND status IN ('pending', 'claimed') ORDER BY created_at ASC"
@@ -116,10 +145,13 @@ export function createTaskRoutes(db: Database, accountManager: AccountManager, c
   });
 
   // Claim a task (pending → claimed)
-  // Capability-based: any authenticated agent that knows the task ID can claim it.
-  // This supports OpenClaw sub-agents claiming tasks assigned to their parent.
+  // Authorized to the task's assignee / assigner / master only — the task ID
+  // is not a bearer capability (GHSA-hjwc-26pj-v3pm). Sub-agents that run
+  // under their parent's API key still qualify (same agent id).
   router.post('/tasks/:id/claim', requireAgent, async (req, res, next) => {
     try {
+      const existing = db.prepare('SELECT assigner_id, assignee_id FROM agent_tasks WHERE id = ?').get(req.params.id) as any;
+      if (!callerOwnsTask(req, existing)) { res.status(404).json({ error: 'Task not found' }); return; }
       const result = db.prepare(
         "UPDATE agent_tasks SET status = 'claimed', claimed_at = datetime('now') WHERE id = ? AND status = 'pending'"
       ).run(req.params.id);
@@ -131,7 +163,7 @@ export function createTaskRoutes(db: Database, accountManager: AccountManager, c
   });
 
   // Submit task result (claimed → completed)
-  // Capability-based: any authenticated agent that knows the task ID can submit.
+  // Authorized to the task's assignee / assigner / master only (GHSA-hjwc-26pj-v3pm).
   router.post('/tasks/:id/result', requireAgent, async (req, res, next) => {
     try {
       const { result } = req.body || {};
@@ -142,7 +174,8 @@ export function createTaskRoutes(db: Database, accountManager: AccountManager, c
       // 400 with a flat error list — workers re-read the task,
       // see the errors, and retry with a corrected shape rather
       // than the task hanging forever.
-      const taskRow = db.prepare('SELECT output_schema FROM agent_tasks WHERE id = ?').get(req.params.id) as { output_schema?: string } | undefined;
+      const taskRow = db.prepare('SELECT assigner_id, assignee_id, output_schema FROM agent_tasks WHERE id = ?').get(req.params.id) as { assigner_id?: string; assignee_id?: string; output_schema?: string } | undefined;
+      if (!callerOwnsTask(req, taskRow)) { res.status(404).json({ error: 'Task not found' }); return; }
       if (taskRow?.output_schema) {
         let schema: Schema | undefined;
         try { schema = JSON.parse(taskRow.output_schema) as Schema; } catch { /* stored schema is corrupt — skip validation */ }
@@ -182,6 +215,8 @@ export function createTaskRoutes(db: Database, accountManager: AccountManager, c
   // Saves a round-trip: no need for separate claim then submit.
   router.post('/tasks/:id/complete', requireAgent, async (req, res, next) => {
     try {
+      const existing = db.prepare('SELECT assigner_id, assignee_id FROM agent_tasks WHERE id = ?').get(req.params.id) as any;
+      if (!callerOwnsTask(req, existing)) { res.status(404).json({ error: 'Task not found' }); return; }
       const { result } = req.body || {};
       const resultJson = JSON.stringify(result ?? null);
       const dbResult = db.prepare(
@@ -211,9 +246,11 @@ export function createTaskRoutes(db: Database, accountManager: AccountManager, c
   });
 
   // Fail a task (claimed → failed)
-  // Capability-based: any authenticated agent that knows the task ID can fail it.
+  // Authorized to the task's assignee / assigner / master only (GHSA-hjwc-26pj-v3pm).
   router.post('/tasks/:id/fail', requireAgent, async (req, res, next) => {
     try {
+      const existing = db.prepare('SELECT assigner_id, assignee_id FROM agent_tasks WHERE id = ?').get(req.params.id) as any;
+      if (!callerOwnsTask(req, existing)) { res.status(404).json({ error: 'Task not found' }); return; }
       const { error } = req.body || {};
       const errorMsg = error || 'Unknown error';
       const dbResult = db.prepare(
@@ -233,11 +270,13 @@ export function createTaskRoutes(db: Database, accountManager: AccountManager, c
     } catch (err) { next(err); }
   });
 
-  // Get task details
+  // Get task details — assignee / assigner / master only. The task ID is not
+  // a bearer capability, so unrelated agents must not read payloads/results
+  // even with a valid ID (GHSA-hjwc-26pj-v3pm).
   router.get('/tasks/:id', requireAuth, async (req, res, next) => {
     try {
       const task = db.prepare('SELECT * FROM agent_tasks WHERE id = ?').get(req.params.id) as any;
-      if (!task) { res.status(404).json({ error: 'Task not found' }); return; }
+      if (!callerOwnsTask(req, task)) { res.status(404).json({ error: 'Task not found' }); return; }
       res.json(parseTask(task));
     } catch (err) { next(err); }
   });
