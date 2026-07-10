@@ -352,6 +352,15 @@ test('sales instructions expose only the active service playbook after routing',
   assert.match(paymentPrompt, /Service topic: payment_agent/);
   assert.match(paymentPrompt, /сумму в рублях/);
   assert.doesNotMatch(paymentPrompt, /POL\/POD/);
+
+  const vehiclePrompt = sidecar.buildInstructions({
+    direction: 'inbound',
+    loadedSkills: [],
+    specialistRoute: { relationship: 'new_customer', requestType: 'service', serviceTopic: 'vehicle_customs' },
+  });
+  assert.match(vehiclePrompt, /мотоцикл/u);
+  assert.match(vehiclePrompt, /sales@nbr\.ru/u);
+  assert.match(vehiclePrompt, /sales собака nbr точка ru/u);
 });
 
 test('direct SIP tools can search and load an installed conversation skill', async () => {
@@ -429,6 +438,16 @@ test('configured company context is required and included in direct SIP instruct
   });
   assert.equal(instructions.includes('# Approved company runtime context'), true);
   assert.equal(instructions.includes('Verified service fact.'), true);
+  const health = sidecar.health();
+  assert.deepEqual(health.voice, {
+    provider: 'openai',
+    model: 'gpt-realtime-2.1',
+    name: 'marin',
+    language: 'ru',
+    persona: 'Елена',
+    personaGender: 'female',
+  });
+  assert.equal(health.salesScenario.detailedRequestEmail, 'sales@nbr.ru');
 });
 
 test('transcript fallback spool is encrypted and can be replayed', async (t) => {
