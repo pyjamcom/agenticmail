@@ -1,7 +1,7 @@
 /**
  * OpenAI Realtime — the original, baseline voice-runtime provider.
  *
- * Wire protocol: the GA `gpt-realtime` WebSocket spec. session.update,
+ * Wire protocol: the GA Realtime WebSocket spec. session.update,
  * response.create, conversation.item.input_audio_transcription.completed,
  * input_audio_buffer.append, etc.
  *
@@ -12,9 +12,9 @@ import { registerVoiceProvider } from './registry.js';
 
 registerVoiceProvider({
   id: 'openai',
-  displayName: 'OpenAI Realtime (gpt-realtime)',
+  displayName: 'OpenAI Realtime (gpt-realtime-2.1)',
   websocketBaseUrl: 'wss://api.openai.com/v1/realtime',
-  defaultModel: 'gpt-realtime',
+  defaultModel: 'gpt-realtime-2.1',
   apiKeyEnvVar: 'OPENAI_API_KEY',
   // Legacy: the original config.json schema used a dedicated
   // `openaiApiKey` field for this key. The resolver checks that field
@@ -22,7 +22,7 @@ registerVoiceProvider({
   // continue to work without migration.
   apiKeyConfigField: 'openaiApiKey',
   description:
-    'OpenAI Realtime (gpt-realtime). Default voice runtime; supports linear PCM @ 24 kHz '
+    'OpenAI Realtime (gpt-realtime-2.1). Default voice runtime; supports linear PCM @ 24 kHz '
     + '(46elks) and G.711 µ-law @ 8 kHz (Twilio) without transcoding.',
   // v0.9.95 — voice catalogue. Names match what the Realtime session
   // accepts under `audio.output.voice`. `marin` and `cedar` are the

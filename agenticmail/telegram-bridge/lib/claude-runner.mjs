@@ -65,7 +65,7 @@ export function sessionExists(sessionId) {
 }
 
 /**
- * Load the Anthropic OAuth bearer for the bridge's spawned `claude` runs.
+ * Load the Anthropic API key or OAuth bearer for spawned `claude` runs.
  *
  * Lookup order — first hit wins:
  *   1. The bridge's own token file at
@@ -76,8 +76,8 @@ export function sessionExists(sessionId) {
  *      `~/.agenticmail/anthropic-token` — also operator-owned, shared
  *      with the claudecode dispatcher so a single token grants both
  *      paths without copying.
- *   3. The standard `ANTHROPIC_AUTH_TOKEN` env var (typical pm2
- *      ecosystem.config.cjs setup).
+ *   3. The standard `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`
+ *      env var (typical pm2 ecosystem.config.cjs setup).
  *
  * Returns { token, source } so the bridge can log which source it
  * picked — stale env tokens are otherwise hard to diagnose in pm2.
@@ -95,6 +95,9 @@ export function loadAnthropicToken() {
   if (process.env.ANTHROPIC_AUTH_TOKEN) {
     return { token: process.env.ANTHROPIC_AUTH_TOKEN, source: 'env' };
   }
+  if (process.env.ANTHROPIC_API_KEY) {
+    return { token: process.env.ANTHROPIC_API_KEY, source: 'env' };
+  }
   return { token: null, source: null };
 }
 
@@ -104,7 +107,7 @@ export function loadAnthropicToken() {
  * @param {object} opts
  * @param {string} opts.prompt            The Telegram-message-as-prompt
  * @param {string} opts.sessionId         Per-sender session UUID
- * @param {string} opts.anthropicToken    OAuth bearer from `loadAnthropicToken`
+ * @param {string} opts.anthropicToken    API key or OAuth bearer from `loadAnthropicToken`
  * @param {number} [opts.timeoutMs]       Hard kill timeout (default 10min — Telegram users won't wait longer)
  * @param {string} [opts.sessionHandoff]  Tail of prior rotated session, injected as system prompt
  * @param {string} [opts.personaPrompt]   v0.9.86 — agent persona ("soul file"), prepended to the
@@ -156,8 +159,14 @@ export function runClaude(opts) {
     const env = {
       ...process.env,
       ...AM_CLAUDE_ENV,
-      ANTHROPIC_AUTH_TOKEN: anthropicToken,
     };
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    delete env.ANTHROPIC_API_KEY;
+    if (anthropicToken.startsWith('sk-ant-oat01-')) {
+      env.ANTHROPIC_AUTH_TOKEN = anthropicToken;
+    } else {
+      env.ANTHROPIC_API_KEY = anthropicToken;
+    }
 
     const child = spawn(claudeBin(), args, {
       cwd: TG_DIR,

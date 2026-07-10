@@ -57,10 +57,11 @@ import { resolveDispatcherTuning } from './dispatcher-tuning.js';
  *                                            bridge reads, so one
  *                                            token covers both paths.
  *
- * Sets `process.env.ANTHROPIC_AUTH_TOKEN` from the file when the
- * env-var routes aren't already set. No-op when no file exists (the
- * SDK then attempts its default Claude Code subscription path,
- * correct for orgs that haven't flipped the policy flag).
+ * Sets the matching Anthropic env var from the file when neither
+ * env-var route is already set. API keys use `ANTHROPIC_API_KEY`;
+ * OAuth credentials use `ANTHROPIC_AUTH_TOKEN`. No-op when no file
+ * exists (the SDK then attempts its default Claude Code subscription
+ * path, correct for orgs that haven't flipped the policy flag).
  */
 function ensureAnthropicTokenInEnv(): void {
   if (process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY) return;
@@ -72,11 +73,15 @@ function ensureAnthropicTokenInEnv(): void {
     try {
       const token = readFileSync(path, 'utf-8').trim();
       if (token) {
-        process.env.ANTHROPIC_AUTH_TOKEN = token;
+        if (token.startsWith('sk-ant-oat01-')) {
+          process.env.ANTHROPIC_AUTH_TOKEN = token;
+        } else {
+          process.env.ANTHROPIC_API_KEY = token;
+        }
         // Log source (suffix only — never the whole token) so an
         // operator debugging auth issues can see which file the
         // dispatcher picked up without exposing the bearer.
-        console.error(`[dispatcher-bin] anthropic token source: ${path} (suffix ...${token.slice(-6)})`);
+        console.error(`[dispatcher-bin] anthropic credential source: ${path}`);
         return;
       }
     } catch { /* try the next path */ }

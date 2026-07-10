@@ -36,11 +36,11 @@ describe('voice-provider registry — bundled providers', () => {
     expect(ids).toContain('grok');
   });
 
-  it('OpenAI uses the gpt-realtime endpoint + legacy openaiApiKey config field', () => {
+  it('OpenAI uses the current realtime endpoint + legacy openaiApiKey config field', () => {
     const p = getVoiceProvider('openai');
     expect(p).toBeDefined();
     expect(p!.websocketBaseUrl).toBe('wss://api.openai.com/v1/realtime');
-    expect(p!.defaultModel).toBe('gpt-realtime');
+    expect(p!.defaultModel).toBe('gpt-realtime-2.1');
     expect(p!.apiKeyEnvVar).toBe('OPENAI_API_KEY');
     expect(p!.apiKeyConfigField).toBe('openaiApiKey');
   });
@@ -70,9 +70,9 @@ describe('resolveVoiceRuntime — key resolution', () => {
     const cfg = baseConfig({ openaiApiKey: 'sk-from-cfg' });
     const r = resolveVoiceRuntime(undefined, cfg);
     expect(r.providerId).toBe('openai');
-    expect(r.model).toBe('gpt-realtime');
+    expect(r.model).toBe('gpt-realtime-2.1');
     expect(r.url).toContain('wss://api.openai.com/v1/realtime');
-    expect(r.url).toContain('model=gpt-realtime');
+    expect(r.url).toContain('model=gpt-realtime-2.1');
     expect(r.apiKey).toBe('sk-from-cfg');
     expect(r.apiKeySource).toBe('config.openaiApiKey');
   });

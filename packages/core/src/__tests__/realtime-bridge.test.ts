@@ -105,7 +105,7 @@ describe('buildRealtimeSessionConfig', () => {
 
 describe('buildOpenAIRealtimeUrl', () => {
   it('builds the realtime URL with the model query param', () => {
-    expect(buildOpenAIRealtimeUrl()).toBe('wss://api.openai.com/v1/realtime?model=gpt-realtime');
+    expect(buildOpenAIRealtimeUrl()).toBe('wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1');
     expect(buildOpenAIRealtimeUrl('gpt-realtime-2')).toContain('?model=gpt-realtime-2');
   });
 });

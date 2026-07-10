@@ -76,7 +76,7 @@ import { PHONE_SERVER_MAX_CALL_DURATION_SECONDS } from './mission.js';
 /** OpenAI Realtime WebSocket base URL (model passed as `?model=`). */
 export const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 /** GA Realtime model. */
-export const DEFAULT_REALTIME_MODEL = 'gpt-realtime';
+export const DEFAULT_REALTIME_MODEL = 'gpt-realtime-2.1';
 /** Default GA Realtime voice. */
 export const DEFAULT_REALTIME_VOICE = 'marin';
 /** PCM sample rate shared by 46elks `pcm_24000` and the OpenAI session. */

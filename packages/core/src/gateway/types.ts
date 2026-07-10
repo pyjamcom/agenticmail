@@ -5,11 +5,20 @@ export type RelayProvider = 'gmail' | 'outlook' | 'custom';
 export interface RelayConfig {
   provider: RelayProvider;
   email: string;
+  /** Optional login username when the SMTP/IMAP auth principal differs from the mailbox address. */
+  authUsername?: string;
   password: string;
   smtpHost: string;
   smtpPort: number;
   imapHost: string;
   imapPort: number;
+  /**
+   * When true, outbound relay mail uses plus-addressing
+   * (`user+agent@example.com`) so one mailbox can route replies to many
+   * agents. Set false for single-agent corporate mailboxes that reject
+   * sub-addressed senders, such as many Exchange deployments.
+   */
+  useSubaddressing?: boolean;
 }
 
 export interface DomainModeConfig {

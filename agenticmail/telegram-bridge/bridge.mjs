@@ -763,10 +763,10 @@ async function main() {
   const token = loadBotToken();
   const { token: anthropicToken, source: tokenSource } = loadAnthropicToken();
   if (!anthropicToken) {
-    log.error('No Anthropic OAuth token. Save it to ~/.agenticmail/anthropic-token (or set ANTHROPIC_AUTH_TOKEN).');
+    log.error('No Anthropic credential. Save it to ~/.agenticmail/anthropic-token or set an Anthropic auth environment variable.');
     process.exit(1);
   }
-  log.info(`anthropic token source: ${tokenSource} (suffix ...${anthropicToken.slice(-6)})`);
+  log.info(`anthropic credential source: ${tokenSource}`);
 
   const allowedIds = loadAllowedIds();
   const sessions = new SessionMap({ scope: 'telegram' }).load();

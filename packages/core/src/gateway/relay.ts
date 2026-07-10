@@ -239,7 +239,7 @@ export class RelayGateway {
       port: config.smtpPort,
       secure: config.smtpPort === 465,
       auth: {
-        user: config.email,
+        user: config.authUsername || config.email,
         pass: config.password,
       },
     });
@@ -256,7 +256,7 @@ export class RelayGateway {
       port: config.imapPort,
       secure: config.imapPort === 993,
       auth: {
-        user: config.email,
+        user: config.authUsername || config.email,
         pass: config.password,
       },
       logger: false,
@@ -273,7 +273,9 @@ export class RelayGateway {
 
   /**
    * Send an email through the relay SMTP server.
-   * Rewrites the From address to use sub-addressing: relay+agentName@gmail.com
+   * By default, rewrites the From address to use sub-addressing:
+   * relay+agentName@gmail.com. Single-agent corporate relays can disable
+   * that and send from the exact relay mailbox address instead.
    */
   async sendViaRelay(agentName: string, mail: SendMailOptions): Promise<SendResultWithRaw> {
     if (!this.config || !this.smtpTransport) {
@@ -284,7 +286,9 @@ export class RelayGateway {
     const atIdx = relayConfig.email.lastIndexOf('@');
     const localPart = relayConfig.email.slice(0, atIdx);
     const domain = relayConfig.email.slice(atIdx + 1);
-    const relayFrom = `${localPart}+${agentName}@${domain}`;
+    const relayFrom = relayConfig.useSubaddressing === false
+      ? relayConfig.email
+      : `${localPart}+${agentName}@${domain}`;
 
     const displayName = mail.fromName || agentName;
     const mailOpts: any = {
@@ -436,7 +440,7 @@ export class RelayGateway {
       port: this.config.imapPort,
       secure: this.config.imapPort === 993,
       auth: {
-        user: this.config.email,
+        user: this.config.authUsername || this.config.email,
         pass: this.config.password,
       },
       logger: false,
@@ -567,6 +571,9 @@ export class RelayGateway {
    */
   private isOurRelaySender(address: string): boolean {
     if (!this.config) return false;
+    if (this.config.useSubaddressing === false) {
+      return address.toLowerCase() === this.config.email.toLowerCase();
+    }
     const atIdx = this.config.email.lastIndexOf('@');
     const localPart = this.config.email.slice(0, atIdx);
     const domain = this.config.email.slice(atIdx + 1);
@@ -705,7 +712,7 @@ export class RelayGateway {
       port: relayConfig.imapPort,
       secure: relayConfig.imapPort === 993,
       auth: {
-        user: relayConfig.email,
+        user: relayConfig.authUsername || relayConfig.email,
         pass: relayConfig.password,
       },
       logger: false,
@@ -791,7 +798,7 @@ export class RelayGateway {
       port: relayConfig.imapPort,
       secure: relayConfig.imapPort === 993,
       auth: {
-        user: relayConfig.email,
+        user: relayConfig.authUsername || relayConfig.email,
         pass: relayConfig.password,
       },
       logger: false,

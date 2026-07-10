@@ -177,7 +177,7 @@ export function createGatewayRoutes(gatewayManager: GatewayManager): Router {
   // Setup relay mode — requires master key
   router.post('/gateway/relay', requireMaster, async (req, res, next) => {
     try {
-      const { provider, email, password, smtpHost, smtpPort, imapHost, imapPort, agentName, agentRole, skipDefaultAgent } = req.body;
+      const { provider, email, authUsername, password, smtpHost, smtpPort, imapHost, imapPort, agentName, agentRole, skipDefaultAgent, useSubaddressing } = req.body;
       if (!email || !password) {
         res.status(400).json({ error: 'email and password are required' });
         return;
@@ -195,11 +195,13 @@ export function createGatewayRoutes(gatewayManager: GatewayManager): Router {
       const config: RelayConfig = {
         provider: prov,
         email,
+        authUsername,
         password,
         smtpHost: smtpHost ?? preset?.smtpHost ?? 'localhost',
         smtpPort: smtpPort ?? preset?.smtpPort ?? 587,
         imapHost: imapHost ?? preset?.imapHost ?? 'localhost',
         imapPort: imapPort ?? preset?.imapPort ?? 993,
+        useSubaddressing: useSubaddressing !== false,
       };
 
       const result = await gatewayManager.setupRelay(config, {
@@ -222,7 +224,9 @@ export function createGatewayRoutes(gatewayManager: GatewayManager): Router {
           email: result.agent.email,
           apiKey: result.agent.apiKey,
           role: result.agent.role,
-          subAddress: `${email.split('@')[0]}+${result.agent.name}@${email.split('@')[1]}`,
+          subAddress: config.useSubaddressing === false
+            ? email
+            : `${email.split('@')[0]}+${result.agent.name}@${email.split('@')[1]}`,
         };
       }
 
