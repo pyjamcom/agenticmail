@@ -260,6 +260,7 @@ export {
   isOperatorReplySender,
   SALES_CALL_RELATIONSHIPS,
   SALES_CALL_REQUEST_TYPES,
+  SALES_CALL_SERVICE_TOPICS,
   SALES_CALL_OUTCOMES,
   normalizeSalesCallIntakePatch,
   getSalesCallIntakeMissingFields,
@@ -328,6 +329,7 @@ export type {
   VoiceRuntimeConnection,
   SalesCallRelationship,
   SalesCallRequestType,
+  SalesCallServiceTopic,
   SalesCallOutcome,
   SalesCallIntake,
 } from './phone/index.js';

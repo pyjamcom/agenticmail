@@ -7,7 +7,7 @@
  *
  * Features:
  * - Pre-built inverted index maintained incrementally (no re-indexing on query)
- * - Lightweight Porter-style stemmer (suffix stripping for English)
+ * - Unicode-aware tokenization with lightweight English stemming
  * - Field weighting via BM25F: title x3, tags x2, content x1
  * - Pre-computed IDF values updated on index mutations
  * - Prefix matching: "deploy" matches "deployment", "deployments"
@@ -43,6 +43,16 @@ export const STOP_WORDS = new Set([
   'us', 'very', 'was', 'we', 'were', 'what', 'when', 'where', 'which',
   'while', 'who', 'whom', 'why', 'will', 'with', 'would', 'yet', 'you',
   'your', 'yours', 'yourself', 'yourselves',
+  // Russian function words. Keeping them out of queries prevents common
+  // conversational phrasing from outranking the actual service terms.
+  'а', 'без', 'бы', 'был', 'была', 'были', 'было', 'быть', 'в', 'вам', 'вас',
+  'весь', 'во', 'вот', 'все', 'всего', 'вы', 'где', 'да', 'для', 'до', 'его',
+  'ее', 'ей', 'ему', 'если', 'есть', 'еще', 'же', 'за', 'и', 'из', 'или', 'им',
+  'их', 'как', 'какая', 'какие', 'какой', 'когда', 'который', 'кто', 'ли', 'мне',
+  'можно', 'мой', 'мы', 'на', 'над', 'нам', 'нас', 'не', 'него', 'нее', 'нет',
+  'ни', 'но', 'нужно', 'о', 'об', 'он', 'она', 'они', 'оно', 'от', 'по', 'под',
+  'при', 'про', 'с', 'со', 'так', 'также', 'там', 'то', 'тоже', 'у', 'уже',
+  'хочу', 'чем', 'что', 'чтобы', 'эта', 'эти', 'это', 'я',
 ]);
 
 // ── Porter Stemmer (lightweight suffix stripping) ──
@@ -78,8 +88,46 @@ const STEM_RULES: [RegExp, string, number][] = [
 /** Clean up common doubling artifacts after suffix stripping. */
 const DOUBLE_CONSONANT = /([^aeiou])\1$/;
 
+const RUSSIAN_WORD = /^[а-я]+$/u;
+const ENGLISH_WORD = /^[a-z]+$/;
+const RUSSIAN_SUFFIXES = [
+  'ированными', 'ированного', 'ированному', 'ированный', 'ированная', 'ированное',
+  'ирование', 'ирования', 'ировать', 'ироваться',
+  'овываться', 'иваться', 'ываться', 'оваться',
+  'ование', 'ования', 'ывание', 'ывания', 'ивание', 'ивания',
+  'енность', 'ениями', 'ение', 'ения', 'ению', 'ением',
+  'аниями', 'ание', 'ания', 'анию', 'анием',
+  'ациями', 'ация', 'ации', 'ацию', 'ацией',
+  'иться', 'аться', 'яться', 'еться', 'нуться',
+  'овать', 'евать', 'ывать', 'ивать',
+  'иями', 'ями', 'ами', 'ией', 'иям', 'иях',
+  'остью', 'ости', 'ость',
+  'ать', 'ять', 'еть', 'ить', 'ыть', 'уть', 'ти',
+  'ого', 'его', 'ому', 'ему', 'ыми', 'ими',
+  'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'ую', 'юю',
+  'ых', 'их', 'ым', 'им', 'ом', 'ем', 'ой', 'ей',
+  'ов', 'ев', 'ам', 'ям', 'ах', 'ях',
+  'ка', 'ки', 'ку', 'ке', 'ия', 'ии', 'ию',
+  'а', 'я', 'ы', 'и', 'у', 'ю', 'е', 'о', 'й',
+].sort((a, b) => b.length - a.length);
+
+function stemRussian(word: string): string {
+  for (const suffix of RUSSIAN_SUFFIXES) {
+    if (word.endsWith(suffix) && word.length - suffix.length >= 4) {
+      return word.slice(0, -suffix.length);
+    }
+  }
+  return word;
+}
+
+function normalizeSearchText(text: string): string {
+  return text.normalize('NFKC').toLowerCase().replace(/ё/g, 'е');
+}
+
 export function stem(word: string): string {
   if (word.length < 3) return word;
+  if (RUSSIAN_WORD.test(word)) return stemRussian(word);
+  if (!ENGLISH_WORD.test(word)) return word;
   let stemmed = word;
   for (const [pattern, replacement, minLen] of STEM_RULES) {
     if (stemmed.length >= minLen && pattern.test(stemmed)) {
@@ -96,18 +144,18 @@ export function stem(word: string): string {
 
 // ── Tokenizer ──
 
-/** Tokenize text into stemmed, lowercase terms, filtering stop words. */
+/** Tokenize Unicode text into lowercase terms, applying English stemming where relevant. */
 export function tokenize(text: string): string[] {
-  return text.toLowerCase()
-    .split(/[^a-z0-9]+/)
+  return normalizeSearchText(text)
+    .split(/[^\p{L}\p{N}]+/u)
     .filter((t) => t.length > 1 && !STOP_WORDS.has(t))
     .map(stem);
 }
 
 /** Tokenize preserving original (unstemmed) forms alongside stems. */
 export function tokenizeWithOriginals(text: string): { stem: string; original: string }[] {
-  return text.toLowerCase()
-    .split(/[^a-z0-9]+/)
+  return normalizeSearchText(text)
+    .split(/[^\p{L}\p{N}]+/u)
     .filter((t) => t.length > 1 && !STOP_WORDS.has(t))
     .map((t) => ({ stem: stem(t), original: t }));
 }

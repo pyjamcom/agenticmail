@@ -12,6 +12,28 @@ export type SalesCallRelationship = typeof SALES_CALL_RELATIONSHIPS[number];
 export const SALES_CALL_REQUEST_TYPES = ['goods', 'freight', 'service', 'support', 'other'] as const;
 export type SalesCallRequestType = typeof SALES_CALL_REQUEST_TYPES[number];
 
+export const SALES_CALL_SERVICE_TOPICS = [
+  'customs',
+  'ocean_freight',
+  'road_freight',
+  'rail_freight',
+  'air_express',
+  'multimodal',
+  'china_europe_consolidated',
+  'export_from_russia',
+  'vehicle_customs',
+  'port_forwarding',
+  'personal_effects',
+  'fea_outsourcing',
+  'supplier_sourcing',
+  'payment_agent',
+  'existing_case',
+  'supplier_offer',
+  'carrier_offer',
+  'other',
+] as const;
+export type SalesCallServiceTopic = typeof SALES_CALL_SERVICE_TOPICS[number];
+
 export const SALES_CALL_OUTCOMES = [
   'qualified',
   'needs_follow_up',
@@ -26,6 +48,7 @@ export interface SalesCallIntake {
   schemaVersion: 1;
   relationship?: SalesCallRelationship;
   requestType?: SalesCallRequestType;
+  serviceTopic?: SalesCallServiceTopic;
   language?: string;
   contactName?: string;
   company?: string;
@@ -109,6 +132,7 @@ export function normalizeSalesCallIntakePatch(value: unknown): Partial<SalesCall
   const out: Partial<SalesCallIntake> = {};
   out.relationship = oneOf(input.relationship, SALES_CALL_RELATIONSHIPS);
   out.requestType = oneOf(input.requestType, SALES_CALL_REQUEST_TYPES);
+  out.serviceTopic = oneOf(input.serviceTopic, SALES_CALL_SERVICE_TOPICS);
   out.language = text(input.language, 32);
   out.contactName = text(input.contactName, 200);
   out.company = text(input.company, 300);
@@ -179,6 +203,7 @@ export function getSalesCallIntakeMissingFields(intake: Partial<SalesCallIntake>
   const missing: string[] = [];
   if (!intake.relationship) missing.push('relationship');
   if (!intake.requestType) missing.push('requestType');
+  if (!intake.serviceTopic) missing.push('serviceTopic');
   if (!intake.requestDescription) missing.push('requestDescription');
   if (!intake.contactName) missing.push('contactName');
   if (!intake.emailHash && !intake.callbackPhoneHash) missing.push('email_or_callbackPhone');

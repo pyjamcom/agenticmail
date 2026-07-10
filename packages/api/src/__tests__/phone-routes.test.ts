@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import { AgentMemoryManager, createTestDatabase, PhoneManager, type AgenticMailConfig } from '@agenticmail/core';
@@ -148,6 +148,7 @@ describe('phone routes', () => {
         patch: {
           relationship: 'new_customer',
           requestType: 'service',
+          serviceTopic: 'other',
           requestDescription: 'Please prepare a quotation.',
           contactName: 'Test Contact',
           email: 'caller@example.test',
@@ -171,11 +172,26 @@ describe('phone routes', () => {
     expect(rawMetadata.metadata_json).not.toContain('+12025550999');
 
     const memory = new AgentMemoryManager(db as any);
-    await memory.storeMemory('agent1', {
-      content: 'Verified process: quotations are reviewed by a sales manager before commitment.',
+    const verifiedContent = 'Verified process: quotations are reviewed by a sales manager before commitment.';
+    const verifiedHash = createHash('sha256').update(verifiedContent, 'utf8').digest('hex');
+    const verifiedMemory = await memory.storeMemory('agent1', {
+      content: verifiedContent,
       title: 'Quotation review policy',
       category: 'knowledge',
       confidence: 1,
+      tags: [
+        'nevsky-broker-voice-context-v1',
+        'context-key:test-quotation-review',
+        `content-sha256:${verifiedHash}`,
+        'source-version:nevsky-broker-voice-context-v1',
+      ],
+    });
+    await memory.storeMemory('agent1', {
+      content: 'Superseded website claim that must not reach the voice agent.',
+      title: 'Quotation review policy legacy copy',
+      category: 'knowledge',
+      confidence: 1,
+      tags: ['nevsky-broker-voice-kb-20260710'],
     });
     const knowledge = await request(baseUrl, `/calls/sip/${missionId}/knowledge`, {
       method: 'POST',
@@ -184,6 +200,28 @@ describe('phone routes', () => {
     expect(knowledge.status).toBe(200);
     expect(knowledge.body.count).toBe(1);
     expect(knowledge.body.facts[0].content).toContain('reviewed by a sales manager');
+    expect(knowledge.body.facts[0].knowledgeTrace).toBeUndefined();
+    const knowledgeTranscript = await request(baseUrl, `/calls/sip/${missionId}/transcript`);
+    const traceEntry = knowledgeTranscript.body.transcript.find(
+      (entry: any) => entry.metadata?.kind === 'knowledge_lookup',
+    );
+    expect(traceEntry.metadata.factCount).toBe(1);
+    expect(traceEntry.metadata.knowledgeTrace).toEqual([{
+      recordId: verifiedMemory.id,
+      contextKey: 'test-quotation-review',
+      contentSha256: verifiedHash,
+      sourceVersion: 'nevsky-broker-voice-context-v1',
+    }]);
+    const negativeKnowledge = await request(baseUrl, `/calls/sip/${missionId}/knowledge`, {
+      method: 'POST',
+      body: JSON.stringify({ query: 'borscht weather cinema' }),
+    });
+    expect(negativeKnowledge.body.count).toBe(0);
+    const negativeTranscript = await request(baseUrl, `/calls/sip/${missionId}/transcript`);
+    const traceEntries = negativeTranscript.body.transcript.filter(
+      (entry: any) => entry.metadata?.kind === 'knowledge_lookup',
+    );
+    expect(traceEntries.at(-1).metadata).toMatchObject({ factCount: 0, knowledgeTrace: [] });
 
     const followups = await request(baseUrl, '/calls/sip/followups/pending');
     expect(followups.body.tasks).toHaveLength(1);
@@ -210,10 +248,19 @@ describe('phone routes', () => {
     const pending = await request(baseUrl, '/calls/sip/recap-drafts/pending');
     expect(pending.body.drafts).toHaveLength(1);
     expect(pending.body.drafts[0].missionId).toBe(missionId);
+    const pendingStatus = await request(baseUrl, `/calls/sip/recap-drafts/${missionId}/status`);
+    expect(pendingStatus.body.delivery).toMatchObject({ missionId, status: 'pending', attempts: 0 });
     const delivered = await request(baseUrl, `/calls/sip/recap-drafts/${missionId}/delivered`, {
       method: 'POST', body: JSON.stringify({ exchangeRefHash: 'sha256:test-ref' }),
     });
     expect(delivered.status).toBe(200);
+    const deliveredStatus = await request(baseUrl, `/calls/sip/recap-drafts/${missionId}/status`);
+    expect(deliveredStatus.body.delivery).toMatchObject({
+      missionId,
+      status: 'delivered',
+      attempts: 1,
+      exchangeRefHash: 'sha256:test-ref',
+    });
     const nonePending = await request(baseUrl, '/calls/sip/recap-drafts/pending');
     expect(nonePending.body.drafts).toHaveLength(0);
     db.close();

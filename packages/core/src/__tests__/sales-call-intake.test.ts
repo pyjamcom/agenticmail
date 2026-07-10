@@ -6,6 +6,7 @@ describe('sales call intake', () => {
     const intake = mergeSalesCallIntake({}, {
       relationship: 'new_customer',
       requestType: 'freight',
+      serviceTopic: 'ocean_freight',
       contactName: 'Ivan',
       email: 'ivan@example.com',
       callbackPhone: '+7 999 123 4567',
@@ -23,6 +24,7 @@ describe('sales call intake', () => {
     expect(intake.emailHash).toMatch(/^sha256:/);
     expect(intake.emailRedacted).toBe('iv***@example.com');
     expect(intake.callbackPhoneRedacted).toBe('***4567');
+    expect(intake.serviceTopic).toBe('ocean_freight');
     expect(JSON.stringify(intake)).not.toContain('ivan@example.com');
     expect(JSON.stringify(intake)).not.toContain('+7 999 123 4567');
   });
@@ -31,6 +33,7 @@ describe('sales call intake', () => {
     const intake = mergeSalesCallIntake({}, {
       relationship: 'existing_customer',
       requestType: 'support',
+      serviceTopic: 'existing_case',
       requestDescription: 'Shipment is delayed',
       contactName: 'Client',
       email: 'client@example.com',
@@ -51,6 +54,7 @@ describe('sales call intake', () => {
     const intake = mergeSalesCallIntake({}, {
       relationship: 'new_customer',
       requestType: 'goods',
+      serviceTopic: 'supplier_sourcing',
       requestDescription: 'Needs electronic components',
       contactName: 'Buyer',
       email: 'buyer@example.com',

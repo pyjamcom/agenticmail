@@ -187,6 +187,7 @@ export {
 export {
   SALES_CALL_RELATIONSHIPS,
   SALES_CALL_REQUEST_TYPES,
+  SALES_CALL_SERVICE_TOPICS,
   SALES_CALL_OUTCOMES,
   normalizeSalesCallIntakePatch,
   getSalesCallIntakeMissingFields,
@@ -195,6 +196,7 @@ export {
 export type {
   SalesCallRelationship,
   SalesCallRequestType,
+  SalesCallServiceTopic,
   SalesCallOutcome,
   SalesCallIntake,
 } from './sales-intake.js';

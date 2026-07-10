@@ -43,7 +43,11 @@ function builtInDir(): string {
   // Dist  layout: `packages/core/dist/skills/registry.js` ←→ `built-in/`
   // We copy `built-in/` into `dist/skills/` on build (handled by the
   // package's tsup config). Both locations are siblings of this file.
-  return join(here, 'built-in');
+  const sourceOrUnbundled = join(here, 'built-in');
+  if (existsSync(sourceOrUnbundled)) return sourceOrUnbundled;
+  // tsup bundles registry.js into dist/index.js while copying JSON files to
+  // dist/skills/built-in. In that layout import.meta.url points at dist/.
+  return join(here, 'skills', 'built-in');
 }
 
 /** User-contributed skills directory — created on first read. */
@@ -220,7 +224,9 @@ export function validateSkill(s: unknown): SkillValidationError[] {
     'negotiation', 'customer-service', 'reservations', 'medical-admin',
     'legal-admin', 'finance-admin', 'real-estate', 'travel',
     'subscription', 'home-services', 'social', 'civic', 'employment',
-    'debt-collection', 'other',
+    'debt-collection', 'emergency-services', 'critical-reasoning',
+    'emotional-intelligence', 'closing', 'outreach', 'professional-services',
+    'education', 'tenancy', 'utility-telecom', 'insurance', 'other',
   ];
   if (typeof sk.category === 'string' && !validCategories.includes(sk.category as SkillCategory)) {
     errs.push({ path: 'category', message: `unknown category "${sk.category}"; must be one of: ${validCategories.join(', ')}` });

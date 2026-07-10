@@ -296,7 +296,7 @@ test('sales intake tools persist structured facts and callback requests without 
   };
 
   const routed = await sidecar.executeCallTool(call, 'route_call_specialist', {
-    relationship: 'new_customer', requestType: 'freight', reason: 'Needs a freight quote',
+    relationship: 'new_customer', requestType: 'freight', serviceTopic: 'ocean_freight', reason: 'Needs a freight quote',
   });
   const intake = await sidecar.executeCallTool(call, 'update_call_intake', {
     relationship: 'new_customer', requestType: 'freight', origin: 'Shanghai',
@@ -310,6 +310,8 @@ test('sales intake tools persist structured facts and callback requests without 
 
   assert.equal(routed.ok, true);
   assert.equal(routed.specialistProfile, 'new_customer');
+  assert.equal(routed.specialistTopic, 'ocean_freight');
+  assert.equal(updates[0].serviceTopic, 'ocean_freight');
   assert.deepEqual(instructionUpdates, ['specialist instructions']);
   assert.equal(intake.ok, true);
   assert.deepEqual(intake.missingFields, ['destination']);
@@ -317,6 +319,116 @@ test('sales intake tools persist structured facts and callback requests without 
   assert.equal(updates[2].nextAction.type, 'callback_request');
   assert.equal(updates[2].outcome, 'needs_follow_up');
   assert.equal(knowledge.count, 1);
+});
+
+test('sales instructions expose only the active service playbook after routing', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-prompt-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, 'pbx.json');
+  const agenticmailConfigPath = join(dir, 'agenticmail.json');
+  writeFileSync(configPath, JSON.stringify({
+    server: '127.0.0.1',
+    username: '1000',
+    localIp: '127.0.0.1',
+    salesScenarioPath: join(process.cwd(), 'sip-sidecar', 'sales-call-scenario.json'),
+  }));
+  writeFileSync(agenticmailConfigPath, JSON.stringify({}));
+
+  const sidecar = new SipSidecar({ configPath, agenticmailConfigPath });
+  t.after(() => {
+    try { sidecar.socket.close(); } catch { /* socket was never bound */ }
+  });
+
+  const routingPrompt = sidecar.buildInstructions({ direction: 'inbound', loadedSkills: [] });
+  assert.match(routingPrompt, /# Routing/);
+  assert.doesNotMatch(routingPrompt, /# Active Service Playbook/);
+  assert.doesNotMatch(routingPrompt, /сумму в рублях/);
+
+  const paymentPrompt = sidecar.buildInstructions({
+    direction: 'inbound',
+    loadedSkills: [],
+    specialistRoute: { relationship: 'new_customer', requestType: 'service', serviceTopic: 'payment_agent' },
+  });
+  assert.match(paymentPrompt, /Service topic: payment_agent/);
+  assert.match(paymentPrompt, /сумму в рублях/);
+  assert.doesNotMatch(paymentPrompt, /POL\/POD/);
+});
+
+test('direct SIP tools can search and load an installed conversation skill', async () => {
+  const events = [];
+  const instructionUpdates = [];
+  const systemTranscript = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.logEvent = (type, payload) => events.push({ type, payload });
+  sidecar.missionClient = null;
+  sidecar.buildInstructions = (call) => call.loadedSkills.map((skill) => skill.renderedPrompt).join('\n');
+  const call = {
+    id: 'sip-skill-test',
+    missionId: null,
+    loadedSkills: [],
+    openai: { updateInstructions: (value) => { instructionUpdates.push(value); return true; } },
+    recordSystemTranscript: (text, metadata) => systemTranscript.push({ text, metadata }),
+  };
+
+  const search = await sidecar.executeCallTool(call, 'search_skills', {
+    query: 'BANT sales discovery budget authority need timing',
+  });
+  assert.equal(search.ok, true);
+  assert.equal(search.skills.some((skill) => skill.id === 'bant-discovery-call'), true);
+
+  const loaded = await sidecar.executeCallTool(call, 'load_skill', { id: 'bant-discovery-call' });
+  assert.equal(loaded.ok, true);
+  assert.equal(call.loadedSkills[0].id, 'bant-discovery-call');
+  assert.equal(instructionUpdates[0].includes('SKILL LOADED'), true);
+  assert.equal(systemTranscript.at(-1).text.includes('bant-discovery-call'), true);
+  assert.equal(events.some((event) => event.type === 'call_tool_completed'), true);
+});
+
+test('NBR SPIN and MEDDPICC local playbooks are valid and scope complex qualification', async () => {
+  const { validateSkill } = await import('@agenticmail/core');
+  const spin = JSON.parse(readFileSync(
+    join(process.cwd(), 'sip-sidecar', 'local-skills', 'nbr-spin-discovery.json'),
+    'utf8',
+  ));
+  const meddpicc = JSON.parse(readFileSync(
+    join(process.cwd(), 'sip-sidecar', 'local-skills', 'nbr-meddpicc-complex-b2b.json'),
+    'utf8',
+  ));
+
+  assert.deepEqual(validateSkill(spin), []);
+  assert.deepEqual(validateSkill(meddpicc), []);
+  assert.match(spin.context.when_to_use, /основной методикой/u);
+  assert.match(meddpicc.context.when_to_use, /Не использовать для простого запроса ставки/u);
+});
+
+test('configured company context is required and included in direct SIP instructions', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'agenticmail-company-context-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, 'pbx.json');
+  const agenticmailConfigPath = join(dir, 'agenticmail.json');
+  const contextPath = join(dir, 'company-context.md');
+  writeFileSync(contextPath, '# Approved company context\n\nVerified service fact.');
+  writeFileSync(configPath, JSON.stringify({
+    server: '127.0.0.1',
+    username: '1000',
+    localIp: '127.0.0.1',
+    transcriptPersistenceRequired: false,
+    companyContextPath: contextPath,
+    companyContextRequired: true,
+  }));
+  writeFileSync(agenticmailConfigPath, JSON.stringify({ openaiApiKey: 'test-key' }));
+
+  const sidecar = new SipSidecar({ configPath, agenticmailConfigPath });
+  t.after(() => {
+    try { sidecar.socket.close(); } catch { /* socket was never bound */ }
+  });
+  assert.equal(sidecar.companyContext.includes('Verified service fact.'), true);
+  assert.equal(sidecar.missing({ refresh: false }).includes('company_context_missing'), false);
+  const instructions = sidecar.buildInstructions({
+    direction: 'inbound', task: '', specialistRoute: null, loadedSkills: [],
+  });
+  assert.equal(instructions.includes('# Approved company runtime context'), true);
+  assert.equal(instructions.includes('Verified service fact.'), true);
 });
 
 test('transcript fallback spool is encrypted and can be replayed', async (t) => {
@@ -390,4 +502,18 @@ test('Realtime bridge emits conversation truncation for interrupted playback', (
     type: 'session.update',
     session: { type: 'realtime', instructions: 'specialist instructions' },
   });
+});
+
+test('Realtime wait tool ends the turn without creating spoken output', async () => {
+  const sent = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test', model: 'gpt-realtime-2.1', voice: 'marin', instructions: 'test',
+    onToolCall: async () => ({ ok: true, waiting: true, suppressResponse: true }),
+  });
+  bridge.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
+
+  await bridge.dispatchToolCall({ call_id: 'wait-1', name: 'wait_for_user', arguments: '{}' });
+
+  assert.equal(sent.some((event) => event.type === 'conversation.item.create'), true);
+  assert.equal(sent.some((event) => event.type === 'response.create'), false);
 });

@@ -37,6 +37,60 @@ describe('AgentMemoryManager', () => {
     expect(a2.map((m) => m.title)).toEqual(['A2']);
   });
 
+  it('stores and recalls Russian memory through Unicode text search', async () => {
+    const { manager } = freshManager();
+    await manager.storeMemory('sales', {
+      content: 'Компания помогает с таможенным оформлением и предварительным подбором кода ТН ВЭД.',
+      category: 'knowledge',
+      title: 'Таможенное оформление',
+    });
+    await manager.storeMemory('sales', {
+      content: 'Морская перевозка контейнеров и сборных грузов.',
+      category: 'knowledge',
+      title: 'Морская перевозка',
+    });
+
+    const hits = await manager.recall('sales', 'таможенное оформление код ТН ВЭД');
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits[0].title).toBe('Таможенное оформление');
+  });
+
+  it('matches Russian inflections, verb forms, and е/ё variants', async () => {
+    const { manager } = freshManager();
+    await manager.storeMemory('sales', {
+      content: 'Растаможка грузовых автомобилей, прицепов и специальной техники.',
+      category: 'knowledge',
+      title: 'Растаможка транспорта',
+      tags: ['растаможить фуру', 'таможенное оформление грузовика'],
+    });
+    await manager.storeMemory('sales', {
+      content: 'Платёжный агент помогает организовать международную оплату по инвойсу.',
+      category: 'knowledge',
+      title: 'Платёжный агент',
+      tags: ['платежи за границу', 'оплатить инвойс'],
+    });
+
+    const customsHits = await manager.recall('sales', 'как растаможить грузовик');
+    expect(customsHits[0]?.title).toBe('Растаможка транспорта');
+
+    const paymentHits = await manager.recall('sales', 'можно оплатить инвойс за границу');
+    expect(paymentHits[0]?.title).toBe('Платёжный агент');
+
+    const yoVariantHits = await manager.recall('sales', 'платежный агент');
+    expect(yoVariantHits[0]?.title).toBe('Платёжный агент');
+  });
+
+  it('ignores Russian conversational stop words in memory search', async () => {
+    const { manager } = freshManager();
+    await manager.storeMemory('sales', {
+      content: 'Морская контейнерная перевозка.',
+      category: 'knowledge',
+      title: 'Морская перевозка',
+    });
+
+    expect(await manager.recall('sales', 'как это можно сделать для меня')).toEqual([]);
+  });
+
   it('persists to the agent_memory table and reloads on a fresh manager', async () => {
     const { db, manager } = freshManager();
     await manager.storeMemory('agent1', { content: 'Durable fact', title: 'Durable', importance: 'high' });
