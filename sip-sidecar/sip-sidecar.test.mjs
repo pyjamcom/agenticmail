@@ -340,7 +340,15 @@ test('sales instructions expose only the active service playbook after routing',
   });
 
   const routingPrompt = sidecar.buildInstructions({ direction: 'inbound', loadedSkills: [] });
+  assert.equal(
+    sidecar.salesScenario.openings.inbound,
+    'Компания «Невский Брокер», Елена. Разговор расшифровывается и сохраняется. Да, да, слушаю вас!',
+  );
+  assert.doesNotMatch(sidecar.salesScenario.openings.inbound, /ИИ-помощник/u);
   assert.match(routingPrompt, /# Routing/);
+  assert.match(routingPrompt, /Я виртуальный голосовой помощник/u);
+  assert.match(routingPrompt, /не обманывай и не уклоняйся/u);
+  assert.doesNotMatch(routingPrompt, /голосовой ИИ-помощник/u);
   assert.doesNotMatch(routingPrompt, /# Active Service Playbook/);
   assert.doesNotMatch(routingPrompt, /сумму в рублях/);
 
