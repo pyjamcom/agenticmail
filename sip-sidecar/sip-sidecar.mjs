@@ -4,8 +4,9 @@ import dgram from 'node:dgram';
 import http from 'node:http';
 import os from 'node:os';
 import { readFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
 const DEFAULT_CONFIG_PATH = join(os.homedir(), '.agenticmail', 'pbx199.local.json');
@@ -19,7 +20,11 @@ const DEFAULT_HTTP_PORT = 3899;
 const REGISTER_EXPIRES_SECONDS = 60;
 const REGISTER_RENEW_SECONDS = 45;
 const RTP_PACKET_BYTES = 160;
+const RTP_PACKET_INTERVAL_MS = 20;
+const RTP_MAX_QUEUED_BYTES = RTP_PACKET_BYTES * 100;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
+const INBOUND_TRANSACTION_TTL_MS = 64_000;
+const INBOUND_ACK_TIMEOUT_MS = 32_000;
 
 function parseArgs(argv) {
   const args = {};
@@ -314,6 +319,11 @@ class OpenAiRealtimeBridge {
     this.ws = null;
     this.ready = false;
     this.pendingAudio = [];
+    this.connectResolve = null;
+    this.connectReject = null;
+    this.connectTimer = null;
+    this.closing = false;
+    this.initialResponseStarted = false;
   }
 
   connect() {
@@ -326,10 +336,13 @@ class OpenAiRealtimeBridge {
         },
       });
       this.ws = ws;
-      const timer = setTimeout(() => reject(new Error('OpenAI Realtime connection timed out')), 15000);
+      this.connectResolve = resolve;
+      this.connectReject = reject;
+      this.connectTimer = setTimeout(() => {
+        this.rejectConnect(new Error('OpenAI Realtime session setup timed out'));
+        this.close();
+      }, 15_000);
       ws.on('open', () => {
-        clearTimeout(timer);
-        this.ready = true;
         ws.send(JSON.stringify({
           type: 'session.update',
           session: {
@@ -340,7 +353,14 @@ class OpenAiRealtimeBridge {
             audio: {
               input: {
                 format: { type: 'audio/pcmu' },
-                turn_detection: { type: 'server_vad' },
+                turn_detection: {
+                  type: 'server_vad',
+                  threshold: 0.5,
+                  prefix_padding_ms: 300,
+                  silence_duration_ms: 500,
+                  create_response: true,
+                  interrupt_response: true,
+                },
                 transcription: { model: 'gpt-4o-mini-transcribe' },
               },
               output: {
@@ -350,19 +370,45 @@ class OpenAiRealtimeBridge {
             },
           },
         }));
-        ws.send(JSON.stringify({ type: 'response.create' }));
-        for (const audio of this.pendingAudio.splice(0)) this.appendAudio(audio);
-        resolve();
       });
       ws.on('message', (data) => this.handleMessage(data.toString()));
       ws.on('close', () => {
         this.ready = false;
-        this.onClose?.();
+        this.rejectConnect(new Error('OpenAI Realtime closed before session setup completed'));
+        if (!this.closing) this.onClose?.();
       });
       ws.on('error', (err) => {
         this.onEvent?.({ type: 'openai_error', message: err.message });
+        this.rejectConnect(err);
       });
     });
+  }
+
+  resolveConnect() {
+    if (!this.connectResolve) return;
+    clearTimeout(this.connectTimer);
+    const resolve = this.connectResolve;
+    this.connectResolve = null;
+    this.connectReject = null;
+    this.connectTimer = null;
+    resolve();
+  }
+
+  rejectConnect(err) {
+    if (!this.connectReject) return;
+    clearTimeout(this.connectTimer);
+    const reject = this.connectReject;
+    this.connectResolve = null;
+    this.connectReject = null;
+    this.connectTimer = null;
+    reject(err);
+  }
+
+  startResponse() {
+    if (this.initialResponseStarted || !this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    this.initialResponseStarted = true;
+    this.ws.send(JSON.stringify({ type: 'response.create' }));
+    return true;
   }
 
   appendAudio(payload) {
@@ -384,6 +430,16 @@ class OpenAiRealtimeBridge {
     } catch {
       return;
     }
+    if (msg.type === 'session.updated') {
+      this.ready = true;
+      for (const audio of this.pendingAudio.splice(0)) this.appendAudio(audio);
+      this.resolveConnect();
+      this.onEvent?.({ type: 'session.updated' });
+      return;
+    }
+    if (msg.type === 'error' && !this.ready) {
+      this.rejectConnect(new Error(msg.error?.message || 'OpenAI Realtime session setup failed'));
+    }
     if (msg.type === 'response.output_audio.delta' || msg.type === 'response.audio.delta') {
       if (typeof msg.delta === 'string' && msg.delta) {
         this.onAudio?.(Buffer.from(msg.delta, 'base64'));
@@ -394,6 +450,8 @@ class OpenAiRealtimeBridge {
       msg.type === 'conversation.item.input_audio_transcription.completed'
       || msg.type === 'response.output_audio_transcript.done'
       || msg.type === 'response.output_text.done'
+      || msg.type === 'input_audio_buffer.speech_started'
+      || msg.type === 'input_audio_buffer.speech_stopped'
       || msg.type === 'error'
     ) {
       this.onEvent?.({
@@ -404,6 +462,9 @@ class OpenAiRealtimeBridge {
   }
 
   close() {
+    this.closing = true;
+    this.ready = false;
+    this.rejectConnect(new Error('OpenAI Realtime connection closed locally'));
     try {
       if (this.ws) this.ws.close();
     } catch {
@@ -425,6 +486,14 @@ class RtpSession {
     this.timestamp = Math.floor(Math.random() * 0xffffffff);
     this.ssrc = randomBytes(4).readUInt32BE(0);
     this.lastInboundAt = Date.now();
+    this.inboundPackets = 0;
+    this.inboundBytes = 0;
+    this.outboundPackets = 0;
+    this.outboundBytes = 0;
+    this.outboundDroppedBytes = 0;
+    this.outboundQueue = Buffer.alloc(0);
+    this.sendTimer = null;
+    this.closed = false;
   }
 
   async start() {
@@ -433,6 +502,8 @@ class RtpSession {
       if (!packet) return;
       if (packet.payloadType !== 0) return;
       this.lastInboundAt = Date.now();
+      this.inboundPackets += 1;
+      this.inboundBytes += packet.payload.length;
       this.onInboundAudio?.(packet.payload);
     });
     await new Promise((resolve, reject) => {
@@ -442,26 +513,64 @@ class RtpSession {
         resolve();
       });
     });
+    this.sendTimer = setInterval(() => this.flushOutboundAudio(), RTP_PACKET_INTERVAL_MS);
+    this.sendTimer.unref?.();
+  }
+
+  setRemote(remoteIp, remotePort) {
+    this.remoteIp = remoteIp;
+    this.remotePort = remotePort;
   }
 
   sendAudio(buffer) {
-    let offset = 0;
-    while (offset < buffer.length) {
-      const payload = buffer.subarray(offset, Math.min(buffer.length, offset + RTP_PACKET_BYTES));
-      offset += payload.length;
-      const packet = buildRtp({
-        payload,
-        payloadType: 0,
-        sequence: this.sequence++,
-        timestamp: this.timestamp,
-        ssrc: this.ssrc,
-      });
-      this.timestamp = (this.timestamp + payload.length) >>> 0;
-      this.socket.send(packet, this.remotePort, this.remoteIp);
+    if (!buffer?.length || this.closed) return;
+    this.outboundQueue = Buffer.concat([this.outboundQueue, Buffer.from(buffer)]);
+    if (this.outboundQueue.length > RTP_MAX_QUEUED_BYTES) {
+      const dropBytes = this.outboundQueue.length - RTP_MAX_QUEUED_BYTES;
+      this.outboundQueue = this.outboundQueue.subarray(dropBytes);
+      this.outboundDroppedBytes += dropBytes;
     }
   }
 
+  flushOutboundAudio() {
+    if (!this.remoteIp || !this.remotePort || this.closed || this.outboundQueue.length < RTP_PACKET_BYTES) return;
+    const payload = this.outboundQueue.subarray(0, RTP_PACKET_BYTES);
+    this.outboundQueue = this.outboundQueue.subarray(RTP_PACKET_BYTES);
+    const packet = buildRtp({
+      payload,
+      payloadType: 0,
+      sequence: this.sequence++,
+      timestamp: this.timestamp,
+      ssrc: this.ssrc,
+    });
+    this.timestamp = (this.timestamp + payload.length) >>> 0;
+    this.socket.send(packet, this.remotePort, this.remoteIp);
+    this.outboundPackets += 1;
+    this.outboundBytes += payload.length;
+  }
+
+  clearOutboundAudio() {
+    this.outboundDroppedBytes += this.outboundQueue.length;
+    this.outboundQueue = Buffer.alloc(0);
+  }
+
+  stats() {
+    return {
+      inboundPackets: this.inboundPackets,
+      inboundBytes: this.inboundBytes,
+      outboundPackets: this.outboundPackets,
+      outboundBytes: this.outboundBytes,
+      outboundDroppedBytes: this.outboundDroppedBytes,
+      outboundQueuedBytes: this.outboundQueue.length,
+      lastInboundAt: this.inboundPackets > 0 ? new Date(this.lastInboundAt).toISOString() : null,
+    };
+  }
+
   close() {
+    if (this.closed) return;
+    this.closed = true;
+    clearInterval(this.sendTimer);
+    this.clearOutboundAudio();
     try { this.socket.close(); } catch { /* ignore */ }
     this.onEnded?.();
   }
@@ -488,6 +597,14 @@ class SipCall {
     this.remote = null;
     this.cseq = 1;
     this.lastInvite = null;
+    this.localUri = '';
+    this.remoteUri = '';
+    this.dialogEstablished = false;
+    this.acknowledged = false;
+    this.mediaPreparePromise = null;
+    this.mediaReadyAt = null;
+    this.setupStartedAt = null;
+    this.ackTimer = null;
   }
 
   publicView() {
@@ -501,13 +618,28 @@ class SipCall {
     };
   }
 
-  async startMedia() {
+  setRemoteRtp(remoteIp, remotePort) {
+    this.remoteRtpIp = remoteIp;
+    this.remoteRtpPort = remotePort;
+    this.rtp?.setRemote(remoteIp, remotePort);
+  }
+
+  async prepareMedia() {
+    if (this.status === 'ended') throw new Error('call ended during media setup');
+    if (this.mediaPreparePromise) return this.mediaPreparePromise;
+    this.mediaPreparePromise = this.doPrepareMedia();
+    return this.mediaPreparePromise;
+  }
+
+  async doPrepareMedia() {
     if (!this.sidecar.openaiKey) {
       throw new Error('OPENAI_API_KEY is missing');
     }
+    this.status = 'media_preparing';
+    this.setupStartedAt = Date.now();
     const { model, voice } = this.sidecar.voice;
     const instructions = this.sidecar.buildInstructions(this);
-    this.rtp = new RtpSession({
+    this.rtp = this.sidecar.createRtpSession({
       localIp: this.sidecar.localIp,
       port: this.localRtpPort,
       remoteIp: this.remoteRtpIp,
@@ -515,26 +647,55 @@ class SipCall {
       onInboundAudio: (payload) => this.openai?.appendAudio(payload),
     });
     await this.rtp.start();
-    this.openai = new OpenAiRealtimeBridge({
+    if (this.status === 'ended') throw new Error('call ended during RTP setup');
+    this.openai = this.sidecar.createOpenAiBridge({
       apiKey: this.sidecar.openaiKey,
       model,
       voice,
       instructions,
       onAudio: (payload) => this.rtp?.sendAudio(payload),
-      onEvent: (event) => this.sidecar.logEvent('call_event', { callId: this.id, ...event }),
-      onClose: () => this.end('openai_closed'),
+      onEvent: (event) => {
+        if (event.type === 'input_audio_buffer.speech_started') this.rtp?.clearOutboundAudio?.();
+        this.sidecar.recordOpenAiEvent(this, event);
+        if (event.type === 'error' || event.type === 'openai_error') {
+          this.end('openai_error', { notifyRemote: true });
+        }
+      },
+      onClose: () => this.end('openai_closed', { notifyRemote: true }),
     });
     await this.openai.connect();
-    this.status = 'media_active';
-    this.sidecar.logEvent('call_media_active', { callId: this.id, direction: this.direction });
+    if (this.status === 'ended') {
+      this.openai.close();
+      throw new Error('call ended during OpenAI setup');
+    }
+    this.mediaReadyAt = nowIso();
+    this.status = 'media_ready';
+    this.sidecar.logEvent('call_media_ready', {
+      callId: this.id,
+      direction: this.direction,
+      setupMs: Date.now() - this.setupStartedAt,
+    });
   }
 
-  end(reason = 'ended') {
+  activateMedia() {
+    if (this.status === 'ended') return false;
+    const started = this.openai?.startResponse() ?? false;
+    if (!started && this.status === 'media_active') return false;
+    this.status = 'media_active';
+    this.sidecar.logEvent('call_media_active', { callId: this.id, direction: this.direction });
+    return started;
+  }
+
+  end(reason = 'ended', { notifyRemote = false } = {}) {
     if (this.status === 'ended') return;
+    const rtpStats = this.rtp?.stats?.() ?? null;
     this.status = 'ended';
+    clearTimeout(this.ackTimer);
+    if (notifyRemote && this.dialogEstablished && this.acknowledged) this.sidecar.sendBye(this);
     try { this.openai?.close(); } catch { /* ignore */ }
     try { this.rtp?.close(); } catch { /* ignore */ }
-    this.sidecar.logEvent('call_ended', { callId: this.id, reason });
+    this.sidecar.onCallEnded(this);
+    this.sidecar.logEvent('call_ended', { callId: this.id, reason, rtp: rtpStats });
   }
 }
 
@@ -565,6 +726,8 @@ class SipSidecar {
     this.lastRegister = null;
     this.lastRegisterError = null;
     this.calls = new Map();
+    this.callsBySipId = new Map();
+    this.inboundTransactions = new Map();
     this.pendingTransactions = new Map();
     this.auditPath = this.pbx.auditPath || join(os.homedir(), '.agenticmail', 'sip-sidecar', 'events.jsonl');
     this.nextRtpPort = this.rtpMin % 2 === 0 ? this.rtpMin : this.rtpMin + 1;
@@ -606,6 +769,26 @@ class SipSidecar {
     });
   }
 
+  recordOpenAiEvent(call, event) {
+    const text = String(event.text || event.message || '');
+    const payload = {
+      callId: call.id,
+      eventType: event.type,
+      textPresent: Boolean(text),
+      textLength: text.length,
+    };
+    if (event.type === 'error' || event.type === 'openai_error') payload.error = text.slice(0, 500);
+    this.logEvent('call_event', payload);
+  }
+
+  createRtpSession(options) {
+    return new RtpSession(options);
+  }
+
+  createOpenAiBridge(options) {
+    return new OpenAiRealtimeBridge(options);
+  }
+
   buildInstructions(call) {
     const task = call.task || this.pbx.defaultTask || [
       'You are the sales AI agent for the company.',
@@ -614,9 +797,13 @@ class SipSidecar {
       'Do not make binding commercial promises, legal commitments, discounts, shipment promises, or payment commitments.',
       'If the caller asks for something you cannot verify, say you will clarify and follow up.',
     ].join(' ');
+    const opening = call.direction === 'inbound'
+      ? 'Start exactly once with: "Здравствуйте! Вы позвонили в отдел продаж. Чем могу помочь?"'
+      : 'Start exactly once with: "Здравствуйте! Это голосовой помощник отдела продаж. Вам удобно сейчас говорить?"';
     return [
       `You are speaking on a live phone call through PBX extension ${this.username}.`,
-      'Speak first with a short greeting. Keep turns concise and allow interruptions.',
+      opening,
+      'Keep turns concise, ask one question at a time, and stop speaking immediately when the other person interrupts.',
       task,
     ].join('\n\n');
   }
@@ -631,6 +818,48 @@ class SipSidecar {
   send(text, remote) {
     const buf = Buffer.from(text, 'utf8');
     this.socket.send(buf, remote.port, remote.address);
+  }
+
+  inboundTransactionKey(msg) {
+    const cseq = parseCseq(header(msg, 'cseq'));
+    return `${header(msg, 'call-id')}:${tagOf(header(msg, 'from'))}:${cseq.number}`;
+  }
+
+  retainInboundTransaction(tx) {
+    clearTimeout(tx.cleanupTimer);
+    tx.cleanupTimer = setTimeout(() => {
+      if (this.inboundTransactions.get(tx.key) === tx) this.inboundTransactions.delete(tx.key);
+    }, INBOUND_TRANSACTION_TTL_MS);
+    tx.cleanupTimer.unref?.();
+  }
+
+  sendInboundFinal(tx, response, code) {
+    tx.finalResponse = response;
+    tx.finalCode = code;
+    this.send(response, tx.remote);
+    this.retainInboundTransaction(tx);
+  }
+
+  onCallEnded(call) {
+    if (this.callsBySipId.get(call.callId) === call) this.callsBySipId.delete(call.callId);
+    const ended = [...this.calls.values()].filter((item) => item.status === 'ended');
+    for (const old of ended.slice(0, Math.max(0, ended.length - 100))) this.calls.delete(old.id);
+  }
+
+  sendBye(call) {
+    if (!call.remote || !call.remoteTarget || !call.localUri || !call.remoteUri) return;
+    call.cseq += 1;
+    const headers = [
+      ['Via', `SIP/2.0/UDP ${this.localIp}:${this.signalingPort};rport;branch=z9hG4bK${randomHex(8)}`],
+      ['Max-Forwards', '70'],
+      ['From', `<${call.localUri}>;tag=${call.localTag}`],
+      ['To', `<${call.remoteUri}>;tag=${call.remoteTag}`],
+      ['Call-ID', call.callId],
+      ['CSeq', `${call.cseq} BYE`],
+      ['User-Agent', 'AgenticMail-SIP-Sidecar'],
+    ];
+    this.send(buildSipMessage(`BYE ${call.remoteTarget} SIP/2.0`, headers), call.remote);
+    this.logEvent('local_bye_sent', { callId: call.id, reason: 'local_termination' });
   }
 
   buildBaseHeaders({ method, uri, callId, fromTag, toUri, toTag, cseq, branch, contact = true }) {
@@ -819,11 +1048,14 @@ class SipSidecar {
       await this.handleInvite(msg, remote);
       return;
     }
-    if (method === 'ACK') return;
+    if (method === 'ACK') {
+      this.handleAck(msg);
+      return;
+    }
     if (method === 'BYE') {
-      const call = [...this.calls.values()].find((item) => item.callId === header(msg, 'call-id'));
-      if (call) call.end('remote_bye');
+      const call = this.callsBySipId.get(header(msg, 'call-id'));
       this.send(responseTo(msg, 200, 'OK'), remote);
+      if (call) call.end('remote_bye', { notifyRemote: false });
       return;
     }
     if (method === 'OPTIONS') {
@@ -831,10 +1063,39 @@ class SipSidecar {
       return;
     }
     if (method === 'CANCEL') {
-      this.send(responseTo(msg, 200, 'OK'), remote);
+      this.handleCancel(msg, remote);
       return;
     }
     this.send(responseTo(msg, 405, 'Method Not Allowed', [['Allow', 'INVITE, ACK, BYE, CANCEL, OPTIONS']]), remote);
+  }
+
+  handleAck(msg) {
+    const call = this.callsBySipId.get(header(msg, 'call-id'));
+    if (!call || call.status === 'ended' || !call.dialogEstablished) return;
+    if (call.acknowledged) {
+      this.logEvent('inbound_ack_retransmit', { callId: call.id });
+      return;
+    }
+    call.acknowledged = true;
+    clearTimeout(call.ackTimer);
+    call.activateMedia();
+    this.logEvent('inbound_ack', { callId: call.id });
+  }
+
+  handleCancel(msg, remote) {
+    const key = this.inboundTransactionKey(msg);
+    const tx = this.inboundTransactions.get(key);
+    if (!tx || tx.finalResponse) {
+      this.send(responseTo(msg, 481, 'Call/Transaction Does Not Exist'), remote);
+      return;
+    }
+    this.send(responseTo(msg, 200, 'OK'), remote);
+    tx.cancelled = true;
+    const localTo = `${header(tx.request, 'to')};tag=${tx.call?.localTag || randomHex(6)}`;
+    const terminated = responseTo(tx.request, 487, 'Request Terminated', [['To', localTo]]);
+    this.sendInboundFinal(tx, terminated, 487);
+    tx.call?.end('remote_cancel', { notifyRemote: false });
+    this.logEvent('inbound_cancelled', { callId: tx.call?.id });
   }
 
   handleResponse(msg) {
@@ -855,53 +1116,110 @@ class SipSidecar {
   }
 
   async handleInvite(msg, remote) {
+    const txKey = this.inboundTransactionKey(msg);
+    const existing = this.inboundTransactions.get(txKey);
+    if (existing) {
+      const response = existing.finalResponse || existing.provisionalResponse || responseTo(msg, 100, 'Trying');
+      this.send(response, remote);
+      this.logEvent('inbound_invite_retransmit', {
+        callId: existing.call?.id,
+        responseCode: existing.finalCode || 180,
+      });
+      return existing.call;
+    }
+    const tx = {
+      key: txKey,
+      request: msg,
+      remote,
+      call: null,
+      provisionalResponse: null,
+      finalResponse: null,
+      finalCode: null,
+      cancelled: false,
+      cleanupTimer: null,
+    };
+    this.inboundTransactions.set(txKey, tx);
+    this.send(responseTo(msg, 100, 'Trying'), remote);
+    const existingDialog = this.callsBySipId.get(header(msg, 'call-id'));
+    if (existingDialog && existingDialog.status !== 'ended') {
+      const code = existingDialog.dialogEstablished ? 488 : 491;
+      const reason = code === 488 ? 'Not Acceptable Here' : 'Request Pending';
+      this.sendInboundFinal(tx, responseTo(msg, code, reason), code);
+      this.logEvent('inbound_reinvite_rejected', { callId: existingDialog.id, code });
+      return existingDialog;
+    }
     if (!this.allowInbound) {
-      this.send(responseTo(msg, 486, 'Busy Here'), remote);
+      this.sendInboundFinal(tx, responseTo(msg, 486, 'Busy Here'), 486);
       return;
     }
-    if (this.missing().length > 0) {
-      this.send(responseTo(msg, 480, 'Temporarily Unavailable'), remote);
+    if (this.missing({ refresh: false }).length > 0) {
+      this.sendInboundFinal(tx, responseTo(msg, 480, 'Temporarily Unavailable'), 480);
       return;
     }
     const sdp = parseSdp(msg.body);
     if (!sdp.connection || !sdp.port || !sdp.payloads.includes(0)) {
-      this.send(responseTo(msg, 488, 'Not Acceptable Here'), remote);
+      this.sendInboundFinal(tx, responseTo(msg, 488, 'Not Acceptable Here'), 488);
       return;
     }
-    this.send(responseTo(msg, 100, 'Trying'), remote);
-    this.send(responseTo(msg, 180, 'Ringing'), remote);
+    tx.provisionalResponse = responseTo(msg, 180, 'Ringing');
+    this.send(tx.provisionalResponse, remote);
     const call = new SipCall({
       id: `sip_${Date.now()}_${randomHex(4)}`,
       direction: 'inbound',
       sidecar: this,
     });
+    tx.call = call;
     call.callId = header(msg, 'call-id');
     call.remote = remote;
     call.remoteTarget = splitAddress(header(msg, 'contact')) || splitAddress(header(msg, 'from'));
     call.remoteTag = tagOf(header(msg, 'from'));
+    call.localUri = splitAddress(header(msg, 'to'));
+    call.remoteUri = splitAddress(header(msg, 'from'));
+    call.cseq = parseCseq(header(msg, 'cseq')).number;
     call.localRtpPort = this.allocateRtpPort();
-    call.remoteRtpIp = sdp.connection;
-    call.remoteRtpPort = sdp.port;
+    call.setRemoteRtp(sdp.connection, sdp.port);
     this.calls.set(call.id, call);
+    this.callsBySipId.set(call.callId, call);
     const localTo = `${header(msg, 'to')};tag=${call.localTag}`;
     const answerSdp = buildSdp({ localIp: this.localIp, rtpPort: call.localRtpPort });
-    this.send(responseTo(msg, 200, 'OK', [
-      ['To', localTo],
-      ['Contact', `<sip:${this.username}@${this.localIp}:${this.signalingPort};transport=udp>`],
-      ['Content-Type', 'application/sdp'],
-    ], answerSdp), remote);
-    this.logEvent('inbound_invite_answered', { callId: call.id });
     try {
-      await call.startMedia();
+      await call.prepareMedia();
+      if (tx.cancelled) return call;
+      if (call.status === 'ended') {
+        if (!tx.finalResponse) {
+          this.sendInboundFinal(tx, responseTo(msg, 480, 'Temporarily Unavailable', [['To', localTo]]), 480);
+        }
+        return call;
+      }
+      const answer = responseTo(msg, 200, 'OK', [
+        ['To', localTo],
+        ['Contact', `<sip:${this.username}@${this.localIp}:${this.signalingPort};transport=udp>`],
+        ['Content-Type', 'application/sdp'],
+      ], answerSdp);
+      call.dialogEstablished = true;
+      this.sendInboundFinal(tx, answer, 200);
+      call.ackTimer = setTimeout(() => call.end('ack_timeout', { notifyRemote: false }), INBOUND_ACK_TIMEOUT_MS);
+      call.ackTimer.unref?.();
+      this.logEvent('inbound_invite_answered', {
+        callId: call.id,
+        setupMs: Date.now() - call.setupStartedAt,
+      });
     } catch (err) {
       this.logEvent('call_media_failed', { callId: call.id, message: err.message });
-      call.end('media_failed');
+      if (!tx.finalResponse) {
+        this.sendInboundFinal(tx, responseTo(msg, 480, 'Temporarily Unavailable', [['To', localTo]]), 480);
+      }
+      call.end('media_failed', { notifyRemote: call.dialogEstablished });
     }
+    return call;
   }
 
   async startOutbound(body) {
+    this.refreshRuntimeConfig();
     if (!this.allowOutbound) throw new Error('outbound calls are disabled in PBX profile');
-    if (this.missing().length > 0) throw new Error(`not ready: ${this.missing().join(', ')}`);
+    if (this.missing({ refresh: false }).length > 0) {
+      throw new Error(`not ready: ${this.missing({ refresh: false }).join(', ')}`);
+    }
     const to = String(body.to || '').trim();
     if (!to) throw new Error('to is required');
     if (!/^[+0-9*#]{2,32}$/.test(to)) throw new Error('to must be a dialable phone/extension string');
@@ -913,13 +1231,19 @@ class SipSidecar {
       sidecar: this,
     });
     call.localRtpPort = this.allocateRtpPort();
+    call.localUri = `sip:${this.username}@${this.server}`;
+    call.remoteUri = `sip:${to}@${this.server}`;
+    call.remote = { address: this.server, port: this.port };
     this.calls.set(call.id, call);
+    this.callsBySipId.set(call.callId, call);
     try {
+      await call.prepareMedia();
       await this.sendInvite(call);
       return call;
     } catch (err) {
       this.logEvent('call_outbound_failed', { callId: call.id, message: err.message });
-      call.end('dial_failed');
+      if (!call.dialogEstablished) this.sendCancel(call);
+      call.end('dial_failed', { notifyRemote: call.dialogEstablished });
       throw err;
     }
   }
@@ -928,6 +1252,7 @@ class SipSidecar {
     const uri = `sip:${call.toNumber}@${this.server}`;
     const sdp = buildSdp({ localIp: this.localIp, rtpPort: call.localRtpPort });
     const makeInvite = (cseq, auth = '') => {
+      const branch = `z9hG4bK${randomHex(8)}`;
       const { startLine, headers } = this.buildBaseHeaders({
         method: 'INVITE',
         uri,
@@ -935,14 +1260,18 @@ class SipSidecar {
         fromTag: call.localTag,
         toUri: uri,
         cseq,
+        branch,
       });
       headers.push(['Content-Type', 'application/sdp']);
       if (auth) headers.push(['Authorization', auth]);
-      return buildSipMessage(startLine, headers, sdp);
+      return { text: buildSipMessage(startLine, headers, sdp), branch, cseq, uri };
     };
-    let response = await this.sendTransaction(makeInvite(1), { address: this.server, port: this.port }, call.callId, 'INVITE', 1, 15000);
+    let invite = makeInvite(1);
+    call.lastInvite = invite;
+    let response = await this.sendTransaction(invite.text, call.remote, call.callId, 'INVITE', invite.cseq, 15_000);
     let code = statusCodeOf(response);
     if ([401, 407].includes(code)) {
+      this.sendNon2xxAck(call, response, invite);
       const challengeHeader = header(response, 'www-authenticate') || header(response, 'proxy-authenticate');
       const challenge = parseDigestChallenge(challengeHeader);
       const auth = buildDigestAuth({
@@ -952,30 +1281,68 @@ class SipSidecar {
         uri,
         challenge,
       });
-      response = await this.sendTransaction(makeInvite(2, auth), { address: this.server, port: this.port }, call.callId, 'INVITE', 2, 60000);
+      invite = makeInvite(2, auth);
+      call.lastInvite = invite;
+      response = await this.sendTransaction(invite.text, call.remote, call.callId, 'INVITE', invite.cseq, 60_000);
       code = statusCodeOf(response);
     }
-    if (code !== 200) throw new Error(`INVITE failed: ${response.startLine}`);
-    const answer = parseSdp(response.body);
-    if (!answer.connection || !answer.port || !answer.payloads.includes(0)) throw new Error('remote answer did not accept PCMU');
-    call.remoteRtpIp = answer.connection;
-    call.remoteRtpPort = answer.port;
+    if (code !== 200) {
+      this.sendNon2xxAck(call, response, invite);
+      throw new Error(`INVITE failed: ${response.startLine}`);
+    }
     call.remoteTag = tagOf(header(response, 'to'));
     call.remoteTarget = splitAddress(header(response, 'contact')) || uri;
-    const ack = this.buildAck(call, uri);
-    this.send(ack, { address: this.server, port: this.port });
-    await call.startMedia();
+    call.cseq = invite.cseq;
+    call.dialogEstablished = true;
+    const ack = this.buildAck(call);
+    this.send(ack, call.remote);
+    call.acknowledged = true;
+    const answer = parseSdp(response.body);
+    if (!answer.connection || !answer.port || !answer.payloads.includes(0)) throw new Error('remote answer did not accept PCMU');
+    call.setRemoteRtp(answer.connection, answer.port);
+    call.activateMedia();
+    this.logEvent('outbound_call_answered', { callId: call.id });
   }
 
-  buildAck(call, uri) {
+  sendNon2xxAck(call, response, invite) {
+    const headers = [
+      ['Via', `SIP/2.0/UDP ${this.localIp}:${this.signalingPort};rport;branch=${invite.branch}`],
+      ['Max-Forwards', '70'],
+      ['From', header(response, 'from')],
+      ['To', header(response, 'to')],
+      ['Call-ID', call.callId],
+      ['CSeq', `${invite.cseq} ACK`],
+      ['User-Agent', 'AgenticMail-SIP-Sidecar'],
+    ];
+    this.send(buildSipMessage(`ACK ${invite.uri} SIP/2.0`, headers), call.remote);
+  }
+
+  sendCancel(call) {
+    const invite = call.lastInvite;
+    if (!invite || !call.remote) return;
+    const headers = [
+      ['Via', `SIP/2.0/UDP ${this.localIp}:${this.signalingPort};rport;branch=${invite.branch}`],
+      ['Max-Forwards', '70'],
+      ['From', `<${call.localUri}>;tag=${call.localTag}`],
+      ['To', `<${call.remoteUri}>`],
+      ['Call-ID', call.callId],
+      ['CSeq', `${invite.cseq} CANCEL`],
+      ['User-Agent', 'AgenticMail-SIP-Sidecar'],
+    ];
+    this.send(buildSipMessage(`CANCEL ${invite.uri} SIP/2.0`, headers), call.remote);
+    this.logEvent('outbound_cancel_sent', { callId: call.id });
+  }
+
+  buildAck(call) {
+    const uri = call.remoteTarget || call.remoteUri;
     const local = `${this.localIp}:${this.signalingPort}`;
     const headers = [
       ['Via', `SIP/2.0/UDP ${local};rport;branch=z9hG4bK${randomHex(8)}`],
       ['Max-Forwards', '70'],
-      ['From', `<sip:${this.username}@${this.server}>;tag=${call.localTag}`],
-      ['To', `<${uri}>;tag=${call.remoteTag}`],
+      ['From', `<${call.localUri}>;tag=${call.localTag}`],
+      ['To', `<${call.remoteUri}>;tag=${call.remoteTag}`],
       ['Call-ID', call.callId],
-      ['CSeq', '2 ACK'],
+      ['CSeq', `${call.cseq} ACK`],
       ['Contact', `<sip:${this.username}@${local};transport=udp>`],
       ['User-Agent', 'AgenticMail-SIP-Sidecar'],
     ];
@@ -983,15 +1350,32 @@ class SipSidecar {
   }
 }
 
-const args = parseArgs(process.argv.slice(2));
-const configPath = args.config || process.env.PBX199_CONFIG_PATH || DEFAULT_CONFIG_PATH;
-const agenticmailConfigPath = args.agenticmailConfig || process.env.AGENTICMAIL_CONFIG_PATH || DEFAULT_AGENTICMAIL_CONFIG_PATH;
-const sidecar = new SipSidecar({ configPath, agenticmailConfigPath });
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const configPath = args.config || process.env.PBX199_CONFIG_PATH || DEFAULT_CONFIG_PATH;
+  const agenticmailConfigPath = args.agenticmailConfig || process.env.AGENTICMAIL_CONFIG_PATH || DEFAULT_AGENTICMAIL_CONFIG_PATH;
+  const sidecar = new SipSidecar({ configPath, agenticmailConfigPath });
 
-process.on('SIGINT', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));
+  process.on('SIGINT', () => process.exit(0));
+  process.on('SIGTERM', () => process.exit(0));
 
-sidecar.start().catch((err) => {
-  console.error(`[sip-sidecar] failed to start: ${err.message}`);
-  process.exit(1);
-});
+  await sidecar.start();
+}
+
+const isMain = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+if (isMain) {
+  main().catch((err) => {
+    console.error(`[sip-sidecar] failed to start: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+export {
+  OpenAiRealtimeBridge,
+  RtpSession,
+  SipCall,
+  SipSidecar,
+  buildSipMessage,
+  parseSipMessage,
+  responseTo,
+};
