@@ -149,6 +149,51 @@ test('outbound PCMU is paced as one 20 ms RTP packet per flush', () => {
   rtp.close();
 });
 
+test('outbound PCMU buffers a ten second response without dropping audio', () => {
+  const rtp = new RtpSession({
+    localIp: '127.0.0.1',
+    port: 40201,
+    remoteIp: '192.0.2.20',
+    remotePort: 41000,
+  });
+
+  rtp.sendAudio(Buffer.alloc(80000, 0x7f));
+  assert.equal(rtp.stats().outboundQueuedBytes, 80000);
+  assert.equal(rtp.stats().outboundOverflowDroppedBytes, 0);
+
+  rtp.close();
+  assert.equal(rtp.stats().outboundAbandonedBytes, 80000);
+});
+
+test('outbound PCMU preserves queued audio when the safety buffer overflows', () => {
+  const packets = [];
+  const rtp = new RtpSession({
+    localIp: '127.0.0.1',
+    port: 40202,
+    remoteIp: '192.0.2.20',
+    remotePort: 41000,
+  });
+  rtp.socket.send = (packet) => packets.push(packet);
+
+  const audio = Buffer.concat([
+    Buffer.alloc(160, 0x11),
+    Buffer.alloc(479840, 0x22),
+    Buffer.alloc(20000, 0x33),
+  ]);
+  rtp.sendAudio(audio);
+  assert.equal(rtp.stats().outboundQueuedBytes, 480000);
+  assert.equal(rtp.stats().outboundOverflowDroppedBytes, 20000);
+
+  rtp.flushOutboundAudio();
+  assert.equal(packets.length, 1);
+  assert.deepEqual(packets[0].subarray(12), Buffer.alloc(160, 0x11));
+
+  rtp.clearOutboundAudio();
+  assert.equal(rtp.stats().outboundInterruptedBytes, 479840);
+  assert.equal(rtp.stats().outboundDroppedBytes, 499840);
+  rtp.close();
+});
+
 test('CANCEL during Realtime setup terminates the one pending inbound call', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-cancel-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

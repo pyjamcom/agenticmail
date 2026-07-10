@@ -29,7 +29,10 @@ const REGISTER_EXPIRES_SECONDS = 60;
 const REGISTER_RENEW_SECONDS = 45;
 const RTP_PACKET_BYTES = 160;
 const RTP_PACKET_INTERVAL_MS = 20;
-const RTP_MAX_QUEUED_BYTES = RTP_PACKET_BYTES * 100;
+// OpenAI can generate PCMU much faster than realtime. Keep up to 60 seconds
+// so a normal response is paced instead of having its middle silently cut.
+const RTP_MAX_QUEUED_BYTES = RTP_PACKET_BYTES * 3000;
+const RTP_MAX_CATCH_UP_PACKETS = 3;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 const INBOUND_TRANSACTION_TTL_MS = 64_000;
 const INBOUND_ACK_TIMEOUT_MS = 32_000;
@@ -1123,9 +1126,15 @@ class RtpSession {
     this.inboundBytes = 0;
     this.outboundPackets = 0;
     this.outboundBytes = 0;
-    this.outboundDroppedBytes = 0;
+    this.outboundOverflowDroppedBytes = 0;
+    this.outboundInterruptedBytes = 0;
+    this.outboundAbandonedBytes = 0;
     this.outboundQueue = Buffer.alloc(0);
     this.sendTimer = null;
+    this.nextSendAt = 0;
+    this.pacerLateTicks = 0;
+    this.pacerMaxLateMs = 0;
+    this.pacerResyncs = 0;
     this.closed = false;
   }
 
@@ -1149,8 +1158,7 @@ class RtpSession {
         resolve();
       });
     });
-    this.sendTimer = setInterval(() => this.flushOutboundAudio(), RTP_PACKET_INTERVAL_MS);
-    this.sendTimer.unref?.();
+    this.startOutboundPacer();
   }
 
   setRemote(remoteIp, remotePort) {
@@ -1160,12 +1168,49 @@ class RtpSession {
 
   sendAudio(buffer) {
     if (!buffer?.length || this.closed) return;
-    this.outboundQueue = Buffer.concat([this.outboundQueue, Buffer.from(buffer)]);
-    if (this.outboundQueue.length > RTP_MAX_QUEUED_BYTES) {
-      const dropBytes = this.outboundQueue.length - RTP_MAX_QUEUED_BYTES;
-      this.outboundQueue = this.outboundQueue.subarray(dropBytes);
-      this.outboundDroppedBytes += dropBytes;
+    const incoming = Buffer.from(buffer);
+    const available = Math.max(0, RTP_MAX_QUEUED_BYTES - this.outboundQueue.length);
+    if (available > 0) {
+      this.outboundQueue = Buffer.concat([this.outboundQueue, incoming.subarray(0, available)]);
     }
+    if (incoming.length > available) this.outboundOverflowDroppedBytes += incoming.length - available;
+  }
+
+  startOutboundPacer() {
+    this.nextSendAt = performance.now() + RTP_PACKET_INTERVAL_MS;
+    const tick = () => {
+      if (this.closed) return;
+      const now = performance.now();
+      if (this.outboundQueue.length < RTP_PACKET_BYTES) {
+        this.nextSendAt = now + RTP_PACKET_INTERVAL_MS;
+      } else {
+        let sent = 0;
+        while (
+          this.outboundQueue.length >= RTP_PACKET_BYTES
+          && now >= this.nextSendAt
+          && sent < RTP_MAX_CATCH_UP_PACKETS
+        ) {
+          const lateMs = Math.max(0, now - this.nextSendAt);
+          if (lateMs >= 5) this.pacerLateTicks += 1;
+          this.pacerMaxLateMs = Math.max(this.pacerMaxLateMs, lateMs);
+          this.flushOutboundAudio();
+          this.nextSendAt += RTP_PACKET_INTERVAL_MS;
+          sent += 1;
+        }
+        if (sent === RTP_MAX_CATCH_UP_PACKETS && now >= this.nextSendAt) {
+          this.pacerResyncs += 1;
+          this.nextSendAt = now + RTP_PACKET_INTERVAL_MS;
+        }
+      }
+      const delayMs = Math.max(1, Math.min(
+        RTP_PACKET_INTERVAL_MS,
+        this.nextSendAt - performance.now(),
+      ));
+      this.sendTimer = setTimeout(tick, delayMs);
+      this.sendTimer.unref?.();
+    };
+    this.sendTimer = setTimeout(tick, RTP_PACKET_INTERVAL_MS);
+    this.sendTimer.unref?.();
   }
 
   flushOutboundAudio() {
@@ -1185,8 +1230,9 @@ class RtpSession {
     this.outboundBytes += payload.length;
   }
 
-  clearOutboundAudio() {
-    this.outboundDroppedBytes += this.outboundQueue.length;
+  clearOutboundAudio(reason = 'interruption') {
+    if (reason === 'interruption') this.outboundInterruptedBytes += this.outboundQueue.length;
+    else this.outboundAbandonedBytes += this.outboundQueue.length;
     this.outboundQueue = Buffer.alloc(0);
   }
 
@@ -1196,8 +1242,14 @@ class RtpSession {
       inboundBytes: this.inboundBytes,
       outboundPackets: this.outboundPackets,
       outboundBytes: this.outboundBytes,
-      outboundDroppedBytes: this.outboundDroppedBytes,
+      outboundDroppedBytes: this.outboundOverflowDroppedBytes + this.outboundInterruptedBytes,
+      outboundOverflowDroppedBytes: this.outboundOverflowDroppedBytes,
+      outboundInterruptedBytes: this.outboundInterruptedBytes,
+      outboundAbandonedBytes: this.outboundAbandonedBytes,
       outboundQueuedBytes: this.outboundQueue.length,
+      pacerLateTicks: this.pacerLateTicks,
+      pacerMaxLateMs: Math.round(this.pacerMaxLateMs * 100) / 100,
+      pacerResyncs: this.pacerResyncs,
       lastInboundAt: this.inboundPackets > 0 ? new Date(this.lastInboundAt).toISOString() : null,
     };
   }
@@ -1205,8 +1257,8 @@ class RtpSession {
   close() {
     if (this.closed) return;
     this.closed = true;
-    clearInterval(this.sendTimer);
-    this.clearOutboundAudio();
+    clearTimeout(this.sendTimer);
+    this.clearOutboundAudio('close');
     try { this.socket.close(); } catch { /* ignore */ }
     this.onEnded?.();
   }
