@@ -11,7 +11,14 @@ The sidecar:
 - polls for new Inbox messages and forwards RFC 822 payloads to AgenticMail's
   authenticated inbound endpoint;
 - keeps a bounded deduplication state and a metadata-only audit log;
+- archives completed inbound SIP transcripts idempotently into the MemPalace
+  room `incoming_calls` through an API-backed retry queue;
 - exposes local health on `127.0.0.1`.
 
 It does not mark Exchange messages as read or send external email. Runtime
 configuration is supplied as a local JSON file and must not be committed.
+
+The transcript archive is enabled with `INCOMING_CALL_MEMPALACE_PATH`. Stored
+documents contain the full call text and a structured intake card, but are
+marked as untrusted case history and are never treated as verified company
+knowledge or direct voice-agent instructions.

@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Database } from '../storage/db.js';
-import { encryptSecret, decryptSecret, isEncryptedSecret } from '../crypto/secrets.js';
+import { encryptSecret, decryptSecret, decryptSecretAsync, isEncryptedSecret } from '../crypto/secrets.js';
 import { normalizePhoneNumber } from '../sms/manager.js';
 import { buildTwilioStreamTwiML } from './twilio.js';
 import { TWILIO_REALTIME_WS_PATH } from './realtime-paths.js';
@@ -1242,6 +1242,129 @@ export class PhoneManager {
       );
     }
     return { missionId, transcriptCount: mission.transcript.length + uniqueEntries.length };
+  }
+
+  /** Read a SIP mission while deriving transcript keys off the event-loop thread. */
+  async getSipMissionAsync(missionId: string): Promise<PhoneCallMission> {
+    const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+    if (!row) throw new Error('SIP phone mission not found');
+    const mission = rowToMission(row);
+    if (mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+    if (!this.encryptionKey) return mission;
+    mission.transcript = await Promise.all(mission.transcript.map(async (entry) => ({
+      ...entry,
+      text: isEncryptedSecret(entry.text)
+        ? await decryptSecretAsync(entry.text, this.encryptionKey!)
+        : entry.text,
+    })));
+    return mission;
+  }
+
+  /**
+   * Finalize a direct-SIP mission without decrypting its historical transcript.
+   * SIP transcript entries use scrypt-derived per-entry keys, so decrypting the
+   * full call on the request thread can block the API for many seconds.
+   */
+  finalizeSipMission(
+    missionId: string,
+    input: {
+      status: PhoneMissionState;
+      reason: string;
+      metadata?: Record<string, unknown>;
+      at?: Date;
+    },
+  ): { mission: PhoneCallMission; intake: SalesCallIntake; transcriptCount: number } {
+    const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+    if (!row) throw new Error('SIP phone mission not found');
+    const rawMission = rowToMission(row);
+    if (rawMission.provider !== 'sip') throw new Error('SIP phone mission not found');
+
+    const now = input.at ?? new Date();
+    let intake = mergeSalesCallIntake(rawMission.metadata.salesIntake, {}, now);
+    if (!intake.outcome || !intake.summary || !intake.nextAction) {
+      intake = mergeSalesCallIntake(intake, {
+        ...(!intake.outcome
+          ? { outcome: intake.missingFields.length === 0 ? 'qualified' : 'incomplete' }
+          : {}),
+        ...(!intake.summary
+          ? { summary: 'Call ended before a structured summary was captured.' }
+          : {}),
+        ...(!intake.nextAction
+          ? { nextAction: { type: 'manager_follow_up', notes: 'Review the incomplete call record and transcript.' } }
+          : {}),
+      }, now);
+    }
+
+    const eventId = `${missionId}:finalized`;
+    const alreadyFinalized = rawMission.transcript.some(
+      (entry) => asString(entry.metadata?.eventId) === eventId,
+    );
+    const finalEntry: PhoneMissionTranscriptEntry = {
+      at: now.toISOString(),
+      source: 'system',
+      text: `Direct SIP call finalized (${input.reason}).`,
+      metadata: { eventId, reason: input.reason },
+    };
+    const nextTranscript = alreadyFinalized
+      ? rawMission.transcript
+      : [...rawMission.transcript, ...this.encodeTranscriptEntries('sip', [finalEntry])];
+    const nextStatus = TERMINAL_MISSION_STATES.includes(rawMission.status)
+      ? rawMission.status
+      : input.status;
+    const nextMetadata = Object.fromEntries(Object.entries({
+      ...rawMission.metadata,
+      salesIntake: intake,
+      intakeComplete: intake.missingFields.length === 0,
+      ...(input.metadata ?? {}),
+      endedAt: now.toISOString(),
+      endReason: input.reason,
+    }).filter(([, value]) => value !== undefined));
+
+    this.db.prepare(`
+      UPDATE phone_missions
+      SET status = ?, transcript_json = ?, metadata_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      nextStatus,
+      JSON.stringify(nextTranscript),
+      JSON.stringify(nextMetadata),
+      now.toISOString(),
+      missionId,
+    );
+
+    return {
+      mission: {
+        ...rawMission,
+        status: nextStatus,
+        transcript: [],
+        metadata: nextMetadata,
+        updatedAt: now.toISOString(),
+      },
+      intake,
+      transcriptCount: nextTranscript.length,
+    };
+  }
+
+  /** Merge SIP metadata without paying the cost of transcript decryption. */
+  patchSipMissionMetadata(
+    missionId: string,
+    metadata: Record<string, unknown>,
+  ): { mission: PhoneCallMission; transcriptCount: number } {
+    const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+    if (!row) throw new Error('SIP phone mission not found');
+    const rawMission = rowToMission(row);
+    if (rawMission.provider !== 'sip') throw new Error('SIP phone mission not found');
+    const nextMetadata = Object.fromEntries(
+      Object.entries({ ...rawMission.metadata, ...metadata }).filter(([, value]) => value !== undefined),
+    );
+    const updatedAt = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE phone_missions SET metadata_json = ?, updated_at = ? WHERE id = ?
+    `).run(JSON.stringify(nextMetadata), updatedAt, missionId);
+    return {
+      mission: { ...rawMission, transcript: [], metadata: nextMetadata, updatedAt },
+      transcriptCount: rawMission.transcript.length,
+    };
   }
 
   /** Merge a model-produced partial sales intake into a direct SIP mission. */

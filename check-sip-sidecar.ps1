@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "local-health.ps1")
 
 $packet = [ordered]@{
   generatedAt = (Get-Date).ToString("o")
@@ -23,7 +24,7 @@ if (-not $packet.configFound) { $packet.blocking += "pbx_config_missing" }
 if (-not $packet.processRunning) { $packet.blocking += "sip_sidecar_not_running" }
 
 try {
-  $health = Invoke-RestMethod -Uri "http://127.0.0.1:$HealthPort/health" -TimeoutSec 5
+  $health = Get-LocalJson -Uri "http://127.0.0.1:$HealthPort/health" -TimeoutSeconds 5
   $packet.healthReachable = $true
   $packet.health = $health
   if ($health.status -ne "ok") {

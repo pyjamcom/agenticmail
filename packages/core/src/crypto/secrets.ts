@@ -10,11 +10,21 @@
  * two identical plaintexts never produce the same ciphertext and a leaked
  * SQLite file is useless without the master key.
  */
-import { createCipheriv, createDecipheriv, randomBytes, createHash, scryptSync } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, createHash, scrypt, scryptSync } from 'node:crypto';
 
 /** Derive a 32-byte AES key from the master key using scrypt + a random salt. */
 function deriveKey(key: string, salt: Buffer): Buffer {
   return scryptSync(key, salt, 32, { N: 16384, r: 8, p: 1 });
+}
+
+/** Async variant for request paths that must not block the Node event loop. */
+function deriveKeyAsync(key: string, salt: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(key, salt, 32, { N: 16384, r: 8, p: 1 }, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey);
+    });
+  });
 }
 
 /**
@@ -59,6 +69,20 @@ export function decryptSecret(value: string, key: string): string {
     return Buffer.concat([decipher.update(Buffer.from(ciphertextHex, 'hex')), decipher.final()]).toString('utf8');
   }
   return value; // plaintext (unencrypted legacy)
+}
+
+/** Decrypt a secret without running scrypt on the event-loop thread. */
+export async function decryptSecretAsync(value: string, key: string): Promise<string> {
+  if (value.startsWith('enc2:')) {
+    const parts = value.split(':');
+    if (parts.length !== 5) return value;
+    const [, saltHex, ivHex, authTagHex, ciphertextHex] = parts;
+    const derivedKey = await deriveKeyAsync(key, Buffer.from(saltHex, 'hex'));
+    const decipher = createDecipheriv('aes-256-gcm', derivedKey, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
+    return Buffer.concat([decipher.update(Buffer.from(ciphertextHex, 'hex')), decipher.final()]).toString('utf8');
+  }
+  return decryptSecret(value, key);
 }
 
 /** True if the value looks like an {@link encryptSecret} output. */

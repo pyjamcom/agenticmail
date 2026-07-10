@@ -20,7 +20,8 @@ const DEFAULT_CONFIG_PATH = join(os.homedir(), '.agenticmail', 'pbx199.local.jso
 const DEFAULT_AGENTICMAIL_CONFIG_PATH = join(os.homedir(), '.agenticmail', 'config.json');
 const DEFAULT_SALES_SCENARIO_PATH = join(dirname(fileURLToPath(import.meta.url)), 'sales-call-scenario.json');
 const DEFAULT_MODEL = 'gpt-realtime-2.1';
-const DEFAULT_VOICE = 'marin';
+const DEFAULT_VOICE = 'coral';
+const DEFAULT_VOICE_SPEED = 1.12;
 const DEFAULT_SIP_PORT = 5070;
 const DEFAULT_RTP_MIN = 40200;
 const DEFAULT_RTP_MAX = 40398;
@@ -38,6 +39,7 @@ const MAX_LOADED_SKILLS = 2;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 const INBOUND_TRANSACTION_TTL_MS = 64_000;
 const INBOUND_ACK_TIMEOUT_MS = 32_000;
+const CALL_TOOL_TIMEOUT_MS = 30_000;
 
 const SALES_SERVICE_TOPICS = [
   'customs',
@@ -219,7 +221,7 @@ const SALES_REALTIME_TOOLS = [
   {
     type: 'function',
     name: 'transfer_to_manager',
-    description: 'Request a blind transfer to an allowlisted internal manager route. Never pass or invent an extension number.',
+    description: 'Connect the caller to an allowlisted internal manager route. The caller stays with Elena unless the manager answers. Never pass or invent an extension number.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -313,6 +315,11 @@ function asInt(value, fallback) {
 function asReasoningEffort(value, fallback = 'low') {
   const normalized = String(value || '').trim().toLowerCase();
   return ['none', 'low', 'medium', 'high'].includes(normalized) ? normalized : fallback;
+}
+
+function asVoiceSpeed(value, fallback = DEFAULT_VOICE_SPEED) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(1.5, Math.max(0.25, parsed)) : fallback;
 }
 
 function parseClockMinutes(value) {
@@ -582,8 +589,14 @@ class AgenticMailSipMissionClient {
 
   flushSpool() {
     this.queue = this.queue.then(async () => {
+      const hadQueuedOperations = this.spool.count() > 0;
       const result = await this.spool.flush((operation) => this.deliver(operation));
-      if (result.remaining === 0) this.markReady();
+      if (result.remaining === 0) {
+        if (!hadQueuedOperations) {
+          await this.request(`/calls/sip/persistence-health?agent=${encodeURIComponent(this.agent)}`);
+        }
+        this.markReady();
+      }
       else this.markUnavailable(new Error('encrypted transcript spool contains undelivered operations'));
       this.onStatus?.();
     }).catch((err) => this.markUnavailable(err));
@@ -666,7 +679,8 @@ function loadVoice(agenticmailConfigPath, pbxConfig) {
       || cfg.voiceProviderVoices?.openai
       || DEFAULT_VOICE,
   ).trim();
-  return { model, voice };
+  const speed = asVoiceSpeed(process.env.OPENAI_REALTIME_VOICE_SPEED || pbxConfig.openaiVoiceSpeed);
+  return { model, voice, speed };
 }
 
 function getLocalIpFor(remoteHost, remotePort) {
@@ -866,10 +880,11 @@ function buildRtp({ payload, payloadType = 0, sequence, timestamp, ssrc }) {
 }
 
 class OpenAiRealtimeBridge {
-  constructor({ apiKey, model, voice, reasoningEffort = 'low', instructions, tools = [], onAudio, onEvent, onToolCall, onClose }) {
+  constructor({ apiKey, model, voice, speed = DEFAULT_VOICE_SPEED, reasoningEffort = 'low', instructions, tools = [], onAudio, onEvent, onToolCall, onClose }) {
     this.apiKey = apiKey;
     this.model = model;
     this.voice = voice;
+    this.speed = asVoiceSpeed(speed);
     this.reasoningEffort = asReasoningEffort(reasoningEffort);
     this.instructions = instructions;
     this.onAudio = onAudio;
@@ -932,6 +947,7 @@ class OpenAiRealtimeBridge {
               output: {
                 format: { type: 'audio/pcmu' },
                 voice: this.voice,
+                speed: this.speed,
               },
             },
             ...(this.model.startsWith('gpt-realtime-2')
@@ -1010,6 +1026,29 @@ class OpenAiRealtimeBridge {
     this.ws.send(JSON.stringify({
       type: 'session.update',
       session: { type: 'realtime', instructions },
+    }));
+    return true;
+  }
+
+  setAutoResponseEnabled(enabled) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.closing) return false;
+    this.ws.send(JSON.stringify({
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        audio: {
+          input: {
+            turn_detection: {
+              type: 'server_vad',
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 500,
+              create_response: enabled,
+              interrupt_response: enabled,
+            },
+          },
+        },
+      },
     }));
     return true;
   }
@@ -1114,6 +1153,9 @@ class OpenAiRealtimeBridge {
       this.onEvent?.({
         type: msg.type,
         text: msg.error?.message || '',
+        errorCode: msg.error?.code || '',
+        errorCategory: msg.error?.type || '',
+        eventId: msg.error?.event_id || msg.event_id || '',
       });
     }
   }
@@ -1136,7 +1178,7 @@ class OpenAiRealtimeBridge {
         ? await Promise.race([
           Promise.resolve(this.onToolCall(name, args)),
           new Promise((_, reject) => {
-            toolTimer = setTimeout(() => reject(new Error('tool timed out')), 10_000);
+            toolTimer = setTimeout(() => reject(new Error('tool timed out')), CALL_TOOL_TIMEOUT_MS);
             toolTimer.unref?.();
           }),
         ])
@@ -1162,7 +1204,15 @@ class OpenAiRealtimeBridge {
         output: JSON.stringify(output),
       },
     }));
-    if (output?.suppressResponse !== true) {
+    if (typeof output?.responseInstructions === 'string' && output.responseInstructions.trim()) {
+      this.ws.send(JSON.stringify({
+        type: 'response.create',
+        response: {
+          output_modalities: ['audio'],
+          instructions: output.responseInstructions.trim(),
+        },
+      }));
+    } else if (output?.suppressResponse !== true) {
       this.ws.send(JSON.stringify({ type: 'response.create' }));
     }
     this.onEvent?.({ type: 'tool.completed', toolName: name, ok: output?.ok !== false });
@@ -1374,6 +1424,7 @@ class SipCall {
     this.currentOutputItem = null;
     this.specialistRoute = null;
     this.loadedSkills = [];
+    this.managerTransfer = null;
   }
 
   publicView() {
@@ -1469,6 +1520,7 @@ class SipCall {
     if (!this.missionId || !this.sidecar.missionClient) return;
     const failedReasons = new Set([
       'media_failed',
+      'persistence_failed',
       'openai_error',
       'openai_closed',
       'transcript_durability_failed',
@@ -1501,14 +1553,26 @@ class SipCall {
     }
     this.status = 'media_preparing';
     this.setupStartedAt = Date.now();
-    const { model, voice } = this.sidecar.voice;
+    const { model, voice, speed } = this.sidecar.voice;
     const instructions = this.sidecar.buildInstructions(this);
     this.rtp = this.sidecar.createRtpSession({
       localIp: this.sidecar.localIp,
       port: this.localRtpPort,
       remoteIp: this.remoteRtpIp,
       remotePort: this.remoteRtpPort,
-      onInboundAudio: (payload) => this.openai?.appendAudio(payload),
+      onInboundAudio: (payload) => {
+        const transfer = this.managerTransfer;
+        if (transfer?.status === 'connected') {
+          transfer.rtp?.sendAudio(payload);
+          this.openai?.appendAudio(payload);
+          return;
+        }
+        if (transfer?.status === 'dialing') {
+          this.openai?.appendAudio(payload);
+          return;
+        }
+        this.openai?.appendAudio(payload);
+      },
     });
     await this.rtp.start();
     if (this.status === 'ended') throw new Error('call ended during RTP setup');
@@ -1516,6 +1580,7 @@ class SipCall {
       apiKey: this.sidecar.openaiKey,
       model,
       voice,
+      speed,
       reasoningEffort: this.sidecar.reasoningEffort,
       instructions,
       tools: SALES_REALTIME_TOOLS,
@@ -1540,7 +1605,14 @@ class SipCall {
         }
         this.sidecar.recordOpenAiEvent(this, event);
         this.recordTranscriptEvent(event);
-        if (event.type === 'error' || event.type === 'openai_error') {
+        if (event.type === 'error') {
+          this.sidecar.logEvent('call_openai_nonfatal_error', {
+            callId: this.id,
+            errorCode: String(event.errorCode || '').slice(0, 120),
+            errorCategory: String(event.errorCategory || '').slice(0, 120),
+          });
+        }
+        if (event.type === 'openai_error') {
           this.end('openai_error', { notifyRemote: true });
         }
       },
@@ -1595,6 +1667,7 @@ class SipCall {
     clearTimeout(this.ackTimer);
     clearTimeout(this.callLimitTimer);
     clearInterval(this.mediaWatchTimer);
+    this.sidecar.endManagerTransfer?.(this, reason);
     if (notifyRemote && this.dialogEstablished && this.acknowledged) this.sidecar.sendBye(this);
     try { this.openai?.close(); } catch { /* ignore */ }
     try { this.rtp?.close(); } catch { /* ignore */ }
@@ -1622,7 +1695,7 @@ class SipSidecar {
     this.secretPath = this.pbx.secretRef;
     this.password = '';
     this.openaiKey = '';
-    this.voice = { model: DEFAULT_MODEL, voice: DEFAULT_VOICE };
+    this.voice = { model: DEFAULT_MODEL, voice: DEFAULT_VOICE, speed: DEFAULT_VOICE_SPEED };
     this.reasoningEffort = 'low';
     this.allowInbound = false;
     this.allowOutbound = false;
@@ -1634,6 +1707,7 @@ class SipSidecar {
     this.lastRegisterError = null;
     this.calls = new Map();
     this.callsBySipId = new Map();
+    this.managerLegsBySipId = new Map();
     this.inboundTransactions = new Map();
     this.pendingTransactions = new Map();
     this.auditPath = this.pbx.auditPath || join(os.homedir(), '.agenticmail', 'sip-sidecar', 'events.jsonl');
@@ -1729,7 +1803,12 @@ class SipSidecar {
       textPresent: Boolean(text),
       textLength: text.length,
     };
-    if (event.type === 'error' || event.type === 'openai_error') payload.errorPresent = Boolean(text);
+    if (event.type === 'error' || event.type === 'openai_error') {
+      payload.errorPresent = Boolean(text);
+      payload.errorCode = String(event.errorCode || '').slice(0, 120);
+      payload.errorCategory = String(event.errorCategory || '').slice(0, 120);
+      payload.message = text.slice(0, 500);
+    }
     this.logEvent('call_event', payload);
   }
 
@@ -1901,8 +1980,14 @@ class SipSidecar {
       if (!transfer.ok) return transfer;
       transferResult = transfer;
       result = await this.missionClient.updateIntake(call.missionId, {
-        nextAction: { type: 'transfer', owner: transfer.route, notes: args?.reason },
-        outcome: 'transferred',
+        nextAction: transfer.connected
+          ? { type: 'transfer', owner: transfer.route, notes: args?.reason }
+          : {
+            type: 'callback_request',
+            owner: transfer.route,
+            notes: `Manager did not answer the assisted transfer. ${String(args?.reason || '').trim()}`.trim(),
+          },
+        outcome: transfer.connected ? 'transferred' : 'needs_follow_up',
       });
     } else {
       return { ok: false, error: `Unknown tool: ${name}` };
@@ -1913,6 +1998,10 @@ class SipSidecar {
           ok: true,
           transferStatus: transferResult.status,
           route: transferResult.route,
+          connected: transferResult.connected === true,
+          callbackRecorded: transferResult.connected !== true,
+          suppressResponse: transferResult.suppressResponse === true,
+          responseInstructions: transferResult.responseInstructions,
           durableQueued: true,
         };
       }
@@ -1928,6 +2017,17 @@ class SipSidecar {
       complete: result.complete === true,
       missingFieldCount: Array.isArray(result.intake?.missingFields) ? result.intake.missingFields.length : undefined,
     });
+    if (transferResult?.ok) {
+      return {
+        ok: true,
+        transferStatus: transferResult.status,
+        route: transferResult.route,
+        connected: transferResult.connected === true,
+        callbackRecorded: transferResult.connected !== true,
+        suppressResponse: transferResult.suppressResponse === true,
+        responseInstructions: transferResult.responseInstructions,
+      };
+    }
     return {
       ok: true,
       complete: result.complete === true,
@@ -1951,40 +2051,236 @@ class SipSidecar {
     if (!call.dialogEstablished || !call.acknowledged || call.status === 'ended') {
       return { ok: false, error: 'The SIP dialog is not ready for transfer.' };
     }
-    call.cseq += 1;
-    const requestUri = call.remoteTarget || call.remoteUri;
-    const headers = [
-      ['Via', `SIP/2.0/UDP ${this.localIp}:${this.signalingPort};rport;branch=z9hG4bK${randomHex(8)}`],
-      ['Max-Forwards', '70'],
-      ['From', `<${call.localUri}>;tag=${call.localTag}`],
-      ['To', `<${call.remoteUri}>;tag=${call.remoteTag}`],
-      ['Call-ID', call.callId],
-      ['CSeq', `${call.cseq} REFER`],
-      ['Contact', `<sip:${this.username}@${this.localIp}:${this.signalingPort};transport=udp>`],
-      ['Refer-To', `<sip:${extension}@${this.server}>`],
-      ['Referred-By', `<${call.localUri}>`],
-      ['User-Agent', 'AgenticMail-SIP-Sidecar'],
-    ];
-    const response = await this.sendTransaction(
-      buildSipMessage(`REFER ${requestUri} SIP/2.0`, headers),
-      call.remote,
-      call.callId,
-      'REFER',
-      call.cseq,
-      10_000,
-    );
-    const code = statusCodeOf(response);
-    if (code !== 200 && code !== 202) {
-      this.logEvent('call_transfer_refused', { callId: call.id, route, code });
-      return { ok: false, error: `PBX refused the transfer (${code || 'unknown'}).` };
+    if (call.managerTransfer && call.managerTransfer.status !== 'ended') {
+      return { ok: false, error: 'A manager transfer is already in progress.' };
     }
+    const timeoutSeconds = Math.min(60, Math.max(5, asInt(this.pbx.managerTransferTimeoutSeconds, 15)));
+    const fallbackMessage = String(
+      this.pbx.managerTransferNoAnswerMessage
+      || 'Менеджер сейчас не смог ответить. Возможно, он ненадолго отошёл от рабочего места. Пожалуйста, отправьте все детали и техническое описание запроса на sales собака nbr точка ru. Менеджер свяжется с вами по этому номеру в ближайшее рабочее время.',
+    ).trim();
+    const leg = {
+      id: `manager_${Date.now()}_${randomHex(4)}`,
+      route,
+      extension,
+      reason: String(reason || '').trim(),
+      callId: `${randomHex(12)}@agenticmail-manager`,
+      localTag: randomHex(6),
+      remoteTag: '',
+      localUri: `sip:${this.username}@${this.server}`,
+      remoteUri: `sip:${extension}@${this.server}`,
+      remoteTarget: '',
+      remote: { address: this.server, port: this.port },
+      cseq: 1,
+      lastInvite: null,
+      localRtpPort: this.allocateRtpPort(),
+      rtp: null,
+      dialogEstablished: false,
+      acknowledged: false,
+      cancelSent: false,
+      status: 'dialing',
+    };
+    call.managerTransfer = leg;
     call.status = 'transfer_pending';
-    this.logEvent('call_transfer_accepted', {
+    call.rtp?.clearOutboundAudio?.('manager_transfer');
+    call.openai?.setAutoResponseEnabled?.(false);
+    this.logEvent('call_transfer_started', {
       callId: call.id,
       route,
+      timeoutSeconds,
       reasonPresent: Boolean(String(reason || '').trim()),
     });
-    return { ok: true, route, status: 'transfer_pending' };
+    try {
+      leg.rtp = this.createRtpSession({
+        localIp: this.localIp,
+        port: leg.localRtpPort,
+        remoteIp: '',
+        remotePort: 0,
+        onInboundAudio: (payload) => {
+          if (leg.status !== 'connected' || call.status === 'ended') return;
+          call.rtp?.sendAudio(payload);
+          call.openai?.appendAudio(payload);
+        },
+      });
+      await leg.rtp.start();
+      const dial = await this.sendManagerInvite(call, leg, timeoutSeconds);
+      if (dial.connected) {
+        leg.status = 'connected';
+        call.status = 'manager_connected';
+        this.managerLegsBySipId.set(leg.callId, { call, leg });
+        call.recordSystemTranscript?.('Manager transfer connected.', {
+          kind: 'manager_transfer', route, status: 'connected',
+        });
+        this.logEvent('call_transfer_connected', { callId: call.id, route });
+        return { ok: true, connected: true, route, status: 'connected', suppressResponse: true };
+      }
+      this.finishManagerTransferAttempt(call, leg, dial.status);
+      call.recordSystemTranscript?.('Manager did not answer the assisted transfer; callback follow-up requested.', {
+        kind: 'manager_transfer', route, status: dial.status,
+      });
+      this.logEvent('call_transfer_returned_to_agent', { callId: call.id, route, status: dial.status });
+      return {
+        ok: true,
+        connected: false,
+        route,
+        status: dial.status,
+        responseInstructions: `Скажите клиенту дословно, без дополнительных обещаний: «${fallbackMessage}»`,
+      };
+    } catch (err) {
+      this.finishManagerTransferAttempt(call, leg, 'failed');
+      this.logEvent('call_transfer_failed', { callId: call.id, route, errorType: err?.name || 'Error' });
+      return {
+        ok: true,
+        connected: false,
+        route,
+        status: 'failed',
+        responseInstructions: `Скажите клиенту дословно, без дополнительных обещаний: «${fallbackMessage}»`,
+      };
+    }
+  }
+
+  async sendManagerInvite(call, leg, timeoutSeconds) {
+    const uri = leg.remoteUri;
+    const makeInvite = (cseq, auth = '') => {
+      const branch = `z9hG4bK${randomHex(8)}`;
+      const { startLine, headers } = this.buildBaseHeaders({
+        method: 'INVITE',
+        uri,
+        callId: leg.callId,
+        fromTag: leg.localTag,
+        toUri: uri,
+        cseq,
+        branch,
+      });
+      headers.push(['Content-Type', 'application/sdp']);
+      if (auth) headers.push(['Authorization', auth]);
+      return {
+        text: buildSipMessage(startLine, headers, buildSdp({ localIp: this.localIp, rtpPort: leg.localRtpPort })),
+        branch,
+        cseq,
+        uri,
+      };
+    };
+    let invite = makeInvite(1);
+    leg.lastInvite = invite;
+    let outcome = await this.waitForManagerInvite(leg, invite, 5_000);
+    if (outcome.timedOut) return { connected: false, status: 'failed' };
+    let response = outcome.response;
+    let code = statusCodeOf(response);
+    if ([401, 407].includes(code)) {
+      this.sendNon2xxAck(leg, response, invite);
+      const challengeHeader = header(response, 'www-authenticate') || header(response, 'proxy-authenticate');
+      const auth = buildDigestAuth({
+        username: this.username,
+        password: this.password,
+        method: 'INVITE',
+        uri,
+        challenge: parseDigestChallenge(challengeHeader),
+      });
+      invite = makeInvite(2, auth);
+      leg.lastInvite = invite;
+      outcome = await this.waitForManagerInvite(leg, invite, timeoutSeconds * 1000);
+      if (outcome.timedOut) return { connected: false, status: 'no_answer' };
+      response = outcome.response;
+      code = statusCodeOf(response);
+    }
+    if (code !== 200) {
+      this.sendNon2xxAck(leg, response, invite);
+      return {
+        connected: false,
+        status: [408, 480, 487].includes(code) ? 'no_answer' : code === 486 ? 'busy' : 'failed',
+      };
+    }
+    leg.remoteTag = tagOf(header(response, 'to'));
+    leg.remoteTarget = splitAddress(header(response, 'contact')) || uri;
+    leg.cseq = invite.cseq;
+    leg.dialogEstablished = true;
+    const answer = parseSdp(response.body);
+    if (!answer.connection || !answer.port || !answer.payloads.includes(0)) {
+      this.send(this.buildAck(leg), leg.remote);
+      leg.acknowledged = true;
+      this.sendBye(leg);
+      return { connected: false, status: 'media_failed' };
+    }
+    leg.rtp.setRemote(answer.connection, answer.port);
+    leg.status = 'connected';
+    this.managerLegsBySipId.set(leg.callId, { call, leg });
+    this.send(this.buildAck(leg), leg.remote);
+    leg.acknowledged = true;
+    if (call.status === 'ended') {
+      this.sendBye(leg);
+      return { connected: false, status: 'caller_gone' };
+    }
+    return { connected: true, status: 'connected' };
+  }
+
+  async waitForManagerInvite(leg, invite, timeoutMs) {
+    const final = this.sendTransaction(
+      invite.text,
+      leg.remote,
+      leg.callId,
+      'INVITE',
+      invite.cseq,
+      timeoutMs + 5_000,
+    ).then((response) => ({ response }), (error) => ({ error }));
+    let timer;
+    const timeout = new Promise((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout({ timedOut: true }), timeoutMs);
+      timer.unref?.();
+    });
+    const outcome = await Promise.race([final, timeout]);
+    clearTimeout(timer);
+    if (outcome.timedOut) {
+      if (!leg.cancelSent) {
+        leg.cancelSent = true;
+        this.sendCancel(leg);
+      }
+      void final.then((late) => {
+        if (!late.response) return;
+        const code = statusCodeOf(late.response);
+        if (code >= 300) this.sendNon2xxAck(leg, late.response, invite);
+        if (code === 200) {
+          leg.remoteTag = tagOf(header(late.response, 'to'));
+          leg.remoteTarget = splitAddress(header(late.response, 'contact')) || invite.uri;
+          leg.cseq = invite.cseq;
+          leg.dialogEstablished = true;
+          this.send(this.buildAck(leg), leg.remote);
+          leg.acknowledged = true;
+          this.sendBye(leg);
+        }
+      });
+      return outcome;
+    }
+    if (outcome.error) throw outcome.error;
+    return outcome;
+  }
+
+  finishManagerTransferAttempt(call, leg, status) {
+    if (this.managerLegsBySipId.get(leg.callId)?.leg === leg) this.managerLegsBySipId.delete(leg.callId);
+    leg.status = 'ended';
+    try { leg.rtp?.close(); } catch { /* ignore */ }
+    if (call.managerTransfer === leg) call.managerTransfer = null;
+    if (call.status !== 'ended') {
+      call.status = 'media_active';
+      call.openai?.setAutoResponseEnabled?.(true);
+    }
+    this.logEvent('manager_transfer_leg_ended', { callId: call.id, route: leg.route, status });
+  }
+
+  endManagerTransfer(call, reason) {
+    const leg = call.managerTransfer;
+    if (!leg || leg.status === 'ended') return;
+    if (leg.status === 'dialing' && !leg.cancelSent) {
+      leg.cancelSent = true;
+      this.sendCancel(leg);
+    } else if (leg.status === 'connected' && leg.dialogEstablished && leg.acknowledged) {
+      this.sendBye(leg);
+    }
+    if (this.managerLegsBySipId.get(leg.callId)?.leg === leg) this.managerLegsBySipId.delete(leg.callId);
+    leg.status = 'ended';
+    try { leg.rtp?.close(); } catch { /* ignore */ }
+    call.managerTransfer = null;
+    this.logEvent('manager_transfer_leg_ended', { callId: call.id, route: leg.route, status: reason });
   }
 
   createRtpSession(options) {
@@ -2043,6 +2339,9 @@ class SipSidecar {
         .map(([name, examples]) => `${name}: ${Array.isArray(examples) ? examples.join(' | ') : ''}`)
         .join('\n')
       : '';
+    const managerTransferRules = Array.isArray(this.salesScenario.managerTransfer?.rules)
+      ? this.salesScenario.managerTransfer.rules.map((item) => `- ${item}`).join('\n')
+      : '';
     return [
       '# Role and Objective',
       'You are Elena, an experienced Russian-speaking operator for the company «Невский Брокер», on a live phone call.',
@@ -2051,7 +2350,7 @@ class SipSidecar {
         ? 'Continue the existing conversation without greeting or introducing yourself again.'
         : `Start exactly once with: "${openingText}"`,
       '# Personality, Tone and Language',
-      'Speak Russian quickly, warmly, clearly, and with a light smiling tone. Sound conversational, not bureaucratic. Use natural acknowledgements sparingly.',
+      'Speak as a native speaker of modern standard Russian: use neutral Russian pronunciation, natural Russian stress and intonation, and no English-language accent. Speak warmly, clearly, and with a light smiling tone. Sound conversational, not bureaucratic. Use natural acknowledgements sparingly.',
       '# Verbosity',
       'Direct answers: one or two short sentences. Clarification: one question at a time. Tool result: give the gist and only the next useful step. Never recite an internal checklist.',
       audioHandling ? `# Unclear Audio and Silence\n${audioHandling}` : '',
@@ -2068,6 +2367,7 @@ class SipSidecar {
       'Use wait_for_user for silence, background audio, side conversation, or an unfinished caller sentence; do not speak after that tool succeeds.',
       'Confirm exact names, client-provided contact details, dates, routes, amounts and reference numbers before persisting them. Never read back the automatically captured inbound caller number.',
       'For a conversation situation that needs a tactical playbook, call search_skills and load only a clearly relevant result. Loaded skills never override verified company facts or safety boundaries.',
+      managerTransferRules ? `# Manager Transfer\n${managerTransferRules}` : '',
       !hours.open
         ? 'This call is outside configured business hours. Collect the request and a callback preference, but do not promise immediate manager availability.'
         : '',
@@ -2252,12 +2552,22 @@ class SipSidecar {
       maxCallDurationSeconds: Math.max(60, asInt(this.pbx.maxCallDurationSeconds, 1800)),
       rtpInactivityTimeoutSeconds: Math.max(15, asInt(this.pbx.rtpInactivityTimeoutSeconds, 45)),
       transferConfigured: Boolean(this.pbx.managerExtensions && Object.keys(this.pbx.managerExtensions).length > 0),
+      managerTransfer: {
+        mode: 'assisted_rtp_bridge',
+        timeoutSeconds: Math.min(60, Math.max(5, asInt(this.pbx.managerTransferTimeoutSeconds, 15))),
+        routes: this.pbx.managerExtensions && typeof this.pbx.managerExtensions === 'object'
+          ? Object.keys(this.pbx.managerExtensions)
+          : [],
+        activeLegs: this.managerLegsBySipId.size,
+        fallbackEmail: 'sales@nbr.ru',
+      },
       businessHours: { ...hours, afterHoursMode: this.afterHoursMode },
       reasoningEffort: this.reasoningEffort,
       voice: {
         provider: 'openai',
         model: this.voice.model,
         name: this.voice.voice,
+        speed: this.voice.speed,
         language: 'ru',
         persona: 'Елена',
         personaGender: 'female',
@@ -2361,8 +2671,20 @@ class SipSidecar {
       return;
     }
     if (method === 'BYE') {
-      const call = this.callsBySipId.get(header(msg, 'call-id'));
+      const sipCallId = header(msg, 'call-id');
+      const managerBridge = this.managerLegsBySipId.get(sipCallId);
       this.send(responseTo(msg, 200, 'OK'), remote);
+      if (managerBridge) {
+        const { call, leg } = managerBridge;
+        this.managerLegsBySipId.delete(sipCallId);
+        leg.status = 'ended';
+        try { leg.rtp?.close(); } catch { /* ignore */ }
+        if (call.managerTransfer === leg) call.managerTransfer = null;
+        this.logEvent('manager_transfer_remote_bye', { callId: call.id, route: leg.route });
+        call.end('manager_bye', { notifyRemote: true });
+        return;
+      }
+      const call = this.callsBySipId.get(sipCallId);
       if (call) call.end('remote_bye', { notifyRemote: false });
       return;
     }
@@ -2506,8 +2828,10 @@ class SipSidecar {
     this.callsBySipId.set(call.callId, call);
     const localTo = `${header(msg, 'to')};tag=${call.localTag}`;
     const answerSdp = buildSdp({ localIp: this.localIp, rtpPort: call.localRtpPort });
+    let setupStage = 'persistence';
     try {
       await call.initializePersistence();
+      setupStage = 'media';
       await call.prepareMedia();
       if (tx.cancelled) return call;
       if (call.status === 'ended') {
@@ -2530,11 +2854,18 @@ class SipSidecar {
         setupMs: Date.now() - call.setupStartedAt,
       });
     } catch (err) {
-      this.logEvent('call_media_failed', { callId: call.id, errorType: err?.name || 'Error' });
+      this.logEvent('call_setup_failed', {
+        callId: call.id,
+        stage: setupStage,
+        errorType: err?.name || 'Error',
+        message: String(err?.message || 'unknown setup error').slice(0, 500),
+      });
       if (!tx.finalResponse) {
         this.sendInboundFinal(tx, responseTo(msg, 480, 'Temporarily Unavailable', [['To', localTo]]), 480);
       }
-      call.end('media_failed', { notifyRemote: call.dialogEstablished });
+      call.end(setupStage === 'persistence' ? 'persistence_failed' : 'media_failed', {
+        notifyRemote: call.dialogEstablished,
+      });
     }
     return call;
   }

@@ -303,6 +303,72 @@ function queueSipRecapDelivery(
   `).run(missionId, draftId);
 }
 
+function ensureSipKnowledgeArchiveTable(
+  db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
+): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sip_knowledge_archive_delivery (
+      mission_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      room TEXT NOT NULL DEFAULT 'incoming_calls',
+      drawer_id TEXT,
+      content_sha256 TEXT,
+      last_error TEXT,
+      next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sip_knowledge_archive_status
+      ON sip_knowledge_archive_delivery(status, updated_at);
+  `);
+  const columns = db.prepare('PRAGMA table_info(sip_knowledge_archive_delivery)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'next_attempt_at')) {
+    db.exec('ALTER TABLE sip_knowledge_archive_delivery ADD COLUMN next_attempt_at TEXT');
+    db.exec("UPDATE sip_knowledge_archive_delivery SET next_attempt_at = datetime('now') WHERE next_attempt_at IS NULL");
+  }
+}
+
+function queueSipKnowledgeArchive(
+  db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
+  mission: Pick<import('@agenticmail/core').PhoneCallMission, 'id' | 'metadata'>,
+): boolean {
+  if (requestString(mission.metadata.direction) !== 'inbound') return false;
+  ensureSipKnowledgeArchiveTable(db);
+  db.prepare(`
+    INSERT INTO sip_knowledge_archive_delivery (mission_id, status, room, next_attempt_at)
+    VALUES (?, 'pending', 'incoming_calls', datetime('now'))
+    ON CONFLICT(mission_id) DO UPDATE SET
+      status = CASE
+        WHEN sip_knowledge_archive_delivery.status = 'delivered' THEN 'delivered'
+        ELSE 'pending'
+      END,
+      next_attempt_at = CASE
+        WHEN sip_knowledge_archive_delivery.status = 'delivered' THEN sip_knowledge_archive_delivery.next_attempt_at
+        ELSE datetime('now')
+      END,
+      updated_at = datetime('now')
+  `).run(mission.id);
+  return true;
+}
+
+function queueHistoricalInboundSipArchives(
+  db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
+): number {
+  const rows = db.prepare(`
+    SELECT id, metadata_json AS metadataJson
+    FROM phone_missions
+    WHERE provider = 'sip' AND status IN ('completed', 'failed', 'cancelled')
+  `).all() as Array<{ id: string; metadataJson: string }>;
+  let queued = 0;
+  for (const row of rows) {
+    let metadata: Record<string, unknown> = {};
+    try { metadata = JSON.parse(row.metadataJson || '{}') as Record<string, unknown>; } catch { /* skip invalid metadata */ }
+    if (queueSipKnowledgeArchive(db, { id: row.id, metadata })) queued += 1;
+  }
+  return queued;
+}
+
 function ensureSipFollowupTable(
   db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
 ): void {
@@ -472,6 +538,8 @@ export function createPhoneRoutes(
   const phoneManager = new PhoneManager(db as any, config.masterKey);
   ensureSipRecapDeliveryTable(db);
   ensureSipFollowupTable(db);
+  ensureSipKnowledgeArchiveTable(db);
+  queueHistoricalInboundSipArchives(db);
 
   /** Local direct-SIP persistence API. Master-only and bound behind the normal API auth layer. */
   router.get('/calls/sip/persistence-health', requireMaster, (req: Request, res: Response) => {
@@ -617,14 +685,18 @@ export function createPhoneRoutes(
     }
   });
 
-  router.get('/calls/sip/:id/transcript', requireMaster, (req: Request, res: Response) => {
+  router.get('/calls/sip/:id/transcript', requireMaster, async (req: Request, res: Response) => {
     try {
-      const mission = phoneManager.getMission(req.params.id);
-      if (!mission || mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+      const mission = await phoneManager.getSipMissionAsync(req.params.id);
       res.json({
         success: true,
         missionId: mission.id,
         status: mission.status,
+        direction: requestString(mission.metadata.direction) || null,
+        createdAt: mission.createdAt,
+        updatedAt: mission.updatedAt,
+        endedAt: requestString(mission.metadata.endedAt) || null,
+        endReason: requestString(mission.metadata.endReason) || null,
         transcript: mission.transcript,
         salesIntake: mission.metadata.salesIntake ?? null,
       });
@@ -646,6 +718,91 @@ export function createPhoneRoutes(
         LIMIT ?
       `).all(limit);
       res.json({ drafts: rows });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.get('/calls/sip/knowledge-archive/pending', requireMaster, (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1), 50);
+      const archives = db.prepare(`
+        SELECT mission_id AS missionId, status, attempts, room,
+               next_attempt_at AS nextAttemptAt, created_at AS createdAt, updated_at AS updatedAt
+        FROM sip_knowledge_archive_delivery
+        WHERE status IN ('pending', 'failed')
+          AND COALESCE(next_attempt_at, datetime('now')) <= datetime('now')
+        ORDER BY created_at ASC
+        LIMIT ?
+      `).all(limit);
+      res.json({ archives });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.get('/calls/sip/knowledge-archive/:missionId/status', requireMaster, (req: Request, res: Response) => {
+    try {
+      const delivery = db.prepare(`
+        SELECT mission_id AS missionId, status, attempts, room, drawer_id AS drawerId,
+               content_sha256 AS contentSha256, last_error AS lastError,
+               next_attempt_at AS nextAttemptAt,
+               created_at AS createdAt, updated_at AS updatedAt
+        FROM sip_knowledge_archive_delivery WHERE mission_id = ?
+      `).get(req.params.missionId);
+      if (!delivery) return res.status(404).json({ error: 'SIP knowledge archive delivery not found' });
+      res.json({ delivery });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.post('/calls/sip/knowledge-archive/:missionId/delivered', requireMaster, (req: Request, res: Response) => {
+    try {
+      const drawerId = requestString(req.body?.drawerId).slice(0, 256);
+      const contentSha256 = requestString(req.body?.contentSha256).slice(0, 128);
+      const room = requestString(req.body?.room).slice(0, 128) || 'incoming_calls';
+      if (!drawerId || !/^[a-f0-9]{64}$/u.test(contentSha256)) {
+        return res.status(400).json({ error: 'drawerId and SHA-256 contentSha256 are required' });
+      }
+      const result = db.prepare(`
+        UPDATE sip_knowledge_archive_delivery
+        SET status = 'delivered', attempts = attempts + 1, room = ?, drawer_id = ?,
+            content_sha256 = ?, last_error = NULL, next_attempt_at = datetime('now'),
+            updated_at = datetime('now')
+        WHERE mission_id = ? AND status != 'delivered'
+      `).run(room, drawerId, contentSha256, req.params.missionId);
+      if (!result.changes) {
+        const existing = db.prepare('SELECT status FROM sip_knowledge_archive_delivery WHERE mission_id = ?')
+          .get(req.params.missionId) as { status: string } | undefined;
+        if (!existing) return res.status(404).json({ error: 'SIP knowledge archive delivery not found' });
+      }
+      res.json({ success: true });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.post('/calls/sip/knowledge-archive/:missionId/failed', requireMaster, (req: Request, res: Response) => {
+    try {
+      const errorType = requestString(req.body?.errorType).slice(0, 200) || 'archive_failed';
+      const current = db.prepare('SELECT attempts FROM sip_knowledge_archive_delivery WHERE mission_id = ?')
+        .get(req.params.missionId) as { attempts: number } | undefined;
+      if (!current) return res.status(404).json({ error: 'SIP knowledge archive delivery not found' });
+      const retryDelaySeconds = Math.min(300, 2 ** Math.min(Math.max(current.attempts, 0) + 1, 8));
+      const nextAttemptAt = new Date(Date.now() + retryDelaySeconds * 1000).toISOString();
+      const result = db.prepare(`
+        UPDATE sip_knowledge_archive_delivery
+        SET status = 'failed', attempts = attempts + 1, last_error = ?, next_attempt_at = ?,
+            updated_at = datetime('now')
+        WHERE mission_id = ? AND status != 'delivered'
+      `).run(errorType, nextAttemptAt, req.params.missionId);
+      if (!result.changes) {
+        const existing = db.prepare('SELECT status FROM sip_knowledge_archive_delivery WHERE mission_id = ?')
+          .get(req.params.missionId) as { status: string } | undefined;
+        if (!existing) return res.status(404).json({ error: 'SIP knowledge archive delivery not found' });
+      }
+      res.json({ success: true });
     } catch (err) {
       sendPhoneError(res, err);
     }
@@ -722,39 +879,23 @@ export function createPhoneRoutes(
       const metadata = req.body?.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
         ? req.body.metadata as Record<string, unknown>
         : {};
-      let intakeResult = phoneManager.updateSipSalesIntake(req.params.id, {});
-      if (!intakeResult.intake.outcome || !intakeResult.intake.summary || !intakeResult.intake.nextAction) {
-        intakeResult = phoneManager.updateSipSalesIntake(req.params.id, {
-          ...(!intakeResult.intake.outcome
-            ? { outcome: intakeResult.intake.missingFields.length === 0 ? 'qualified' : 'incomplete' }
-            : {}),
-          ...(!intakeResult.intake.summary
-            ? { summary: 'Call ended before a structured summary was captured.' }
-            : {}),
-          ...(!intakeResult.intake.nextAction
-            ? { nextAction: { type: 'manager_follow_up', notes: 'Review the incomplete call record and transcript.' } }
-            : {}),
-        });
-      }
-      let mission = phoneManager.recordSipRealtimeActivity(
-        req.params.id,
-        [{
-          at: new Date().toISOString(),
-          source: 'system',
-          text: `Direct SIP call finalized (${reason}).`,
-          metadata: { eventId: `${req.params.id}:finalized`, reason },
-        }],
-        status,
-        { ...metadata, endedAt: new Date().toISOString(), endReason: reason },
-      );
+      const finalized = phoneManager.finalizeSipMission(req.params.id, { status, reason, metadata });
+      let mission = finalized.mission;
       const followupTaskId = upsertSipFollowupTask(db, mission);
-      if (followupTaskId) {
-        mission = phoneManager.recordSipRealtimeActivity(mission.id, [], undefined, { followupTaskId });
-      }
       const recapDraftId = ensureSipRecapDraft(db, mission);
       queueSipRecapDelivery(db, mission.id, recapDraftId);
-      mission = phoneManager.recordSipRealtimeActivity(mission.id, [], undefined, { recapDraftId });
-      res.json({ success: true, mission, recapDraftId, followupTaskId, exchangeDraftStatus: 'pending' });
+      const patched = phoneManager.patchSipMissionMetadata(mission.id, { followupTaskId, recapDraftId });
+      mission = patched.mission;
+      const knowledgeArchiveQueued = queueSipKnowledgeArchive(db, mission);
+      res.json({
+        success: true,
+        mission,
+        transcriptCount: patched.transcriptCount,
+        recapDraftId,
+        followupTaskId,
+        exchangeDraftStatus: 'pending',
+        knowledgeArchiveStatus: knowledgeArchiveQueued ? 'pending' : 'not_applicable',
+      });
     } catch (err) {
       sendPhoneError(res, err);
     }

@@ -239,8 +239,46 @@ describe('phone routes', () => {
     });
     expect(finalized.status).toBe(200);
     expect(finalized.body.mission.status).toBe('completed');
-    expect(finalized.body.mission.transcript.map((entry: any) => entry.text))
+    expect(finalized.body.mission.transcript).toEqual([]);
+    expect(finalized.body.transcriptCount).toBeGreaterThan(0);
+    expect(finalized.body.knowledgeArchiveStatus).toBe('pending');
+    const finalizedTranscript = await request(baseUrl, `/calls/sip/${missionId}/transcript`);
+    expect(finalizedTranscript.body.transcript.map((entry: any) => entry.text))
       .toContain('Please prepare a quotation.');
+    expect(finalizedTranscript.body.direction).toBe('inbound');
+    const archivePending = await request(baseUrl, '/calls/sip/knowledge-archive/pending');
+    expect(archivePending.body.archives).toHaveLength(1);
+    expect(archivePending.body.archives[0]).toMatchObject({ missionId, status: 'pending', room: 'incoming_calls' });
+    const archiveFailed = await request(baseUrl, `/calls/sip/knowledge-archive/${missionId}/failed`, {
+      method: 'POST', body: JSON.stringify({ errorType: 'MempalaceUnavailable' }),
+    });
+    expect(archiveFailed.status).toBe(200);
+    const archiveRetry = await request(baseUrl, '/calls/sip/knowledge-archive/pending');
+    expect(archiveRetry.body.archives).toHaveLength(0);
+    const failedArchiveStatus = await request(baseUrl, `/calls/sip/knowledge-archive/${missionId}/status`);
+    expect(failedArchiveStatus.body.delivery).toMatchObject({ missionId, status: 'failed', attempts: 1 });
+    expect(failedArchiveStatus.body.delivery.nextAttemptAt).toBeTruthy();
+    db.prepare("UPDATE sip_knowledge_archive_delivery SET next_attempt_at = datetime('now', '-1 second') WHERE mission_id = ?")
+      .run(missionId);
+    const archiveRetryDue = await request(baseUrl, '/calls/sip/knowledge-archive/pending');
+    expect(archiveRetryDue.body.archives[0]).toMatchObject({ missionId, status: 'failed', attempts: 1 });
+    const contentSha256 = createHash('sha256').update('test transcript document', 'utf8').digest('hex');
+    const archiveDelivered = await request(baseUrl, `/calls/sip/knowledge-archive/${missionId}/delivered`, {
+      method: 'POST',
+      body: JSON.stringify({ drawerId: 'sip_incoming_test', contentSha256, room: 'incoming_calls' }),
+    });
+    expect(archiveDelivered.status).toBe(200);
+    const archiveStatus = await request(baseUrl, `/calls/sip/knowledge-archive/${missionId}/status`);
+    expect(archiveStatus.body.delivery).toMatchObject({
+      missionId,
+      status: 'delivered',
+      attempts: 2,
+      room: 'incoming_calls',
+      drawerId: 'sip_incoming_test',
+      contentSha256,
+    });
+    const noArchivePending = await request(baseUrl, '/calls/sip/knowledge-archive/pending');
+    expect(noArchivePending.body.archives).toHaveLength(0);
     const draft = db.prepare('SELECT subject, text_body FROM drafts WHERE id = ?')
       .get(finalized.body.recapDraftId) as { subject: string; text_body: string };
     expect(draft.subject).toContain(missionId);

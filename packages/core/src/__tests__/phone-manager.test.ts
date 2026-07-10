@@ -65,7 +65,7 @@ describe('PhoneManager', () => {
     vi.unstubAllGlobals();
   });
 
-  it('registers one inbound SIP mission and persists idempotent full transcript turns', () => {
+  it('registers one inbound SIP mission and persists idempotent full transcript turns', async () => {
     const db = createDb();
     dbs.push(db);
     const manager = new PhoneManager(db, 'mk_test_key');
@@ -110,6 +110,8 @@ describe('PhoneManager', () => {
     expect(raw.transcript_json).not.toContain('I need a freight quotation.');
     expect(raw.transcript_json).not.toContain('A manager will review the request.');
     expect(raw.transcript_json).toContain('enc2:');
+    const asyncRead = await manager.getSipMissionAsync(created.id);
+    expect(asyncRead.transcript.map((entry) => entry.text)).toContain('I need a freight quotation.');
   });
 
   it('encrypts extracted SIP contacts and keeps transcripts indefinitely until retention is explicit', () => {

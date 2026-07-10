@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  AgenticMailSipMissionClient,
   EncryptedTranscriptSpool,
   OpenAiRealtimeBridge,
   RtpSession,
@@ -321,6 +322,109 @@ test('sales intake tools persist structured facts and callback requests without 
   assert.equal(knowledge.count, 1);
 });
 
+test('assisted manager transfer returns to Elena after no answer and records callback follow-up', async () => {
+  const updates = [];
+  const autoResponse = [];
+  const rtpClosed = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.pbx = {
+    managerExtensions: { sales: '135' },
+    managerTransferTimeoutSeconds: 15,
+    managerTransferNoAnswerMessage: 'Менеджер сейчас не смог ответить. Отправьте детали на sales собака nbr точка ru.',
+  };
+  sidecar.server = 'pbx.test';
+  sidecar.port = 5060;
+  sidecar.username = '199';
+  sidecar.localIp = '127.0.0.1';
+  sidecar.managerLegsBySipId = new Map();
+  sidecar.allocateRtpPort = () => 40220;
+  sidecar.createRtpSession = () => ({
+    start: async () => {},
+    close: () => rtpClosed.push(true),
+  });
+  sidecar.sendManagerInvite = async () => ({ connected: false, status: 'no_answer' });
+  sidecar.logEvent = () => {};
+  sidecar.missionClient = {
+    updateIntake: async (_missionId, patch) => {
+      updates.push(patch);
+      return { success: true, complete: false, intake: { missingFields: [] } };
+    },
+  };
+  const call = {
+    id: 'sip-transfer-timeout',
+    missionId: 'mission-transfer-timeout',
+    dialogEstablished: true,
+    acknowledged: true,
+    status: 'media_active',
+    managerTransfer: null,
+    rtp: { clearOutboundAudio: () => {} },
+    openai: { setAutoResponseEnabled: (enabled) => autoResponse.push(enabled) },
+    recordSystemTranscript: () => {},
+  };
+
+  const result = await sidecar.executeCallTool(call, 'transfer_to_manager', {
+    route: 'sales', reason: 'Caller requested a manager',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.transferStatus, 'no_answer');
+  assert.equal(result.connected, false);
+  assert.equal(result.callbackRecorded, true);
+  assert.match(result.responseInstructions, /sales собака nbr точка ru/u);
+  assert.deepEqual(autoResponse, [false, true]);
+  assert.equal(rtpClosed.length, 1);
+  assert.equal(call.status, 'media_active');
+  assert.equal(call.managerTransfer, null);
+  assert.equal(updates[0].nextAction.type, 'callback_request');
+  assert.equal(updates[0].nextAction.owner, 'sales');
+  assert.equal(updates[0].outcome, 'needs_follow_up');
+});
+
+test('assisted manager transfer switches to the manager only after answer', async () => {
+  const updates = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.pbx = { managerExtensions: { sales: '135' }, managerTransferTimeoutSeconds: 15 };
+  sidecar.server = 'pbx.test';
+  sidecar.port = 5060;
+  sidecar.username = '199';
+  sidecar.localIp = '127.0.0.1';
+  sidecar.managerLegsBySipId = new Map();
+  sidecar.allocateRtpPort = () => 40222;
+  sidecar.createRtpSession = () => ({ start: async () => {}, close: () => {} });
+  sidecar.sendManagerInvite = async () => ({ connected: true, status: 'connected' });
+  sidecar.logEvent = () => {};
+  sidecar.missionClient = {
+    updateIntake: async (_missionId, patch) => {
+      updates.push(patch);
+      return { success: true, complete: true, intake: { missingFields: [] } };
+    },
+  };
+  const call = {
+    id: 'sip-transfer-connected',
+    missionId: 'mission-transfer-connected',
+    dialogEstablished: true,
+    acknowledged: true,
+    status: 'media_active',
+    managerTransfer: null,
+    rtp: { clearOutboundAudio: () => {} },
+    openai: { setAutoResponseEnabled: () => {} },
+    recordSystemTranscript: () => {},
+  };
+
+  const result = await sidecar.executeCallTool(call, 'transfer_to_manager', {
+    route: 'sales', reason: 'Caller requested a manager',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.transferStatus, 'connected');
+  assert.equal(result.connected, true);
+  assert.equal(result.suppressResponse, true);
+  assert.equal(call.status, 'manager_connected');
+  assert.equal(call.managerTransfer.extension, '135');
+  assert.equal(updates[0].nextAction.type, 'transfer');
+  assert.equal(updates[0].outcome, 'transferred');
+});
+
 test('sales instructions expose only the active service playbook after routing', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-prompt-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -450,7 +554,8 @@ test('configured company context is required and included in direct SIP instruct
   assert.deepEqual(health.voice, {
     provider: 'openai',
     model: 'gpt-realtime-2.1',
-    name: 'marin',
+    name: 'coral',
+    speed: 1.12,
     language: 'ru',
     persona: 'Елена',
     personaGender: 'female',
@@ -479,6 +584,32 @@ test('transcript fallback spool is encrypted and can be replayed', async (t) => 
   assert.deepEqual(result, { delivered: 1, remaining: 0 });
   assert.deepEqual(delivered, [operation]);
   assert.equal(spool.count(), 0);
+});
+
+test('empty transcript spool still probes persistence health', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-health-probe-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const probes = [];
+  const client = new AgenticMailSipMissionClient({
+    apiBase: 'http://127.0.0.1:1',
+    masterKey: 'test-master-key',
+    agent: 'sales@localhost',
+    spoolPath: join(dir, 'spool.enc.jsonl'),
+  });
+  t.after(() => client.close());
+  client.request = async (path) => {
+    probes.push(path);
+    return { ok: true };
+  };
+
+  await client.flushSpool();
+  assert.equal(client.status().ready, true);
+  assert.match(probes[0], /persistence-health/u);
+
+  client.request = async () => { throw new TypeError('fetch failed'); };
+  await client.flushSpool();
+  assert.equal(client.status().ready, false);
+  assert.match(client.status().lastError, /fetch failed/u);
 });
 
 test('business hours support normal and overnight schedules', () => {
@@ -511,6 +642,33 @@ test('Realtime bridge flushes unfinished transcript deltas on close', () => {
   assert.equal(events[0].partial, true);
 });
 
+test('Realtime request errors retain diagnostic metadata without closing the bridge', () => {
+  const events = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test', model: 'gpt-realtime-2.1', voice: 'marin', instructions: 'test',
+    onEvent: (event) => events.push(event),
+  });
+  bridge.ready = true;
+  bridge.handleMessage(JSON.stringify({
+    type: 'error',
+    event_id: 'event-1',
+    error: {
+      type: 'invalid_request_error',
+      code: 'conversation_already_has_active_response',
+      message: 'A response is already active.',
+    },
+  }));
+
+  assert.equal(bridge.ready, true);
+  assert.deepEqual(events[0], {
+    type: 'error',
+    text: 'A response is already active.',
+    errorCode: 'conversation_already_has_active_response',
+    errorCategory: 'invalid_request_error',
+    eventId: 'event-1',
+  });
+});
+
 test('Realtime bridge emits conversation truncation for interrupted playback', () => {
   const sent = [];
   const bridge = new OpenAiRealtimeBridge({
@@ -529,6 +687,9 @@ test('Realtime bridge emits conversation truncation for interrupted playback', (
     type: 'session.update',
     session: { type: 'realtime', instructions: 'specialist instructions' },
   });
+  assert.equal(bridge.setAutoResponseEnabled(false), true);
+  assert.equal(sent[2].type, 'session.update');
+  assert.equal(sent[2].session.audio.input.turn_detection.create_response, false);
 });
 
 test('Realtime wait tool ends the turn without creating spoken output', async () => {
@@ -543,4 +704,22 @@ test('Realtime wait tool ends the turn without creating spoken output', async ()
 
   assert.equal(sent.some((event) => event.type === 'conversation.item.create'), true);
   assert.equal(sent.some((event) => event.type === 'response.create'), false);
+});
+
+test('Realtime tool result can require one deterministic fallback response', async () => {
+  const sent = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test', model: 'gpt-realtime-2.1', voice: 'marin', instructions: 'test',
+    onToolCall: async () => ({
+      ok: true,
+      responseInstructions: 'Скажите дословно: «Отправьте детали на sales собака nbr точка ru».',
+    }),
+  });
+  bridge.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
+
+  await bridge.dispatchToolCall({ call_id: 'transfer-1', name: 'transfer_to_manager', arguments: '{}' });
+
+  const response = sent.find((event) => event.type === 'response.create');
+  assert.deepEqual(response.response.output_modalities, ['audio']);
+  assert.match(response.response.instructions, /sales собака nbr точка ru/u);
 });

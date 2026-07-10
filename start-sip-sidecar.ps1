@@ -8,8 +8,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $RepoRoot "local-health.ps1")
 $NodeExe = Join-Path $NodeDir "node.exe"
 $SidecarScript = Join-Path $RepoRoot "sip-sidecar\sip-sidecar.mjs"
+$RuntimeDir = Join-Path $env:USERPROFILE ".agenticmail\sip-sidecar"
+$StdoutLog = Join-Path $RuntimeDir "sidecar.stdout.log"
+$StderrLog = Join-Path $RuntimeDir "sidecar.stderr.log"
 
 if (-not (Test-Path -LiteralPath $NodeExe)) {
   throw "Portable Node not found: $NodeExe"
@@ -20,6 +24,8 @@ if (-not (Test-Path -LiteralPath $SidecarScript)) {
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
   throw "PBX config not found: $ConfigPath"
 }
+
+New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
 
 Get-CimInstance Win32_Process |
   Where-Object { $_.Name -ieq "node.exe" -and $_.CommandLine -like "*sip-sidecar.mjs*" } |
@@ -39,7 +45,7 @@ $lastError = $null
 for ($attempt = 1; $attempt -le 30; $attempt++) {
   Start-Sleep -Seconds 2
   try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$HealthPort/health" -TimeoutSec 5
+    $health = Get-LocalJson -Uri "http://127.0.0.1:$HealthPort/health" -TimeoutSeconds 5
     if ($health.registered -and $health.transcriptPersistence.ready -and $health.status -eq "ok") {
       break
     }

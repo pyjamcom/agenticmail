@@ -20,6 +20,8 @@ from typing import Any
 
 import requests
 
+from incoming_call_mempalace import IncomingCallMempalaceArchiver
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -78,6 +80,7 @@ class ExchangeEwsSidecar:
         self.seen_ids = set(str(value) for value in self.state.get("seenIds", []))
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
+        self.state_write_lock = threading.Lock()
         self.health: dict[str, Any] = {
             "status": "starting",
             "mailbox": self.config.get("mailbox"),
@@ -89,11 +92,34 @@ class ExchangeEwsSidecar:
             "importedCount": int(self.state.get("importedCount", 0)),
             "draftsCreated": int(self.state.get("draftsCreated", 0)),
             "lastDraftAt": None,
+            "callArchive": {
+                "enabled": False,
+                "status": "disabled",
+                "room": "incoming_calls",
+                "lastPoll": None,
+                "lastSuccess": None,
+                "lastError": None,
+                "drawersWritten": int(self.state.get("callArchiveDrawersWritten", 0)),
+            },
         }
         self.password = decrypt_dpapi_secret(Path(self.config["secretRef"]))
         self.agentic_config = read_json(Path(self.config["agenticmailConfigPath"]), {})
         self.inbound_secret = self._agentic_secret("inboundSecret")
         self.internal_api_key = self._agentic_secret("masterKey")
+        palace_path = str(os.getenv("INCOMING_CALL_MEMPALACE_PATH") or "").strip()
+        self.call_archiver = (
+            IncomingCallMempalaceArchiver(
+                api_base=self.config["apiBase"],
+                api_key=self.internal_api_key,
+                palace_path=Path(palace_path),
+                wing=str(os.getenv("INCOMING_CALL_MEMPALACE_WING") or "purchasing department"),
+                room=str(os.getenv("INCOMING_CALL_MEMPALACE_ROOM") or "incoming_calls"),
+            )
+            if palace_path
+            else None
+        )
+        if self.call_archiver:
+            self.health["callArchive"].update({"enabled": True, "status": "starting"})
         self.account = self._open_account()
 
     def _agentic_secret(self, name: str) -> str:
@@ -136,7 +162,7 @@ class ExchangeEwsSidecar:
 
     def public_health(self) -> dict[str, Any]:
         with self.lock:
-            return dict(self.health)
+            return json.loads(json.dumps(self.health))
 
     def _recent_messages(self, limit: int = 50):
         query = self.account.inbox.all().only("message_id", "datetime_received")
@@ -150,18 +176,20 @@ class ExchangeEwsSidecar:
         return str(getattr(item, "id", "") or getattr(item, "message_id", ""))
 
     def _save_state(self) -> None:
-        seen = list(self.seen_ids)
-        if len(seen) > 2000:
-            seen = seen[-2000:]
-            self.seen_ids = set(seen)
-        value = {
-            "initialized": True,
-            "seenIds": seen,
-            "importedCount": self.health["importedCount"],
-            "draftsCreated": self.health["draftsCreated"],
-            "updatedAt": now_iso(),
-        }
-        write_json(self.state_path, value)
+        with self.state_write_lock:
+            seen = list(self.seen_ids)
+            if len(seen) > 2000:
+                seen = seen[-2000:]
+                self.seen_ids = set(seen)
+            value = {
+                "initialized": True,
+                "seenIds": seen,
+                "importedCount": self.health["importedCount"],
+                "draftsCreated": self.health["draftsCreated"],
+                "callArchiveDrawersWritten": self.health["callArchive"]["drawersWritten"],
+                "updatedAt": now_iso(),
+            }
+            write_json(self.state_path, value)
 
     def initialize_baseline(self) -> None:
         messages = self._recent_messages(limit=100)
@@ -336,9 +364,53 @@ class ExchangeEwsSidecar:
                 self.health["lastError"] = message
             self.log("poll_failed", errorType=type(exc).__name__, message=message)
 
+    def sync_call_archives_once(self) -> None:
+        if not self.call_archiver:
+            return
+        with self.lock:
+            self.health["callArchive"]["lastPoll"] = now_iso()
+        try:
+            result = self.call_archiver.sync_once(limit=10)
+            with self.lock:
+                call_health = self.health["callArchive"]
+                call_health["status"] = "ok" if not result["failures"] else "degraded"
+                call_health["lastSuccess"] = now_iso()
+                call_health["lastError"] = (
+                    result["failures"][0]["error_type"] if result["failures"] else None
+                )
+                call_health["drawersWritten"] += int(result["drawers_written"])
+            if result["drawers_written"] or result["failures"]:
+                self.log(
+                    "incoming_call_mempalace_sync",
+                    room=result["room"],
+                    pendingSeen=result["pending_seen"],
+                    drawersWritten=result["drawers_written"],
+                    failures=len(result["failures"]),
+                )
+            if result["drawers_written"]:
+                self._save_state()
+        except Exception as exc:
+            message = safe_error(exc)
+            with self.lock:
+                self.health["callArchive"]["status"] = "degraded"
+                self.health["callArchive"]["lastError"] = message
+            self.log("incoming_call_mempalace_sync_failed", errorType=type(exc).__name__, message=message)
+
+    def run_call_archive_loop(self) -> None:
+        interval = max(2, int(os.getenv("INCOMING_CALL_MEMPALACE_POLL_SECONDS") or "2"))
+        while not self.stop_event.is_set():
+            self.sync_call_archives_once()
+            self.stop_event.wait(interval)
+
     def run(self) -> None:
         interval = max(10, int(self.config.get("pollSeconds", 30)))
         self.log("sidecar_started", mailbox=self.config.get("mailbox"), server=self.config.get("server"))
+        if self.call_archiver:
+            threading.Thread(
+                target=self.run_call_archive_loop,
+                name="incoming-call-mempalace",
+                daemon=True,
+            ).start()
         while not self.stop_event.is_set():
             self.poll_once()
             self.stop_event.wait(interval)
