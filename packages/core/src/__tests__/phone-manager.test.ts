@@ -65,6 +65,124 @@ describe('PhoneManager', () => {
     vi.unstubAllGlobals();
   });
 
+  it('registers one inbound SIP mission and persists idempotent full transcript turns', () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db, 'mk_test_key');
+    const created = manager.registerInboundSipMission('agent1', {
+      providerCallId: 'sha256:test-call',
+      from: 'sha256:test-caller',
+      to: 'extension:redacted',
+      now: new Date('2026-07-10T10:00:00.000Z'),
+    });
+    const duplicate = manager.registerInboundSipMission('agent1', {
+      providerCallId: 'sha256:test-call',
+      from: 'sha256:test-caller',
+      to: 'extension:redacted',
+    });
+
+    expect(duplicate.id).toBe(created.id);
+    expect(created.provider).toBe('sip');
+    expect(created.policy.transcriptEnabled).toBe(true);
+
+    const turn = {
+      at: '2026-07-10T10:00:05.000Z',
+      source: 'provider' as const,
+      text: 'I need a freight quotation.',
+      metadata: { eventId: 'turn-1' },
+    };
+    manager.recordSipRealtimeActivity(created.id, [turn], 'conversing');
+    manager.recordSipRealtimeActivity(created.id, [turn], 'conversing');
+    const finalized = manager.recordSipRealtimeActivity(created.id, [{
+      at: '2026-07-10T10:01:00.000Z',
+      source: 'agent',
+      text: 'A manager will review the request.',
+      metadata: { eventId: 'turn-2' },
+    }], 'completed', { outcome: 'qualified' });
+
+    expect(finalized.status).toBe('completed');
+    expect(finalized.metadata.outcome).toBe('qualified');
+    expect(finalized.transcript.filter((entry) => entry.metadata?.eventId === 'turn-1')).toHaveLength(1);
+    expect(finalized.transcript.map((entry) => entry.text)).toContain('I need a freight quotation.');
+    expect(finalized.transcript.map((entry) => entry.text)).toContain('A manager will review the request.');
+    const raw = db.prepare('SELECT transcript_json FROM phone_missions WHERE id = ?')
+      .get(created.id) as { transcript_json: string };
+    expect(raw.transcript_json).not.toContain('I need a freight quotation.');
+    expect(raw.transcript_json).not.toContain('A manager will review the request.');
+    expect(raw.transcript_json).toContain('enc2:');
+  });
+
+  it('encrypts extracted SIP contacts and keeps transcripts indefinitely until retention is explicit', () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db, 'mk_test_key');
+    const mission = manager.registerInboundSipMission('agent1', {
+      providerCallId: 'sha256:contact-test',
+      from: 'sha256:caller',
+      to: 'extension:redacted',
+      callerContact: '+12025550999',
+      now: new Date('2026-06-01T10:00:00.000Z'),
+    });
+    manager.updateSipSalesIntake(mission.id, {
+      relationship: 'new_customer',
+      requestType: 'service',
+      requestDescription: 'Needs a quotation',
+      contactName: 'Test Contact',
+      email: 'sales@example.test',
+      callbackPhone: '+12025550123',
+      nextAction: { type: 'manager_follow_up' },
+    });
+    manager.recordSipRealtimeActivity(mission.id, [], 'completed');
+
+    const raw = db.prepare('SELECT metadata_json FROM phone_missions WHERE id = ?')
+      .get(mission.id) as { metadata_json: string };
+    expect(raw.metadata_json).not.toContain('sales@example.test');
+    expect(raw.metadata_json).not.toContain('+12025550123');
+    expect(raw.metadata_json).not.toContain('+12025550999');
+    expect(raw.metadata_json).toContain('enc2:');
+    expect(manager.getSipSalesContactSecrets(mission.id)).toEqual({
+      email: 'sales@example.test',
+      callbackPhone: '+12025550123',
+      callerNumber: '+12025550999',
+    });
+    expect(manager.getMission(mission.id)?.metadata.transcriptPurgedAt).toBeUndefined();
+
+    const retained = manager.applySipTranscriptRetention({
+      retentionDays: 30,
+      agentId: 'agent1',
+      now: new Date('2026-09-01T10:00:00.000Z'),
+    });
+    expect(retained.purged).toBe(1);
+    const purged = manager.getMission(mission.id)!;
+    expect(purged.metadata.transcriptPurgedAt).toBeTruthy();
+    expect(purged.transcript).toHaveLength(1);
+    expect(purged.transcript[0].text).toContain('30-day retention');
+  });
+
+  it('reads legacy plaintext SIP transcript rows and encrypts them on the next update', () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db, 'mk_test_key');
+    const mission = manager.registerInboundSipMission('agent1', {
+      providerCallId: 'sha256:legacy-transcript',
+      from: 'sha256:caller',
+      to: 'extension:redacted',
+    });
+    db.prepare('UPDATE phone_missions SET transcript_json = ? WHERE id = ?').run(JSON.stringify([{
+      at: '2026-07-10T10:00:00.000Z',
+      source: 'provider',
+      text: 'Legacy plaintext turn.',
+      metadata: { eventId: 'legacy-turn' },
+    }]), mission.id);
+
+    expect(manager.getMission(mission.id)?.transcript[0].text).toBe('Legacy plaintext turn.');
+    manager.recordSipRealtimeActivity(mission.id, [], 'conversing');
+    const raw = db.prepare('SELECT transcript_json FROM phone_missions WHERE id = ?')
+      .get(mission.id) as { transcript_json: string };
+    expect(raw.transcript_json).not.toContain('Legacy plaintext turn.');
+    expect(raw.transcript_json).toContain('enc2:');
+  });
+
   it('stores phone transport config and redacts secrets for output', () => {
     const db = createDb();
     dbs.push(db);

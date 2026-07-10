@@ -184,6 +184,20 @@ export {
   validatePhoneMissionStart,
   validatePhoneTransportProfile,
 } from './mission.js';
+export {
+  SALES_CALL_RELATIONSHIPS,
+  SALES_CALL_REQUEST_TYPES,
+  SALES_CALL_OUTCOMES,
+  normalizeSalesCallIntakePatch,
+  getSalesCallIntakeMissingFields,
+  mergeSalesCallIntake,
+} from './sales-intake.js';
+export type {
+  SalesCallRelationship,
+  SalesCallRequestType,
+  SalesCallOutcome,
+  SalesCallIntake,
+} from './sales-intake.js';
 export type {
   OpenClawPhoneMissionPolicy,
   PhoneAlternativePolicy,

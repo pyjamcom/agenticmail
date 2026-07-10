@@ -3,7 +3,7 @@ import express from 'express';
 import { createHmac } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
-import { createTestDatabase, PhoneManager, type AgenticMailConfig } from '@agenticmail/core';
+import { AgentMemoryManager, createTestDatabase, PhoneManager, type AgenticMailConfig } from '@agenticmail/core';
 import { createPhoneRoutes, createPhoneWebhookRoutes } from '../routes/phone.js';
 
 // Webhook secret must clear the 24-char entropy floor (#43-H8).
@@ -81,6 +81,17 @@ function createPhoneApp(db: ReturnType<typeof createTestDatabase>): express.Expr
   return app;
 }
 
+function createSipPhoneApp(db: ReturnType<typeof createTestDatabase>): express.Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.isMaster = true;
+    next();
+  });
+  app.use(createPhoneRoutes(db, config));
+  return app;
+}
+
 async function setupTransport(baseUrl: string) {
   return request(baseUrl, '/phone/transport/setup', {
     method: 'POST',
@@ -97,6 +108,117 @@ async function setupTransport(baseUrl: string) {
 }
 
 describe('phone routes', () => {
+  it('persists direct SIP transcript turns through the master-only API', async () => {
+    const db = createDb();
+    const baseUrl = await listen(createSipPhoneApp(db));
+    const registered = await request(baseUrl, '/calls/sip/inbound', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: 'ralf@example.com',
+        providerCallId: 'sha256:route-test',
+        from: 'sha256:caller',
+        to: 'extension:redacted',
+        callerContact: '+12025550999',
+      }),
+    });
+    expect(registered.status).toBe(201);
+    expect(registered.body.mission.provider).toBe('sip');
+
+    const missionId = registered.body.mission.id;
+    const persisted = await request(baseUrl, `/calls/sip/${missionId}/transcript`, {
+      method: 'POST',
+      body: JSON.stringify({
+        entries: [{
+          at: '2026-07-10T10:00:05.000Z',
+          source: 'provider',
+          text: 'Please prepare a quotation.',
+          metadata: { eventId: 'route-turn-1' },
+        }],
+      }),
+    });
+    expect(persisted.status).toBe(200);
+    const transcriptRead = await request(baseUrl, `/calls/sip/${missionId}/transcript`);
+    expect(transcriptRead.status).toBe(200);
+    expect(transcriptRead.body.transcript.map((entry: any) => entry.text))
+      .toContain('Please prepare a quotation.');
+
+    const intake = await request(baseUrl, `/calls/sip/${missionId}/intake`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        patch: {
+          relationship: 'new_customer',
+          requestType: 'service',
+          requestDescription: 'Please prepare a quotation.',
+          contactName: 'Test Contact',
+          email: 'caller@example.test',
+          callbackPhone: '+12025550123',
+          nextAction: { type: 'manager_follow_up' },
+        },
+      }),
+    });
+    expect(intake.status).toBe(200);
+    expect(intake.body.followupTaskId).toBeTruthy();
+    const contact = await request(baseUrl, `/calls/sip/${missionId}/contact-secrets`);
+    expect(contact.body.contact).toEqual({
+      email: 'caller@example.test',
+      callbackPhone: '+12025550123',
+      callerNumber: '+12025550999',
+    });
+    const rawMetadata = db.prepare('SELECT metadata_json FROM phone_missions WHERE id = ?')
+      .get(missionId) as { metadata_json: string };
+    expect(rawMetadata.metadata_json).not.toContain('caller@example.test');
+    expect(rawMetadata.metadata_json).not.toContain('+12025550123');
+    expect(rawMetadata.metadata_json).not.toContain('+12025550999');
+
+    const memory = new AgentMemoryManager(db as any);
+    await memory.storeMemory('agent1', {
+      content: 'Verified process: quotations are reviewed by a sales manager before commitment.',
+      title: 'Quotation review policy',
+      category: 'knowledge',
+      confidence: 1,
+    });
+    const knowledge = await request(baseUrl, `/calls/sip/${missionId}/knowledge`, {
+      method: 'POST',
+      body: JSON.stringify({ query: 'quotation review' }),
+    });
+    expect(knowledge.status).toBe(200);
+    expect(knowledge.body.count).toBe(1);
+    expect(knowledge.body.facts[0].content).toContain('reviewed by a sales manager');
+
+    const followups = await request(baseUrl, '/calls/sip/followups/pending');
+    expect(followups.body.tasks).toHaveLength(1);
+    expect(followups.body.tasks[0].missionId).toBe(missionId);
+    const completedFollowup = await request(
+      baseUrl,
+      `/calls/sip/followups/${intake.body.followupTaskId}/complete`,
+      { method: 'POST', body: '{}' },
+    );
+    expect(completedFollowup.status).toBe(200);
+
+    const finalized = await request(baseUrl, `/calls/sip/${missionId}/finalize`, {
+      method: 'POST',
+      body: JSON.stringify({ status: 'completed', reason: 'remote_bye' }),
+    });
+    expect(finalized.status).toBe(200);
+    expect(finalized.body.mission.status).toBe('completed');
+    expect(finalized.body.mission.transcript.map((entry: any) => entry.text))
+      .toContain('Please prepare a quotation.');
+    const draft = db.prepare('SELECT subject, text_body FROM drafts WHERE id = ?')
+      .get(finalized.body.recapDraftId) as { subject: string; text_body: string };
+    expect(draft.subject).toContain(missionId);
+    expect(draft.text_body).toContain('full turn-by-turn transcript is stored');
+    const pending = await request(baseUrl, '/calls/sip/recap-drafts/pending');
+    expect(pending.body.drafts).toHaveLength(1);
+    expect(pending.body.drafts[0].missionId).toBe(missionId);
+    const delivered = await request(baseUrl, `/calls/sip/recap-drafts/${missionId}/delivered`, {
+      method: 'POST', body: JSON.stringify({ exchangeRefHash: 'sha256:test-ref' }),
+    });
+    expect(delivered.status).toBe(200);
+    const nonePending = await request(baseUrl, '/calls/sip/recap-drafts/pending');
+    expect(nonePending.body.drafts).toHaveLength(0);
+    db.close();
+  }, 15_000);
+
   it('configures phone transport without leaking secrets', async () => {
     const db = createDb();
     const baseUrl = await listen(createPhoneApp(db));

@@ -4,6 +4,7 @@ import { encryptSecret, decryptSecret, isEncryptedSecret } from '../crypto/secre
 import { normalizePhoneNumber } from '../sms/manager.js';
 import { buildTwilioStreamTwiML } from './twilio.js';
 import { TWILIO_REALTIME_WS_PATH } from './realtime-paths.js';
+import { mergeSalesCallIntake, type SalesCallIntake } from './sales-intake.js';
 import {
   PHONE_MISSION_STATES,
   PHONE_SERVER_MAX_CALL_DURATION_SECONDS,
@@ -17,7 +18,7 @@ import {
   type TelephonyTransportCapability,
 } from './mission.js';
 
-export type PhoneTransportProvider = '46elks' | 'twilio';
+export type PhoneTransportProvider = '46elks' | 'twilio' | 'sip';
 
 /** Providers that support starting outbound call-control missions. */
 export const PHONE_CALL_CONTROL_PROVIDERS: readonly PhoneTransportProvider[] = ['46elks', 'twilio'];
@@ -132,6 +133,17 @@ export interface StartPhoneCallResult {
     body: Record<string, string>;
   };
   providerResponse?: unknown;
+}
+
+export interface RegisterInboundSipMissionInput {
+  providerCallId: string;
+  from: string;
+  to: string;
+  direction?: 'inbound' | 'outbound';
+  task?: string;
+  metadata?: Record<string, unknown>;
+  callerContact?: string;
+  now?: Date;
 }
 
 export interface PhoneWebhookResult {
@@ -538,6 +550,29 @@ export class PhoneManager {
     return out;
   }
 
+  private encodeTranscriptEntries(
+    provider: PhoneTransportProvider,
+    entries: PhoneMissionTranscriptEntry[],
+  ): PhoneMissionTranscriptEntry[] {
+    if (provider !== 'sip' || !this.encryptionKey) return entries;
+    return entries.map((entry) => ({
+      ...entry,
+      text: isEncryptedSecret(entry.text) ? entry.text : encryptSecret(entry.text, this.encryptionKey!),
+    }));
+  }
+
+  private missionFromRow(row: unknown): PhoneCallMission {
+    const mission = rowToMission(row);
+    if (mission.provider !== 'sip' || !this.encryptionKey) return mission;
+    mission.transcript = mission.transcript.map((entry) => ({
+      ...entry,
+      text: isEncryptedSecret(entry.text)
+        ? decryptSecret(entry.text, this.encryptionKey!)
+        : entry.text,
+    }));
+    return mission;
+  }
+
   private ensureTables(): void {
     if (this.initialized) return;
     this.db.exec(`
@@ -597,7 +632,7 @@ export class PhoneManager {
     const row = agentId
       ? this.db.prepare('SELECT * FROM phone_missions WHERE id = ? AND agent_id = ?').get(missionId, agentId)
       : this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
-    return row ? rowToMission(row) : null;
+    return row ? this.missionFromRow(row) : null;
   }
 
   listMissions(agentId: string, opts: { limit?: number; offset?: number; status?: PhoneMissionState } = {}): PhoneCallMission[] {
@@ -611,7 +646,102 @@ export class PhoneManager {
     }
     sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
-    return (this.db.prepare(sql).all(...params) as any[]).map(rowToMission);
+    return (this.db.prepare(sql).all(...params) as any[]).map((row) => this.missionFromRow(row));
+  }
+
+  /**
+   * Register a direct inbound SIP call in the same mission ledger used by
+   * carrier-backed calls. Idempotency is keyed by the hashed SIP Call-ID
+   * supplied as providerCallId, so an INVITE retransmission cannot create a
+   * second transcript container.
+   */
+  registerInboundSipMission(agentId: string, input: RegisterInboundSipMissionInput): PhoneCallMission {
+    const agent = this.db.prepare('SELECT id FROM agents WHERE id = ?').get(agentId) as { id: string } | undefined;
+    if (!agent) throw new Error(`Agent ${agentId} not found`);
+
+    const providerCallId = asString(input.providerCallId).slice(0, 256);
+    if (!providerCallId) throw new Error('providerCallId is required');
+    const existing = this.findMissionByProviderCallId(providerCallId, agentId);
+    if (existing) return existing;
+
+    const now = input.now ?? new Date();
+    const from = asString(input.from).slice(0, 256) || '<redacted>';
+    const to = asString(input.to).slice(0, 256) || '<redacted>';
+    const task = asString(input.task).slice(0, PHONE_TASK_MAX_LENGTH)
+      || 'Handle an inbound sales call, qualify the request, and arrange a safe next step.';
+    const policy: OpenClawPhoneMissionPolicy = {
+      policyVersion: 1,
+      regionAllowlist: ['WORLD'],
+      maxCallDurationSeconds: 1800,
+      maxCostPerMission: 0,
+      maxAttempts: 1,
+      transcriptEnabled: true,
+      recordingEnabled: false,
+      confirmPolicy: {
+        paymentDetails: 'never',
+        contractCommitment: 'never',
+        costOverLimit: 'needs_operator',
+        sensitivePersonalData: 'needs_operator',
+        unclearAlternative: 'needs_operator',
+      },
+      alternativePolicy: { maxTimeShiftMinutes: 0 },
+      extensionPolicy: {
+        maxSecondsPerRequest: 0,
+        maxRequestsPerCall: 0,
+        maxTotalExtensionSeconds: 0,
+      },
+      callbackPolicy: { allowAutoCallback: false, maxCallbackChain: 0 },
+    };
+    const direction = input.direction === 'outbound' ? 'outbound' : 'inbound';
+    const callerContact = direction === 'inbound' ? asString(input.callerContact).trim().slice(0, 128) : '';
+    if (callerContact && !this.encryptionKey) throw new Error('SIP caller contact encryption is unavailable');
+    const rawMetadata = input.metadata && typeof input.metadata === 'object' ? input.metadata : {};
+    const {
+      direction: _ignoredDirection,
+      transcriptPersistenceRequired: _ignoredPersistence,
+      salesContactSecrets: _ignoredContactSecrets,
+      salesIntake: _ignoredSalesIntake,
+      ...safeMetadata
+    } = rawMetadata;
+    const initialIntake = callerContact
+      ? mergeSalesCallIntake({}, { callbackPhone: callerContact }, now)
+      : undefined;
+    const mission: PhoneCallMission = {
+      id: `call_${randomUUID()}`,
+      agentId,
+      status: 'connected',
+      from,
+      to,
+      task,
+      policy,
+      transport: {
+        provider: 'sip',
+        phoneNumber: to,
+        capabilities: ['realtime_media'],
+        supportedRegions: ['WORLD'],
+      },
+      provider: 'sip',
+      providerCallId,
+      transcript: [{
+        at: now.toISOString(),
+        source: 'system',
+        text: `Direct ${direction} SIP call registered; mandatory transcript persistence is active.`,
+        metadata: { eventId: `${providerCallId}:registered` },
+      }],
+      metadata: {
+        ...safeMetadata,
+        direction,
+        transcriptPersistenceRequired: true,
+        ...(initialIntake ? { salesIntake: initialIntake } : {}),
+        ...(callerContact ? {
+          salesContactSecrets: { callerNumber: encryptSecret(callerContact, this.encryptionKey!) },
+        } : {}),
+      },
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+    this.insertMission(mission);
+    return mission;
   }
 
   async startMission(
@@ -1020,7 +1150,7 @@ export class PhoneManager {
     const row = agentId
       ? this.db.prepare('SELECT * FROM phone_missions WHERE provider_call_id = ? AND agent_id = ?').get(providerCallId, agentId)
       : this.db.prepare('SELECT * FROM phone_missions WHERE provider_call_id = ?').get(providerCallId);
-    return row ? rowToMission(row) : null;
+    return row ? this.missionFromRow(row) : null;
   }
 
   /**
@@ -1042,6 +1172,190 @@ export class PhoneManager {
       ? mission.status
       : (status ?? mission.status);
     return this.updateMissionStatus(mission.id, nextStatus, {}, entries);
+  }
+
+  /** Append idempotent direct-SIP transcript entries and optional metadata. */
+  recordSipRealtimeActivity(
+    missionId: string,
+    entries: PhoneMissionTranscriptEntry[],
+    status?: PhoneMissionState,
+    metadata: Record<string, unknown> = {},
+  ): PhoneCallMission {
+    const mission = this.getMission(missionId);
+    if (!mission || mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+    const existingEventIds = new Set(
+      mission.transcript
+        .map((entry) => asString(entry.metadata?.eventId))
+        .filter(Boolean),
+    );
+    const uniqueEntries = entries.filter((entry) => {
+      const eventId = asString(entry.metadata?.eventId);
+      if (!eventId) return true;
+      if (existingEventIds.has(eventId)) return false;
+      existingEventIds.add(eventId);
+      return true;
+    });
+    const nextStatus = TERMINAL_MISSION_STATES.includes(mission.status)
+      ? mission.status
+      : (status ?? mission.status);
+    return this.updateMissionStatus(mission.id, nextStatus, metadata, uniqueEntries);
+  }
+
+  /**
+   * Fast path used for live turn persistence. It never decrypts historical
+   * transcript text and returns only a count, keeping per-turn latency O(1).
+   */
+  appendSipTranscriptEntries(
+    missionId: string,
+    entries: PhoneMissionTranscriptEntry[],
+  ): { missionId: string; transcriptCount: number } {
+    const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+    if (!row) throw new Error('SIP phone mission not found');
+    const mission = rowToMission(row);
+    if (mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+    const existingEventIds = new Set(
+      mission.transcript.map((entry) => asString(entry.metadata?.eventId)).filter(Boolean),
+    );
+    const uniqueEntries = entries.filter((entry) => {
+      const eventId = asString(entry.metadata?.eventId);
+      if (!eventId || existingEventIds.has(eventId)) return false;
+      existingEventIds.add(eventId);
+      return true;
+    });
+    if (uniqueEntries.length > 0) {
+      const nextTranscript = [
+        ...this.encodeTranscriptEntries('sip', mission.transcript),
+        ...this.encodeTranscriptEntries('sip', uniqueEntries),
+      ];
+      const nextStatus = TERMINAL_MISSION_STATES.includes(mission.status) ? mission.status : 'conversing';
+      const nextMetadata = { ...mission.metadata, transcriptLastPersistedAt: new Date().toISOString() };
+      this.db.prepare(`
+        UPDATE phone_missions
+        SET status = ?, transcript_json = ?, metadata_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        nextStatus,
+        JSON.stringify(nextTranscript),
+        JSON.stringify(nextMetadata),
+        new Date().toISOString(),
+        missionId,
+      );
+    }
+    return { missionId, transcriptCount: mission.transcript.length + uniqueEntries.length };
+  }
+
+  /** Merge a model-produced partial sales intake into a direct SIP mission. */
+  updateSipSalesIntake(missionId: string, patch: unknown): { mission: PhoneCallMission; intake: SalesCallIntake } {
+    const mission = this.getMission(missionId);
+    if (!mission || mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+    const input = patch && typeof patch === 'object' && !Array.isArray(patch)
+      ? patch as Record<string, unknown>
+      : {};
+    const email = asString(input.email).trim().toLowerCase();
+    const callbackPhone = asString(input.callbackPhone).trim();
+    if ((email || callbackPhone) && !this.encryptionKey) {
+      throw new Error('SIP contact secret encryption is unavailable');
+    }
+    const currentSecrets = mission.metadata.salesContactSecrets
+      && typeof mission.metadata.salesContactSecrets === 'object'
+      && !Array.isArray(mission.metadata.salesContactSecrets)
+      ? mission.metadata.salesContactSecrets as Record<string, unknown>
+      : {};
+    const salesContactSecrets = {
+      ...currentSecrets,
+      ...(email ? { email: encryptSecret(email, this.encryptionKey!) } : {}),
+      ...(callbackPhone ? { callbackPhone: encryptSecret(callbackPhone, this.encryptionKey!) } : {}),
+    };
+    const intake = mergeSalesCallIntake(mission.metadata.salesIntake, patch);
+    const updated = this.updateMissionStatus(mission.id, mission.status, {
+      salesIntake: intake,
+      ...(Object.keys(salesContactSecrets).length > 0 ? { salesContactSecrets } : {}),
+      intakeComplete: intake.missingFields.length === 0,
+    });
+    return { mission: updated, intake };
+  }
+
+  /** Resolve encrypted contact values for a master-authorized local workflow. */
+  getSipSalesContactSecrets(missionId: string): { email?: string; callbackPhone?: string; callerNumber?: string } {
+    const mission = this.getMission(missionId);
+    if (!mission || mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+    const secrets = mission.metadata.salesContactSecrets
+      && typeof mission.metadata.salesContactSecrets === 'object'
+      && !Array.isArray(mission.metadata.salesContactSecrets)
+      ? mission.metadata.salesContactSecrets as Record<string, unknown>
+      : {};
+    const decrypt = (value: unknown): string | undefined => {
+      const encoded = asString(value);
+      if (!encoded || !this.encryptionKey || !isEncryptedSecret(encoded)) return undefined;
+      try { return decryptSecret(encoded, this.encryptionKey); } catch { return undefined; }
+    };
+    const email = decrypt(secrets.email);
+    const callbackPhone = decrypt(secrets.callbackPhone);
+    const callerNumber = decrypt(secrets.callerNumber);
+    return {
+      ...(email ? { email } : {}),
+      ...(callbackPhone ? { callbackPhone } : {}),
+      ...(callerNumber ? { callerNumber } : {}),
+    };
+  }
+
+  /**
+   * Apply an explicitly configured retention window to completed direct-SIP
+   * calls. A value of 0 is intentionally handled by the caller as indefinite
+   * retention and never reaches this method.
+   */
+  applySipTranscriptRetention(input: {
+    retentionDays: number;
+    agentId?: string;
+    now?: Date;
+  }): { scanned: number; purged: number } {
+    const retentionDays = Math.trunc(input.retentionDays);
+    if (!Number.isFinite(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+      throw new Error('retentionDays must be between 1 and 3650');
+    }
+    const now = input.now ?? new Date();
+    const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString();
+    const rows = input.agentId
+      ? this.db.prepare(`
+          SELECT * FROM phone_missions
+          WHERE provider = 'sip' AND agent_id = ?
+            AND status IN ('completed', 'failed', 'cancelled') AND updated_at < ?
+        `).all(input.agentId, cutoff) as any[]
+      : this.db.prepare(`
+          SELECT * FROM phone_missions
+          WHERE provider = 'sip'
+            AND status IN ('completed', 'failed', 'cancelled') AND updated_at < ?
+        `).all(cutoff) as any[];
+    let purged = 0;
+    for (const row of rows) {
+      const rawMission = rowToMission(row);
+      if (rawMission.metadata.transcriptPurgedAt) continue;
+      const entryCount = rawMission.transcript.length;
+      const purgedAt = now.toISOString();
+      const tombstone: PhoneMissionTranscriptEntry = {
+        at: purgedAt,
+        source: 'system',
+        text: `Transcript removed after the configured ${retentionDays}-day retention period.`,
+        metadata: { eventId: `${rawMission.id}:retention-purge`, retentionDays, entryCount },
+      };
+      this.db.prepare(`
+        UPDATE phone_missions
+        SET transcript_json = ?, metadata_json = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        JSON.stringify(this.encodeTranscriptEntries('sip', [tombstone])),
+        JSON.stringify({
+          ...rawMission.metadata,
+          transcriptPurgedAt: purgedAt,
+          transcriptRetentionDays: retentionDays,
+          transcriptEntryCountBeforePurge: entryCount,
+        }),
+        purgedAt,
+        rawMission.id,
+      );
+      purged += 1;
+    }
+    return { scanned: rows.length, purged };
   }
 
   // ─── Operator queries (ask_operator) ──────────────────
@@ -1110,7 +1424,7 @@ export class PhoneManager {
       "SELECT * FROM phone_missions WHERE metadata_json LIKE ? ESCAPE '\\'",
     ).all(`%${escapeLike(id)}%`) as any[];
     for (const row of rows) {
-      const mission = rowToMission(row);
+      const mission = this.missionFromRow(row);
       const query = readOperatorQueries(mission).find((item) => item.id === id);
       if (query) return { mission, query };
     }
@@ -1206,7 +1520,7 @@ export class PhoneManager {
     let missionsTouched = 0;
 
     for (const row of rows) {
-      const mission = rowToMission(row);
+      const mission = this.missionFromRow(row);
       const queries = readOperatorQueries(mission);
       const open = queries.filter((q) => !q.answer);
       if (open.length === 0) continue;
@@ -1581,7 +1895,7 @@ export class PhoneManager {
       JSON.stringify(mission.transport),
       mission.provider,
       mission.providerCallId ?? null,
-      JSON.stringify(mission.transcript),
+      JSON.stringify(this.encodeTranscriptEntries(mission.provider, mission.transcript)),
       JSON.stringify(mission.metadata),
       mission.createdAt,
       mission.updatedAt,
@@ -1606,9 +1920,14 @@ export class PhoneManager {
     metadata: Record<string, unknown>,
     transcriptEntries: PhoneMissionTranscriptEntry[] = [],
   ): PhoneCallMission {
-    const mission = this.getMission(missionId);
-    if (!mission) throw new Error('Phone mission not found');
-    const nextTranscript = [...mission.transcript, ...transcriptEntries];
+    const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+    if (!row) throw new Error('Phone mission not found');
+    const rawMission = rowToMission(row);
+    const mission = rawMission;
+    const nextTranscript = [
+      ...this.encodeTranscriptEntries(mission.provider, rawMission.transcript),
+      ...this.encodeTranscriptEntries(mission.provider, transcriptEntries),
+    ];
     const nextMetadata = Object.fromEntries(
       Object.entries({ ...mission.metadata, ...metadata }).filter(([, value]) => value !== undefined),
     );

@@ -87,16 +87,19 @@ class ExchangeEwsSidecar:
             "lastSuccess": None,
             "lastError": None,
             "importedCount": int(self.state.get("importedCount", 0)),
+            "draftsCreated": int(self.state.get("draftsCreated", 0)),
+            "lastDraftAt": None,
         }
         self.password = decrypt_dpapi_secret(Path(self.config["secretRef"]))
-        self.inbound_secret = self._load_inbound_secret()
+        self.agentic_config = read_json(Path(self.config["agenticmailConfigPath"]), {})
+        self.inbound_secret = self._agentic_secret("inboundSecret")
+        self.internal_api_key = self._agentic_secret("masterKey")
         self.account = self._open_account()
 
-    def _load_inbound_secret(self) -> str:
-        agentic_config = read_json(Path(self.config["agenticmailConfigPath"]), {})
-        secret = str(agentic_config.get("inboundSecret") or "").strip()
+    def _agentic_secret(self, name: str) -> str:
+        secret = str(self.agentic_config.get(name) or "").strip()
         if not secret:
-            raise RuntimeError("AgenticMail inboundSecret is missing")
+            raise RuntimeError(f"AgenticMail {name} is missing")
         return secret
 
     def _open_account(self):
@@ -155,6 +158,7 @@ class ExchangeEwsSidecar:
             "initialized": True,
             "seenIds": seen,
             "importedCount": self.health["importedCount"],
+            "draftsCreated": self.health["draftsCreated"],
             "updatedAt": now_iso(),
         }
         write_json(self.state_path, value)
@@ -229,6 +233,77 @@ class ExchangeEwsSidecar:
         key_hash = hashlib.sha256(self._item_key(item).encode("utf-8")).hexdigest()[:16]
         self.log("message_imported", itemHash=key_hash, httpStatus=response.status_code)
 
+    def _agentic_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.internal_api_key}"}
+
+    def create_recap_draft(self, payload: dict[str, Any]) -> tuple[str, bool]:
+        mission_id = str(payload.get("missionId") or "").strip()
+        subject = str(payload.get("subject") or "").strip()[:255]
+        text_body = str(payload.get("textBody") or "").strip()[:100_000]
+        if not mission_id or not subject or not text_body:
+            raise ValueError("missionId, subject and textBody are required")
+
+        existing = list(self.account.drafts.filter(subject=subject).only("id")[:1])
+        if existing:
+            item_id = str(getattr(existing[0], "id", "") or subject)
+            return hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:24], False
+
+        from exchangelib import Message
+
+        message = Message(
+            account=self.account,
+            folder=self.account.drafts,
+            subject=subject,
+            body=text_body,
+        )
+        saved = message.save()
+        item_id = str(getattr(saved, "id", "") or getattr(message, "id", "") or subject)
+        ref_hash = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:24]
+        with self.lock:
+            self.health["draftsCreated"] += 1
+            self.health["lastDraftAt"] = now_iso()
+        self.log(
+            "internal_recap_draft_created",
+            missionHash=hashlib.sha256(mission_id.encode("utf-8")).hexdigest()[:16],
+            exchangeRefHash=ref_hash,
+            bodyLength=len(text_body),
+        )
+        self._save_state()
+        return ref_hash, True
+
+    def sync_recap_drafts(self) -> None:
+        api_root = self.config["apiBase"].rstrip("/")
+        response = requests.get(
+            f"{api_root}/api/agenticmail/calls/sip/recap-drafts/pending?limit=10",
+            headers=self._agentic_headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+        for draft in response.json().get("drafts", []):
+            mission_id = str(draft.get("missionId") or "")
+            if not mission_id:
+                continue
+            try:
+                ref_hash, _created = self.create_recap_draft(draft)
+                ack = requests.post(
+                    f"{api_root}/api/agenticmail/calls/sip/recap-drafts/{mission_id}/delivered",
+                    headers={**self._agentic_headers(), "Content-Type": "application/json"},
+                    json={"exchangeRefHash": ref_hash},
+                    timeout=15,
+                )
+                ack.raise_for_status()
+            except Exception as exc:
+                try:
+                    requests.post(
+                        f"{api_root}/api/agenticmail/calls/sip/recap-drafts/{mission_id}/failed",
+                        headers={**self._agentic_headers(), "Content-Type": "application/json"},
+                        json={"errorType": type(exc).__name__},
+                        timeout=10,
+                    ).raise_for_status()
+                except Exception:
+                    pass
+                raise
+
     def poll_once(self) -> None:
         with self.lock:
             self.health["lastPoll"] = now_iso()
@@ -247,6 +322,7 @@ class ExchangeEwsSidecar:
                 self.deliver(full_item)
                 self.seen_ids.add(key)
                 imported += 1
+            self.sync_recap_drafts()
             with self.lock:
                 self.health["status"] = "ok"
                 self.health["lastSuccess"] = now_iso()

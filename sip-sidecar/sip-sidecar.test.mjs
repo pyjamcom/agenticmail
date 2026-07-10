@@ -1,10 +1,20 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { RtpSession, SipSidecar, buildSipMessage, parseSipMessage } from './sip-sidecar.mjs';
+import {
+  EncryptedTranscriptSpool,
+  OpenAiRealtimeBridge,
+  RtpSession,
+  SipCall,
+  SipSidecar,
+  buildSipMessage,
+  businessHoursStatus,
+  parseSipMessage,
+  sipDialableUser,
+} from './sip-sidecar.mjs';
 
 function inviteMessage(callId = 'inbound-test@example.invalid') {
   const sdp = [
@@ -38,6 +48,12 @@ function inDialogRequest(method, callId, cseq) {
   ]);
 }
 
+test('extracts only dialable caller identities from SIP URIs', () => {
+  assert.equal(sipDialableUser('<sip:+12025550123@pbx.test>;tag=caller'), '+12025550123');
+  assert.equal(sipDialableUser('sip:114@pbx.test'), '114');
+  assert.equal(sipDialableUser('sip:not-a-number@pbx.test'), '');
+});
+
 test('retransmitted inbound INVITE creates one call and one Realtime greeting', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -48,6 +64,7 @@ test('retransmitted inbound INVITE creates one call and one Realtime greeting', 
     username: '1000',
     localIp: '127.0.0.1',
     liveAnswerEnabled: true,
+    transcriptPersistenceRequired: false,
     auditPath: join(dir, 'events.jsonl'),
   }));
   writeFileSync(agenticmailConfigPath, JSON.stringify({ openaiApiKey: 'test-key' }));
@@ -142,6 +159,7 @@ test('CANCEL during Realtime setup terminates the one pending inbound call', asy
     username: '1000',
     localIp: '127.0.0.1',
     liveAnswerEnabled: true,
+    transcriptPersistenceRequired: false,
     auditPath: join(dir, 'events.jsonl'),
   }));
   writeFileSync(agenticmailConfigPath, JSON.stringify({ openaiApiKey: 'test-key' }));
@@ -174,4 +192,157 @@ test('CANCEL during Realtime setup terminates the one pending inbound call', asy
   assert.equal(sidecar.callsBySipId.has(callId), false);
   assert.equal(sent.filter((msg) => msg.startLine === 'SIP/2.0 487 Request Terminated').length, 1);
   assert.equal(sent.filter((msg) => msg.startLine === 'SIP/2.0 200 OK').length, 1);
+});
+
+test('final caller and agent transcript text is persisted in sequence', () => {
+  const persisted = [];
+  const finalized = [];
+  const sidecar = {
+    transcriptPersistenceRequired: true,
+    missionClient: {
+      appendTranscript: (missionId, entry) => persisted.push({ missionId, entry }),
+      finalize: (missionId, body) => finalized.push({ missionId, body }),
+    },
+    logEvent: () => {},
+    onCallEnded: () => {},
+    sendBye: () => {},
+  };
+  const call = new SipCall({ id: 'sip-test', direction: 'inbound', sidecar });
+  call.missionId = 'call-test';
+  call.recordTranscriptEvent({
+    type: 'conversation.item.input_audio_transcription.completed',
+    text: 'Нужен расчет перевозки.',
+  });
+  call.recordTranscriptEvent({
+    type: 'response.output_audio_transcript.done',
+    text: 'Уточните, пожалуйста, маршрут.',
+  });
+  call.end('remote_bye');
+
+  assert.deepEqual(persisted.map((item) => item.entry.source), ['provider', 'agent']);
+  assert.deepEqual(persisted.map((item) => item.entry.text), [
+    'Нужен расчет перевозки.',
+    'Уточните, пожалуйста, маршрут.',
+  ]);
+  assert.deepEqual(persisted.map((item) => item.entry.metadata.sequence), [1, 2]);
+  assert.equal(finalized[0].body.status, 'completed');
+  assert.equal(finalized[0].body.metadata.transcriptTurnCount, 2);
+});
+
+test('sales intake tools persist structured facts and callback requests without dialing', async () => {
+  const updates = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.logEvent = () => {};
+  sidecar.buildInstructions = () => 'specialist instructions';
+  sidecar.missionClient = {
+    updateIntake: async (_missionId, patch) => {
+      updates.push(patch);
+      return { success: true, complete: false, intake: { missingFields: ['destination'] } };
+    },
+    lookupKnowledge: async () => ({
+      count: 1,
+      facts: [{ title: 'Verified policy', content: 'Manager review is required.' }],
+    }),
+  };
+  const instructionUpdates = [];
+  const call = {
+    id: 'sip-tool-test', missionId: 'call-tool-test', end: () => {},
+    openai: { updateInstructions: (value) => instructionUpdates.push(value) },
+  };
+
+  const routed = await sidecar.executeCallTool(call, 'route_call_specialist', {
+    relationship: 'new_customer', requestType: 'freight', reason: 'Needs a freight quote',
+  });
+  const intake = await sidecar.executeCallTool(call, 'update_call_intake', {
+    relationship: 'new_customer', requestType: 'freight', origin: 'Shanghai',
+  });
+  const callback = await sidecar.executeCallTool(call, 'request_callback', {
+    reason: 'Manager should confirm the routing', dueAt: '2026-07-11T09:00:00Z',
+  });
+  const knowledge = await sidecar.executeCallTool(call, 'lookup_verified_information', {
+    query: 'quotation policy',
+  });
+
+  assert.equal(routed.ok, true);
+  assert.equal(routed.specialistProfile, 'new_customer');
+  assert.deepEqual(instructionUpdates, ['specialist instructions']);
+  assert.equal(intake.ok, true);
+  assert.deepEqual(intake.missingFields, ['destination']);
+  assert.equal(callback.callbackIsRequestOnly, true);
+  assert.equal(updates[2].nextAction.type, 'callback_request');
+  assert.equal(updates[2].outcome, 'needs_follow_up');
+  assert.equal(knowledge.count, 1);
+});
+
+test('transcript fallback spool is encrypted and can be replayed', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-spool-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'transcript-spool.enc.jsonl');
+  const spool = new EncryptedTranscriptSpool(path, 'test-master-key');
+  const operation = {
+    kind: 'transcript',
+    missionId: 'call-test',
+    entries: [{ source: 'provider', text: 'sensitive transcript text' }],
+  };
+
+  spool.append(operation);
+  const raw = readFileSync(path, 'utf8');
+  assert.equal(raw.includes('sensitive transcript text'), false);
+  assert.equal(spool.count(), 1);
+
+  const delivered = [];
+  const result = await spool.flush(async (item) => delivered.push(item));
+  assert.deepEqual(result, { delivered: 1, remaining: 0 });
+  assert.deepEqual(delivered, [operation]);
+  assert.equal(spool.count(), 0);
+});
+
+test('business hours support normal and overnight schedules', () => {
+  const config = {
+    enabled: true,
+    timezone: 'UTC',
+    schedule: {
+      monday: ['09:00-18:00'],
+      friday: ['22:00-02:00'],
+    },
+  };
+  assert.equal(businessHoursStatus(config, new Date('2026-07-06T10:00:00Z')).open, true);
+  assert.equal(businessHoursStatus(config, new Date('2026-07-06T20:00:00Z')).open, false);
+  assert.equal(businessHoursStatus(config, new Date('2026-07-11T01:00:00Z')).open, true);
+  assert.equal(businessHoursStatus(null, new Date()).open, true);
+});
+
+test('Realtime bridge flushes unfinished transcript deltas on close', () => {
+  const events = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test', model: 'gpt-realtime-2.1', voice: 'marin', instructions: 'test',
+    onEvent: (event) => events.push(event),
+  });
+  bridge.handleMessage(JSON.stringify({
+    type: 'response.output_audio_transcript.delta', item_id: 'item-1', delta: 'Partial answer',
+  }));
+  bridge.close();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].text, 'Partial answer');
+  assert.equal(events[0].partial, true);
+});
+
+test('Realtime bridge emits conversation truncation for interrupted playback', () => {
+  const sent = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test', model: 'gpt-realtime-2.1', voice: 'marin', instructions: 'test',
+  });
+  bridge.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
+  assert.equal(bridge.truncateAudio('item-1', 0, 1250), true);
+  assert.deepEqual(sent[0], {
+    type: 'conversation.item.truncate',
+    item_id: 'item-1',
+    content_index: 0,
+    audio_end_ms: 1250,
+  });
+  assert.equal(bridge.updateInstructions('specialist instructions'), true);
+  assert.deepEqual(sent[1], {
+    type: 'session.update',
+    session: { type: 'realtime', instructions: 'specialist instructions' },
+  });
 });

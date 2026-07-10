@@ -258,6 +258,12 @@ export {
   parseOperatorQueryReply,
   extractEmailAddress,
   isOperatorReplySender,
+  SALES_CALL_RELATIONSHIPS,
+  SALES_CALL_REQUEST_TYPES,
+  SALES_CALL_OUTCOMES,
+  normalizeSalesCallIntakePatch,
+  getSalesCallIntakeMissingFields,
+  mergeSalesCallIntake,
 } from './phone/index.js';
 export type {
   ElksRealtimeAudioFormat,
@@ -320,6 +326,10 @@ export type {
   OperatorQueryUrgency,
   VoiceProvider,
   VoiceRuntimeConnection,
+  SalesCallRelationship,
+  SalesCallRequestType,
+  SalesCallOutcome,
+  SalesCallIntake,
 } from './phone/index.js';
 
 // Telemetry
