@@ -74,6 +74,7 @@ $payload = [ordered]@{
   agenticmailDirectSipSupported = $false
   sipSidecarSupported = $true
   sipSidecarScript = (Join-Path $PSScriptRoot "sip-sidecar\sip-sidecar.mjs")
+  postGreetingSilencePromptDelayMs = 2000
   internalTransfer = [ordered]@{
     enabled = $true
     allowedExtensionPattern = "^1[0-9]{2}$"

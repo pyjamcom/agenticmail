@@ -52,6 +52,12 @@ tool accepts digits only, never infers an extension from a name, and rejects
 the sidecar's own extension, external/PSTN numbers, and anything outside the
 configured allowlist.
 
+For inbound calls, the opening is fixed by the sales scenario. After the
+opening audio has drained, a one-shot timer waits two seconds. If the caller
+has not started speaking, the sidecar requests the configured follow-up
+sentence. Any caller `speech_started` event cancels the timer immediately, so
+the follow-up never talks over the caller.
+
 On Windows, run `setup-sip-firewall.ps1` from an elevated PowerShell session
 to allow the configured SIP signaling port and RTP range on the Domain
 profile. The signaling rule is restricted to the configured PBX address.

@@ -129,6 +129,44 @@ test('retransmitted inbound INVITE creates one call and one Realtime greeting', 
   assert.equal(rtpClosed, true);
 });
 
+test('post-greeting silence prompt is one-shot and cancelled by caller speech', () => {
+  const prompts = [];
+  const events = [];
+  const call = Object.create(SipCall.prototype);
+  Object.assign(call, {
+    id: 'sip-post-greeting',
+    direction: 'inbound',
+    status: 'media_active',
+    callerSpeechObserved: false,
+    managerTransfer: null,
+    postGreetingPromptTimer: null,
+    postGreetingPromptScheduled: false,
+    sidecar: {
+      pbx: { postGreetingSilencePromptDelayMs: 2_000 },
+      salesScenario: {
+        postGreetingSilencePrompt: 'Вы бы хотели переговорить с каким-то конкретным сотрудником, или я могу вам чем-то помочь?',
+      },
+      logEvent: (type) => events.push(type),
+    },
+    rtp: { stats: () => ({ outboundQueuedBytes: 0 }) },
+    openai: { requestResponse: (instructions) => { prompts.push(instructions); return true; } },
+  });
+
+  assert.equal(call.schedulePostGreetingPrompt(), true);
+  assert.equal(call.schedulePostGreetingPrompt(), false);
+  call.cancelPostGreetingPrompt();
+  assert.equal(call.postGreetingPromptTimer, null);
+
+  const prompt = call.sidecar.salesScenario.postGreetingSilencePrompt;
+  assert.equal(call.sendPostGreetingPrompt(prompt), true);
+  assert.match(prompts[0], /Вы бы хотели переговорить/u);
+  assert.deepEqual(events, ['post_greeting_silence_prompt_started']);
+
+  call.callerSpeechObserved = true;
+  assert.equal(call.sendPostGreetingPrompt(prompt), false);
+  assert.equal(prompts.length, 1);
+});
+
 test('outbound PCMU is paced as one 20 ms RTP packet per flush', () => {
   const packets = [];
   const rtp = new RtpSession({
@@ -519,7 +557,7 @@ test('sales instructions expose only the active service playbook after routing',
   const routingPrompt = sidecar.buildInstructions({ direction: 'inbound', loadedSkills: [] });
   assert.equal(
     sidecar.salesScenario.openings.inbound,
-    'Компания «Невский Брокер», Елена. Разговор расшифровывается и сохраняется. Да, да, слушаю вас!',
+    'Невский Брокер, меня зовут Елена, слушаю вас.',
   );
   assert.doesNotMatch(sidecar.salesScenario.openings.inbound, /ИИ-помощник/u);
   assert.match(routingPrompt, /# Routing/);

@@ -1029,7 +1029,15 @@ class OpenAiRealtimeBridge {
   startResponse() {
     if (this.initialResponseStarted || !this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     this.initialResponseStarted = true;
-    this.ws.send(JSON.stringify({ type: 'response.create' }));
+    return this.requestResponse();
+  }
+
+  requestResponse(instructions = '') {
+    if (!this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN || this.closing) return false;
+    const response = String(instructions || '').trim()
+      ? { response: { output_modalities: ['audio'], instructions: String(instructions).trim() } }
+      : {};
+    this.ws.send(JSON.stringify({ type: 'response.create', ...response }));
     return true;
   }
 
@@ -1468,6 +1476,10 @@ class SipCall {
     this.specialistRoute = null;
     this.loadedSkills = [];
     this.managerTransfer = null;
+    this.postGreetingPromptTimer = null;
+    this.postGreetingPromptScheduled = false;
+    this.callerSpeechObserved = false;
+    this.initialAgentTurnCompleted = false;
   }
 
   publicView() {
@@ -1559,6 +1571,46 @@ class SipCall {
     });
   }
 
+  cancelPostGreetingPrompt() {
+    clearTimeout(this.postGreetingPromptTimer);
+    this.postGreetingPromptTimer = null;
+  }
+
+  sendPostGreetingPrompt(prompt) {
+    if (this.status === 'ended' || this.callerSpeechObserved || this.managerTransfer) return false;
+    const sent = this.openai?.requestResponse?.(
+      `Say exactly this one sentence in Russian, without adding anything: "${prompt}"`,
+    );
+    if (sent) this.sidecar.logEvent('post_greeting_silence_prompt_started', { callId: this.id });
+    return sent === true;
+  }
+
+  schedulePostGreetingPrompt() {
+    if (this.direction !== 'inbound'
+      || this.status === 'ended'
+      || this.postGreetingPromptScheduled
+      || this.callerSpeechObserved) return false;
+    const prompt = String(
+      this.sidecar.salesScenario.postGreetingSilencePrompt
+      || 'Вы бы хотели переговорить с каким-то конкретным сотрудником, или я могу вам чем-то помочь?',
+    ).trim();
+    if (!prompt) return false;
+    this.postGreetingPromptScheduled = true;
+    const delayMs = Math.min(10_000, Math.max(
+      500,
+      asInt(this.sidecar.pbx.postGreetingSilencePromptDelayMs, 2_000),
+    ));
+    const queuedAudioMs = Math.ceil(Math.max(0, Number(
+      this.rtp?.stats?.().outboundQueuedBytes,
+    ) || 0) / 8);
+    this.postGreetingPromptTimer = setTimeout(() => {
+      this.postGreetingPromptTimer = null;
+      this.sendPostGreetingPrompt(prompt);
+    }, queuedAudioMs + delayMs);
+    this.postGreetingPromptTimer.unref?.();
+    return true;
+  }
+
   finalizePersistence(reason) {
     if (!this.missionId || !this.sidecar.missionClient) return;
     const failedReasons = new Set([
@@ -1648,6 +1700,8 @@ class SipCall {
           this.currentOutputItem.generatedAudioBytes += Math.max(0, Number(event.audioBytes) || 0);
         }
         if (event.type === 'input_audio_buffer.speech_started') {
+          this.callerSpeechObserved = true;
+          this.cancelPostGreetingPrompt();
           const output = this.currentOutputItem;
           const audioEndMs = playbackTruncationMs(output, this.rtp?.stats?.());
           this.rtp?.clearOutboundAudio?.();
@@ -1658,6 +1712,12 @@ class SipCall {
         }
         this.sidecar.recordOpenAiEvent(this, event);
         this.recordTranscriptEvent(event);
+        if (!this.initialAgentTurnCompleted
+          && (event.type === 'response.output_audio_transcript.done'
+            || event.type === 'response.output_text.done')) {
+          this.initialAgentTurnCompleted = true;
+          this.schedulePostGreetingPrompt();
+        }
         if (event.type === 'error') {
           this.sidecar.logEvent('call_openai_nonfatal_error', {
             callId: this.id,
@@ -1719,6 +1779,7 @@ class SipCall {
     this.status = 'ended';
     clearTimeout(this.ackTimer);
     clearTimeout(this.callLimitTimer);
+    this.cancelPostGreetingPrompt();
     clearInterval(this.mediaWatchTimer);
     this.sidecar.endManagerTransfer?.(this, reason);
     if (notifyRemote && this.dialogEstablished && this.acknowledged) this.sidecar.sendBye(this);
@@ -2728,6 +2789,13 @@ class SipSidecar {
         id: this.salesScenario.id || null,
         version: this.salesScenario.version || null,
         detailedRequestEmail: 'sales@nbr.ru',
+        postGreetingSilencePrompt: {
+          configured: Boolean(this.salesScenario.postGreetingSilencePrompt),
+          delayMs: Math.min(10_000, Math.max(
+            500,
+            asInt(this.pbx.postGreetingSilencePromptDelayMs, 2_000),
+          )),
+        },
       },
       transcriptPersistenceRequired: this.transcriptPersistenceRequired,
       transcriptRetentionDays: this.transcriptRetentionDays,
