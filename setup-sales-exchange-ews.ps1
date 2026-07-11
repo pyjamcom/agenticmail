@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-service-common.ps1")
 
 $dir = Split-Path -Parent $ConfigPath
 New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -25,9 +26,14 @@ if ($NonInteractive) {
   $securePassword = Read-Host "Exchange password for $Username" -AsSecureString
 }
 
-$encrypted = ConvertFrom-SecureString $securePassword
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
-[IO.File]::WriteAllText($SecretPath, $encrypted, $utf8NoBom)
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+try {
+  $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  Write-AgenticMailMachineSecretFile -Path $SecretPath -Secret $plainPassword
+} finally {
+  if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+}
 
 $config = [ordered]@{
   profile = "exchange-sales-ews"
@@ -39,7 +45,7 @@ $config = [ordered]@{
   apiBase = "http://127.0.0.1:3829"
   agenticmailConfigPath = "$env:USERPROFILE\.agenticmail\config.json"
   secretRef = $SecretPath
-  secretFormat = "windows-dpapi-current-user"
+  secretFormat = "windows_dpapi_local_machine_v1"
   caBundlePath = $CaBundlePath
   verifyTls = $true
   pollSeconds = $PollSeconds

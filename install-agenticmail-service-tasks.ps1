@@ -1,6 +1,9 @@
+param([string]$ServiceProfile = $env:USERPROFILE)
+
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+. (Join-Path $RepoRoot "windows-service-common.ps1")
+$ServiceProfile = Resolve-AgenticMailServiceProfile $ServiceProfile
 
 $definitions = @(
   @{ Name = "AgenticMail-Stalwart-Service"; Script = Join-Path $RepoRoot "run-stalwart-service.ps1"; Description = "Long-running Stalwart mail service for AgenticMail." }
@@ -11,9 +14,9 @@ $definitions = @(
 
 foreach ($definition in $definitions) {
   if (-not (Test-Path -LiteralPath $definition.Script)) { throw "Service runner not found: $($definition.Script)" }
-  $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $definition.Script + '"'
+  $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $definition.Script + '" -ServiceProfile "' + $ServiceProfile + '"'
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
+  $trigger = New-ScheduledTaskTrigger -AtStartup
   $settingsArgs = @{
     StartWhenAvailable = $true
     AllowStartIfOnBatteries = $true
@@ -24,7 +27,7 @@ foreach ($definition in $definitions) {
     ExecutionTimeLimit = (New-TimeSpan -Days 3650)
   }
   $settings = New-ScheduledTaskSettingsSet @settingsArgs
-  $principal = New-ScheduledTaskPrincipal -UserId $CurrentUser -LogonType Interactive -RunLevel Limited
+  $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
   $taskArgs = @{
     Action = $action
     Trigger = $trigger

@@ -1,8 +1,13 @@
+param([string]$ServiceProfile = $env:AGENTICMAIL_SERVICE_PROFILE)
+
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $RepoRoot "windows-service-common.ps1")
+$ServiceProfile = Set-AgenticMailServiceEnvironment $ServiceProfile
+$null = Write-AgenticMailServiceIdentity -Role "api" -ServiceProfile $ServiceProfile
 $NodeExe = "C:\codex_tools\node-v22.23.1-win-x64\node.exe"
-$ConfigPath = Join-Path $env:USERPROFILE ".agenticmail\config.json"
-$LogDir = Join-Path $env:USERPROFILE ".agenticmail\logs"
+$ConfigPath = Join-Path $env:AGENTICMAIL_DATA_DIR "config.json"
+$LogDir = Join-Path $env:AGENTICMAIL_DATA_DIR "logs"
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 if (-not $config.inboundSecret) { throw "AgenticMail inboundSecret is missing." }

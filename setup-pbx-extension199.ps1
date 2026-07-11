@@ -17,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-service-common.ps1")
 
 function Write-Utf8NoBom($Path, $Text) {
   $dir = Split-Path -Parent $Path
@@ -27,11 +28,13 @@ function Write-Utf8NoBom($Path, $Text) {
 }
 
 function Protect-LocalSecret($Path, [securestring]$Secret) {
-  $dir = Split-Path -Parent $Path
-  if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secret)
+  try {
+    $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    Write-AgenticMailMachineSecretFile -Path $Path -Secret $plain
+  } finally {
+    if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
   }
-  $Secret | ConvertFrom-SecureString | Set-Content -LiteralPath $Path -Encoding ASCII
 }
 
 $secretStored = Test-Path -LiteralPath $SecretPath
@@ -64,7 +67,7 @@ $payload = [ordered]@{
   rtpPortMax = $RtpPortMax
   sidecarHttpPort = $SidecarHttpPort
   secretRef = $SecretPath
-  secretFormat = "windows_dpapi_current_user"
+  secretFormat = "windows_dpapi_local_machine_v1"
   secretStored = [bool]$secretStored
   liveAnswerEnabled = [bool]$EnableLiveAnswer
   liveOutboundEnabled = [bool]$EnableOutboundCalls

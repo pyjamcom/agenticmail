@@ -2,17 +2,22 @@ param(
   [string]$HealthUri = "http://127.0.0.1:3899/health",
   [string]$ApiHealthUri = "http://127.0.0.1:3829/api/agenticmail/health",
   [string]$ExchangeHealthUri = "http://127.0.0.1:3901/health",
-  [int]$TimeoutSeconds = 5
+  [int]$TimeoutSeconds = 5,
+  [string]$ServiceProfile = $env:AGENTICMAIL_SERVICE_PROFILE
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $RepoRoot "windows-service-common.ps1")
+$ServiceProfile = Set-AgenticMailServiceEnvironment $ServiceProfile
+$null = Write-AgenticMailServiceIdentity -Role "watchdog" -ServiceProfile $ServiceProfile
 . (Join-Path $RepoRoot "local-health.ps1")
 $StartScript = Join-Path $RepoRoot "start-sip-sidecar.ps1"
 $StartLocalScript = Join-Path $RepoRoot "start-local.ps1"
 $StartExchangeScript = Join-Path $RepoRoot "start-exchange-ews-sidecar.ps1"
 $RuntimeDir = Join-Path $env:USERPROFILE ".agenticmail\sip-sidecar"
 $WatchdogLog = Join-Path $RuntimeDir "watchdog.jsonl"
+$FullRestartRequest = Join-Path $RuntimeDir "full-system-restart.request"
 $Mutex = [Threading.Mutex]::new($false, "Local\AgenticMailSipSidecarWatchdog")
 $HasMutex = $false
 
@@ -38,8 +43,27 @@ function Restart-ManagedTask {
   $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if (-not $task) { return $false }
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  Get-CimInstance Win32_Process | Where-Object {
+    ($TaskName -eq "AgenticMail-Stalwart-Service" -and $_.Name -ieq "stalwart.exe") -or
+    ($TaskName -eq "AgenticMail-API-Service" -and $_.Name -ieq "node.exe" -and $_.CommandLine -like "*packages/api/dist/index.js*") -or
+    ($TaskName -eq "AgenticMail-SIP-Sidecar-Service" -and $_.Name -ieq "node.exe" -and $_.CommandLine -like "*sip-sidecar.mjs*") -or
+    ($TaskName -eq "AgenticMail-Exchange-EWS-Service" -and $_.Name -like "python*.exe" -and $_.CommandLine -like "*exchange-ews-sidecar.py*")
+  } | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
   Start-ScheduledTask -TaskName $TaskName
   return $true
+}
+
+function Stop-AgenticMailRuntimeProcesses {
+  Get-CimInstance Win32_Process | Where-Object {
+    ($_.Name -ieq "stalwart.exe") -or
+    ($_.Name -ieq "node.exe" -and $_.CommandLine -like "*packages/api/dist/index.js*") -or
+    ($_.Name -ieq "node.exe" -and $_.CommandLine -like "*sip-sidecar.mjs*") -or
+    ($_.Name -like "python*.exe" -and $_.CommandLine -like "*exchange-ews-sidecar.py*")
+  } | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Wait-LocalHealth {
@@ -63,6 +87,53 @@ try {
   $HasMutex = $Mutex.WaitOne(0)
   if (-not $HasMutex) {
     [pscustomobject]@{ status = "skipped"; reason = "watchdog_already_running" } | ConvertTo-Json
+    exit 0
+  }
+
+  if (Test-Path -LiteralPath $FullRestartRequest) {
+    $liveSip = $null
+    try { $liveSip = Get-LocalJson -Uri $HealthUri -TimeoutSeconds $TimeoutSeconds } catch {}
+    if ($liveSip -and [int]$liveSip.activeCalls -gt 0) {
+      Write-WatchdogEvent "full_system_restart_deferred" @{ activeCalls = [int]$liveSip.activeCalls }
+      [pscustomobject]@{ status = "deferred"; reason = "active_call" } | ConvertTo-Json
+      exit 0
+    }
+
+    Remove-Item -LiteralPath $FullRestartRequest -Force
+    Write-WatchdogEvent "full_system_restart_started" @{}
+    foreach ($taskName in @(
+      "AgenticMail-SIP-Sidecar-Service",
+      "AgenticMail-Exchange-EWS-Service",
+      "AgenticMail-API-Service",
+      "AgenticMail-Stalwart-Service"
+    )) {
+      Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    }
+    Stop-AgenticMailRuntimeProcesses
+    Start-ScheduledTask -TaskName "AgenticMail-Stalwart-Service"
+    Start-Sleep -Seconds 2
+    Start-ScheduledTask -TaskName "AgenticMail-API-Service"
+    $apiHealth = Wait-LocalHealth -Uri $ApiHealthUri -WaitSeconds 60 -Ready {
+      param($value)
+      $value.status -eq "ok" -and $value.services.api -eq "ok" -and $value.services.stalwart -eq "ok"
+    }
+    Start-ScheduledTask -TaskName "AgenticMail-Exchange-EWS-Service"
+    Start-ScheduledTask -TaskName "AgenticMail-SIP-Sidecar-Service"
+    $exchangeHealth = Wait-LocalHealth -Uri $ExchangeHealthUri -WaitSeconds 60 -Ready {
+      param($value)
+      $value.status -eq "ok" -and ($value.callArchive.enabled -ne $true -or $value.callArchive.status -eq "ok")
+    }
+    $sipHealth = Wait-LocalHealth -Uri $HealthUri -WaitSeconds 60 -Ready {
+      param($value)
+      $value.status -eq "ok" -and $value.registered -eq $true -and $value.transcriptPersistence.ready -eq $true
+    }
+    Write-WatchdogEvent "full_system_restart_succeeded" @{ lastRegister = $sipHealth.lastRegister }
+    [pscustomobject]@{
+      status = "full_system_restart_succeeded"
+      apiReady = $apiHealth.status -eq "ok"
+      exchangeReady = $exchangeHealth.status -eq "ok"
+      sipRegistered = [bool]$sipHealth.registered
+    } | ConvertTo-Json
     exit 0
   }
 

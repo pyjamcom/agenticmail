@@ -1,9 +1,20 @@
+param(
+  [string]$ServiceProfile = $env:AGENTICMAIL_SERVICE_PROFILE,
+  [string]$PythonExe = "C:\Program Files\Python314\python.exe"
+)
+
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PythonExe = (Get-Command python.exe -ErrorAction Stop).Source
+. (Join-Path $RepoRoot "windows-service-common.ps1")
+$ServiceProfile = Set-AgenticMailServiceEnvironment $ServiceProfile
+$null = Write-AgenticMailServiceIdentity -Role "exchange" -ServiceProfile $ServiceProfile
+if (-not (Test-Path -LiteralPath $PythonExe)) { throw "Python executable not found: $PythonExe" }
+$null = Add-AgenticMailPythonPath -AdditionalPaths @(
+  "C:\codex_tools\Purchasing department\.runtime\mempalace-src"
+)
 $ScriptPath = Join-Path $RepoRoot "exchange-ews-sidecar\exchange-ews-sidecar.py"
-$ConfigPath = Join-Path $env:USERPROFILE ".agenticmail\exchange-sales.local.json"
-$LogDir = Join-Path $env:USERPROFILE ".agenticmail\logs"
+$ConfigPath = Join-Path $env:AGENTICMAIL_DATA_DIR "exchange-sales.local.json"
+$LogDir = Join-Path $env:AGENTICMAIL_DATA_DIR "logs"
 $env:INCOMING_CALL_MEMPALACE_PATH = "C:\codex_tools\Purchasing department\.runtime\mempalace\purchasing_department"
 $env:INCOMING_CALL_MEMPALACE_WING = "purchasing department"
 $env:INCOMING_CALL_MEMPALACE_ROOM = "incoming_calls"

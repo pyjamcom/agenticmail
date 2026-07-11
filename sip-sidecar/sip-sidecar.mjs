@@ -647,11 +647,22 @@ function loadDpapiSecret(path) {
   if (!path || !existsSync(path)) return '';
   const script = [
     '$ErrorActionPreference = "Stop"',
+    'Add-Type -AssemblyName System.Security',
     `$raw = (Get-Content -LiteralPath '${path.replace(/'/g, "''")}' -Raw).Trim()`,
-    '$secure = $raw | ConvertTo-SecureString',
-    '$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)',
-    'try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }',
-    'finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }',
+    'if ($raw.StartsWith("{")) {',
+    '  $payload = $raw | ConvertFrom-Json',
+    '  if ($payload.version -ne 1 -or $payload.scope -ne "LocalMachine" -or -not $payload.ciphertext) { throw "Unsupported machine secret format" }',
+    '  $entropy = [Text.Encoding]::UTF8.GetBytes("AgenticMail.WindowsService.LocalMachine.v1")',
+    '  $ciphertext = [Convert]::FromBase64String([string]$payload.ciphertext)',
+    '  $clear = [Security.Cryptography.ProtectedData]::Unprotect($ciphertext, $entropy, [Security.Cryptography.DataProtectionScope]::LocalMachine)',
+    '  try { [Text.Encoding]::UTF8.GetString($clear) }',
+    '  finally { [Array]::Clear($clear, 0, $clear.Length) }',
+    '} else {',
+    '  $secure = $raw | ConvertTo-SecureString',
+    '  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)',
+    '  try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }',
+    '  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }',
+    '}',
   ].join('\n');
   const result = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
     encoding: 'utf8',

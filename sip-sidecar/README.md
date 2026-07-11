@@ -44,3 +44,17 @@ node --test .\sip-sidecar\sip-sidecar.test.mjs
 ```
 
 No real calls are started by the readiness checks.
+
+## Windows service identity
+
+Production-local Windows tasks run as `NT AUTHORITY\SYSTEM` with
+`ServiceAccount` logon and `Highest` run level. Long-running services use an
+`AtStartup` trigger; the watchdog uses `AtStartup` plus a one-minute trigger.
+Every action receives an explicit `-ServiceProfile` so SYSTEM continues to use
+the operator-approved `.agenticmail` data directory. SIP and Exchange passwords
+use LocalMachine DPAPI and restricted ACLs; current-user DPAPI is not compatible
+with this service model.
+
+Use `migrate-agenticmail-services-to-system.ps1` for an existing installation.
+The watchdog accepts a local `full-system-restart.request` marker only when no
+call is active and writes a non-secret identity record for each managed service.

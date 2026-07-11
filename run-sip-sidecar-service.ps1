@@ -1,10 +1,15 @@
+param([string]$ServiceProfile = $env:AGENTICMAIL_SERVICE_PROFILE)
+
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $RepoRoot "windows-service-common.ps1")
+$ServiceProfile = Set-AgenticMailServiceEnvironment $ServiceProfile
+$null = Write-AgenticMailServiceIdentity -Role "sip" -ServiceProfile $ServiceProfile
 $NodeExe = "C:\codex_tools\node-v22.23.1-win-x64\node.exe"
 $ScriptPath = Join-Path $RepoRoot "sip-sidecar\sip-sidecar.mjs"
-$PbxConfig = Join-Path $env:USERPROFILE ".agenticmail\pbx199.local.json"
-$AgenticMailConfig = Join-Path $env:USERPROFILE ".agenticmail\config.json"
-$LogDir = Join-Path $env:USERPROFILE ".agenticmail\logs"
+$PbxConfig = Join-Path $env:AGENTICMAIL_DATA_DIR "pbx199.local.json"
+$AgenticMailConfig = Join-Path $env:AGENTICMAIL_DATA_DIR "config.json"
+$LogDir = Join-Path $env:AGENTICMAIL_DATA_DIR "logs"
 
 $env:SIP_SIDECAR_HTTP_PORT = "3899"
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null

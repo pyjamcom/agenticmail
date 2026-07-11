@@ -5,7 +5,7 @@ is unavailable or cannot pass strict TLS validation.
 
 The sidecar:
 
-- reads an EWS password from a current-user DPAPI secret file;
+- reads an EWS password from a LocalMachine DPAPI secret file restricted to SYSTEM, administrators, and the operator;
 - verifies EWS over TLS with an explicit CA bundle;
 - establishes a baseline without importing historical mail;
 - polls for new Inbox messages and forwards RFC 822 payloads to AgenticMail's
@@ -22,3 +22,8 @@ The transcript archive is enabled with `INCOMING_CALL_MEMPALACE_PATH`. Stored
 documents contain the full call text and a structured intake card, but are
 marked as untrusted case history and are never treated as verified company
 knowledge or direct voice-agent instructions.
+
+The Windows service wrapper always receives an explicit service profile and
+runs under `NT AUTHORITY\SYSTEM`. Its Python search path includes the approved
+service profile's user-site packages and the local MemPalace source checkout;
+it does not depend on SYSTEM's default profile.

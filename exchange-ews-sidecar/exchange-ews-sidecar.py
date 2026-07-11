@@ -49,10 +49,28 @@ def safe_error(exc: Exception) -> str:
 def decrypt_dpapi_secret(path: Path) -> str:
     script = r"""
 $p = $env:AGENTICMAIL_DPAPI_SECRET_PATH
-$secure = Get-Content -LiteralPath $p -Raw | ConvertTo-SecureString
-$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
-finally { if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) } }
+Add-Type -AssemblyName System.Security
+$raw = (Get-Content -LiteralPath $p -Raw).Trim()
+if ($raw.StartsWith("{")) {
+    $payload = $raw | ConvertFrom-Json
+    if ($payload.version -ne 1 -or $payload.scope -ne "LocalMachine" -or -not $payload.ciphertext) {
+        throw "Unsupported machine secret format"
+    }
+    $entropy = [Text.Encoding]::UTF8.GetBytes("AgenticMail.WindowsService.LocalMachine.v1")
+    $ciphertext = [Convert]::FromBase64String([string]$payload.ciphertext)
+    $clear = [Security.Cryptography.ProtectedData]::Unprotect(
+        $ciphertext,
+        $entropy,
+        [Security.Cryptography.DataProtectionScope]::LocalMachine
+    )
+    try { [Text.Encoding]::UTF8.GetString($clear) }
+    finally { [Array]::Clear($clear, 0, $clear.Length) }
+} else {
+    $secure = $raw | ConvertTo-SecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    finally { if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) } }
+}
 """
     child_env = os.environ.copy()
     child_env["AGENTICMAIL_DPAPI_SECRET_PATH"] = str(path)
