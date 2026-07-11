@@ -14,6 +14,7 @@ import {
   buildSipMessage,
   businessHoursStatus,
   parseSipMessage,
+  playbackTruncationMs,
   sipDialableUser,
 } from './sip-sidecar.mjs';
 
@@ -690,6 +691,18 @@ test('Realtime bridge emits conversation truncation for interrupted playback', (
   assert.equal(bridge.setAutoResponseEnabled(false), true);
   assert.equal(sent[2].type, 'session.update');
   assert.equal(sent[2].session.audio.input.turn_detection.create_response, false);
+});
+
+test('playback truncation is bounded by generated audio duration', () => {
+  const output = {
+    outboundStreamStart: 1_000,
+    generatedAudioBytes: 80_000,
+  };
+
+  assert.equal(playbackTruncationMs(output, { outboundBytes: 41_000 }), 5_000);
+  assert.equal(playbackTruncationMs(output, { outboundBytes: 1_000 }), null);
+  assert.equal(playbackTruncationMs(output, { outboundBytes: 81_000 }), null);
+  assert.equal(playbackTruncationMs(output, { outboundBytes: 120_680 }), null);
 });
 
 test('Realtime wait tool ends the turn without creating spoken output', async () => {

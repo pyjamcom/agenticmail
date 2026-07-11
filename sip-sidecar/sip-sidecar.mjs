@@ -848,6 +848,17 @@ function buildSdp({ localIp, rtpPort }) {
   ].join('\r\n') + '\r\n';
 }
 
+function playbackTruncationMs(output, rtpStats) {
+  if (!output || !rtpStats) return null;
+  const streamStart = Number(output.outboundStreamStart);
+  const generatedBytes = Math.max(0, Number(output.generatedAudioBytes) || 0);
+  const outboundBytes = Math.max(0, Number(rtpStats.outboundBytes) || 0);
+  if (!Number.isFinite(streamStart) || generatedBytes <= 0) return null;
+  const playedBytes = Math.max(0, outboundBytes - streamStart);
+  if (playedBytes <= 0 || playedBytes >= generatedBytes) return null;
+  return Math.floor(playedBytes / 8);
+}
+
 function parseRtp(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 12) return null;
   const version = buffer[0] >> 6;
@@ -1114,7 +1125,14 @@ class OpenAiRealtimeBridge {
     }
     if (msg.type === 'response.output_audio.delta' || msg.type === 'response.audio.delta') {
       if (typeof msg.delta === 'string' && msg.delta) {
-        this.onAudio?.(Buffer.from(msg.delta, 'base64'));
+        const audio = Buffer.from(msg.delta, 'base64');
+        this.onEvent?.({
+          type: msg.type,
+          itemId: String(msg.item_id || msg.response_id || ''),
+          contentIndex: Number(msg.content_index) || 0,
+          audioBytes: audio.length,
+        });
+        this.onAudio?.(audio);
       }
       return;
     }
@@ -1590,17 +1608,27 @@ class SipCall {
           this.currentOutputItem = {
             itemId: event.itemId,
             contentIndex: event.contentIndex || 0,
-            outboundBytesAtStart: this.rtp?.stats?.().outboundBytes || 0,
+            outboundStreamStart: null,
+            generatedAudioBytes: 0,
           };
+        }
+        if ((event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta')
+          && this.currentOutputItem
+          && (!event.itemId || event.itemId === this.currentOutputItem.itemId)) {
+          const stats = this.rtp?.stats?.() ?? {};
+          if (!Number.isFinite(this.currentOutputItem.outboundStreamStart)) {
+            this.currentOutputItem.outboundStreamStart = (stats.outboundBytes || 0)
+              + (stats.outboundQueuedBytes || 0);
+          }
+          this.currentOutputItem.generatedAudioBytes += Math.max(0, Number(event.audioBytes) || 0);
         }
         if (event.type === 'input_audio_buffer.speech_started') {
           const output = this.currentOutputItem;
-          const outboundBytes = this.rtp?.stats?.().outboundBytes || 0;
-          const audioEndMs = output
-            ? Math.max(0, Math.floor((outboundBytes - output.outboundBytesAtStart) / 8))
-            : 0;
+          const audioEndMs = playbackTruncationMs(output, this.rtp?.stats?.());
           this.rtp?.clearOutboundAudio?.();
-          if (output) this.openai?.truncateAudio(output.itemId, output.contentIndex, audioEndMs);
+          if (output && audioEndMs !== null) {
+            this.openai?.truncateAudio(output.itemId, output.contentIndex, audioEndMs);
+          }
           this.currentOutputItem = null;
         }
         this.sidecar.recordOpenAiEvent(this, event);
@@ -3042,6 +3070,7 @@ export {
   buildSipMessage,
   businessHoursStatus,
   parseSipMessage,
+  playbackTruncationMs,
   responseTo,
   sipDialableUser,
 };
