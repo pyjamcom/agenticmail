@@ -556,7 +556,7 @@ test('configured company context is required and included in direct SIP instruct
     provider: 'openai',
     model: 'gpt-realtime-2.1',
     name: 'coral',
-    speed: 1.12,
+    speed: 1.20,
     language: 'ru',
     persona: 'Елена',
     personaGender: 'female',

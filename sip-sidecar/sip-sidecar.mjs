@@ -21,7 +21,7 @@ const DEFAULT_AGENTICMAIL_CONFIG_PATH = join(os.homedir(), '.agenticmail', 'conf
 const DEFAULT_SALES_SCENARIO_PATH = join(dirname(fileURLToPath(import.meta.url)), 'sales-call-scenario.json');
 const DEFAULT_MODEL = 'gpt-realtime-2.1';
 const DEFAULT_VOICE = 'coral';
-const DEFAULT_VOICE_SPEED = 1.12;
+const DEFAULT_VOICE_SPEED = 1.20;
 const DEFAULT_SIP_PORT = 5070;
 const DEFAULT_RTP_MIN = 40200;
 const DEFAULT_RTP_MAX = 40398;
@@ -2390,6 +2390,7 @@ class SipSidecar {
         : `Start exactly once with: "${openingText}"`,
       '# Personality, Tone and Language',
       'Speak as a native speaker of modern standard Russian: use neutral Russian pronunciation, natural Russian stress and intonation, and no English-language accent. Speak warmly, clearly, and with a light smiling tone. Sound conversational, not bureaucratic. Use natural acknowledgements sparingly.',
+      'Use a brisk natural business tempo. Keep pauses between sentences and clauses short, continue compactly without theatrical pauses or drawn-out endings, and avoid filler. Keep names, email addresses, phone numbers, routes, dates and amounts fully articulated and easy to understand.',
       '# Verbosity',
       'Direct answers: one or two short sentences. Clarification: one question at a time. Tool result: give the gist and only the next useful step. Never recite an internal checklist.',
       audioHandling ? `# Unclear Audio and Silence\n${audioHandling}` : '',
