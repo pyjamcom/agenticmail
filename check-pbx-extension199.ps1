@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-service-common.ps1")
 
 function Add-Blocking([System.Collections.ArrayList]$List, [string]$Code) {
   if (-not $List.Contains($Code)) {
@@ -13,14 +14,7 @@ function Add-Blocking([System.Collections.ArrayList]$List, [string]$Code) {
 }
 
 function ConvertFrom-LocalSecret($Path) {
-  $secure = (Get-Content -LiteralPath $Path -Raw).Trim() | ConvertTo-SecureString
-  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try {
-    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-  }
-  finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-  }
+  return ConvertFrom-AgenticMailSecretFile -Path $Path
 }
 
 function Get-Md5Hex([string]$Text) {
@@ -296,13 +290,21 @@ if ($RegisterCheck) {
 
 $packet.readyForRegistrationTest = [bool]($packet.configFound -and $packet.tcpPortOpen -and $packet.secretStored)
 $sidecarProc = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*sip-sidecar.mjs*" })
-$packet.sipSidecarRunning = $sidecarProc.Count -gt 0
+$managedTask = Get-ScheduledTask -TaskName "AgenticMail-SIP-Sidecar-Service" -ErrorAction SilentlyContinue
+$managedTaskRunning = $managedTask -and [string]$managedTask.State -eq "Running"
+$udpListener = Get-NetUDPEndpoint -LocalPort ([int]$config.signalingPort) -ErrorAction SilentlyContinue | Select-Object -First 1
 try {
   $health = Invoke-RestMethod -Uri "http://127.0.0.1:$SidecarHealthPort/health" -TimeoutSec 3
   $packet.sipSidecarHealth = $health
 } catch {
   $packet.sipSidecarHealth = $null
 }
+$packet.sipSidecarRunning = [bool](
+  $sidecarProc.Count -gt 0 -or
+  $managedTaskRunning -or
+  $null -ne $udpListener -or
+  $null -ne $packet.sipSidecarHealth
+)
 
 $sidecarOk = [bool]($packet.sipSidecarSupported -and $packet.sipSidecarScriptFound -and $packet.sipSidecarRunning -and $packet.sipSidecarHealth -and $packet.sipSidecarHealth.status -eq "ok")
 $packet.readyForLiveAnswer = [bool]($packet.readyForRegistrationTest -and $sidecarOk -and $packet.liveAnswerEnabled)

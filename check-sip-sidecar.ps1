@@ -17,7 +17,14 @@ $packet = [ordered]@{
 }
 
 $proc = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*sip-sidecar.mjs*" })
-$packet.processRunning = $proc.Count -gt 0
+$managedTask = Get-ScheduledTask -TaskName "AgenticMail-SIP-Sidecar-Service" -ErrorAction SilentlyContinue
+$managedTaskRunning = $managedTask -and [string]$managedTask.State -eq "Running"
+$signalingPort = 5070
+if (Test-Path -LiteralPath $ConfigPath) {
+  try { $signalingPort = [int](Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json).signalingPort } catch {}
+}
+$udpListener = Get-NetUDPEndpoint -LocalPort $signalingPort -ErrorAction SilentlyContinue | Select-Object -First 1
+$packet.processRunning = $proc.Count -gt 0 -or $managedTaskRunning -or $null -ne $udpListener
 
 if (-not $packet.scriptFound) { $packet.blocking += "sip_sidecar_script_missing" }
 if (-not $packet.configFound) { $packet.blocking += "pbx_config_missing" }

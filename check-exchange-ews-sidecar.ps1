@@ -7,17 +7,20 @@ param(
 
 $processes = @(Get-CimInstance Win32_Process |
   Where-Object { $_.Name -like 'python*.exe' -and $_.CommandLine -like '*exchange-ews-sidecar.py*' })
+$managedTask = Get-ScheduledTask -TaskName "AgenticMail-Exchange-EWS-Service" -ErrorAction SilentlyContinue
+$managedTaskRunning = $managedTask -and [string]$managedTask.State -eq "Running"
 $health = $null
 try { $health = Get-LocalJson -Uri "http://127.0.0.1:$HealthPort/health" -TimeoutSeconds 5 } catch {}
+$processRunning = $processes.Count -gt 0 -or $managedTaskRunning -or $null -ne $health
 
 [pscustomobject]@{
   ConfigFound = (Test-Path -LiteralPath $ConfigPath)
-  ProcessRunning = ($processes.Count -gt 0)
+  ProcessRunning = $processRunning
   HealthReachable = ($null -ne $health)
   Health = $health
   Blocking = @(
     if (-not (Test-Path -LiteralPath $ConfigPath)) { "config_missing" }
-    if ($processes.Count -eq 0) { "process_not_running" }
+    if (-not $processRunning) { "process_not_running" }
     if ($null -eq $health) { "health_unreachable" }
     elseif ($health.status -ne "ok") { "ews_poll_degraded" }
     elseif ($health.callArchive.enabled -eq $true -and $health.callArchive.status -ne "ok") {
