@@ -34,6 +34,7 @@ function Set-AgenticMailServiceEnvironment {
   $env:APPDATA = Join-Path $resolved "AppData\Roaming"
   $env:LOCALAPPDATA = Join-Path $resolved "AppData\Local"
   $env:PYTHONUSERBASE = Join-Path $env:APPDATA "Python"
+  $env:PYTHONDONTWRITEBYTECODE = "1"
   return $resolved
 }
 

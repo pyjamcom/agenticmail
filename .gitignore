@@ -29,6 +29,10 @@ Thumbs.db
 # Test & coverage
 coverage/
 
+# Python runtime cache
+__pycache__/
+*.pyc
+
 # Vendored / reference repos
 vendor/openclaw/
 openclaw-reference/
