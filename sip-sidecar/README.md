@@ -33,6 +33,25 @@ the caller to the Realtime agent and records a callback follow-up.
 }
 ```
 
+Caller-requested direct extension transfers use the same assisted RTP bridge
+and a separate allowlist policy:
+
+```json
+{
+  "internalTransfer": {
+    "enabled": true,
+    "allowedExtensionPattern": "^1[0-9]{2}$",
+    "blockedExtensions": ["199"],
+    "timeoutSeconds": 15
+  }
+}
+```
+
+The caller must explicitly request and confirm the extension. The Realtime
+tool accepts digits only, never infers an extension from a name, and rejects
+the sidecar's own extension, external/PSTN numbers, and anything outside the
+configured allowlist.
+
 On Windows, run `setup-sip-firewall.ps1` from an elevated PowerShell session
 to allow the configured SIP signaling port and RTP range on the Domain
 profile. The signaling rule is restricted to the configured PBX address.

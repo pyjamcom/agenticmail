@@ -234,6 +234,20 @@ const SALES_REALTIME_TOOLS = [
   },
   {
     type: 'function',
+    name: 'transfer_to_extension',
+    description: 'Connect the caller to a specific allowlisted internal PBX extension that the caller explicitly requested and confirmed. Never invent, infer, or use an external phone number.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        extension: { type: 'string', description: 'Confirmed internal extension, digits only.' },
+        reason: { type: 'string' },
+      },
+      required: ['extension', 'reason'],
+    },
+  },
+  {
+    type: 'function',
     name: 'search_skills',
     description: 'Search the installed conversation playbook library for a situation that needs structured discovery, objection handling, negotiation, de-escalation, or closing guidance. Search before loading a skill.',
     parameters: {
@@ -2014,17 +2028,19 @@ class SipSidecar {
       }, (err) => {
         this.logEvent('followup_task_durability_failed', { callId: call.id, errorType: err?.name || 'Error' });
       });
-    } else if (name === 'transfer_to_manager') {
-      const transfer = await this.transferToManager(call, args?.route, args?.reason);
+    } else if (name === 'transfer_to_manager' || name === 'transfer_to_extension') {
+      const transfer = name === 'transfer_to_extension'
+        ? await this.transferToInternalExtension(call, args?.extension, args?.reason)
+        : await this.transferToManager(call, args?.route, args?.reason);
       if (!transfer.ok) return transfer;
       transferResult = transfer;
       result = await this.missionClient.updateIntake(call.missionId, {
         nextAction: transfer.connected
-          ? { type: 'transfer', owner: transfer.route, notes: args?.reason }
+          ? { type: 'transfer', owner: transfer.owner, notes: args?.reason }
           : {
             type: 'callback_request',
-            owner: transfer.route,
-            notes: `Manager did not answer the assisted transfer. ${String(args?.reason || '').trim()}`.trim(),
+            owner: transfer.owner,
+            notes: `Internal destination did not answer the assisted transfer. ${String(args?.reason || '').trim()}`.trim(),
           },
         outcome: transfer.connected ? 'transferred' : 'needs_follow_up',
       });
@@ -2037,6 +2053,7 @@ class SipSidecar {
           ok: true,
           transferStatus: transferResult.status,
           route: transferResult.route,
+          destinationType: transferResult.destinationType,
           connected: transferResult.connected === true,
           callbackRecorded: transferResult.connected !== true,
           suppressResponse: transferResult.suppressResponse === true,
@@ -2061,6 +2078,7 @@ class SipSidecar {
         ok: true,
         transferStatus: transferResult.status,
         route: transferResult.route,
+        destinationType: transferResult.destinationType,
         connected: transferResult.connected === true,
         callbackRecorded: transferResult.connected !== true,
         suppressResponse: transferResult.suppressResponse === true,
@@ -2084,25 +2102,94 @@ class SipSidecar {
       : {};
     const route = String(requestedRoute || '').trim();
     const extension = String(routes[route] || '').trim();
-    if (!route || !extension || !/^[0-9*#]{2,16}$/.test(extension)) {
+    if (!route || !extension || !/^\d{2,6}$/.test(extension) || extension === this.username) {
       return { ok: false, error: 'That manager route is not configured or allowlisted.' };
     }
+    return this.transferToDestination(call, {
+      route,
+      owner: route,
+      extension,
+      reason,
+      destinationType: 'named_route',
+      timeoutSeconds: this.pbx.managerTransferTimeoutSeconds,
+      fallbackMessage: this.pbx.managerTransferNoAnswerMessage,
+    });
+  }
+
+  internalTransferPolicy() {
+    const config = this.pbx.internalTransfer && typeof this.pbx.internalTransfer === 'object'
+      ? this.pbx.internalTransfer
+      : {};
+    const pattern = String(config.allowedExtensionPattern || '^1[0-9]{2}$').trim();
+    let allowedExtension;
+    try {
+      allowedExtension = new RegExp(pattern);
+    } catch {
+      allowedExtension = /$a/;
+    }
+    const blockedExtensions = new Set(
+      [this.username, ...(Array.isArray(config.blockedExtensions) ? config.blockedExtensions : [])]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean),
+    );
+    return {
+      enabled: config.enabled === true,
+      pattern,
+      allowedExtension,
+      blockedExtensions,
+      timeoutSeconds: Math.min(60, Math.max(5, asInt(config.timeoutSeconds, 15))),
+      noAnswerMessage: String(
+        config.noAnswerMessage
+        || 'Сотрудник по этому внутреннему номеру сейчас не смог ответить. Пожалуйста, отправьте все детали и техническое описание запроса на sales собака nbr точка ru. Ответственный сотрудник свяжется с вами по этому номеру в ближайшее рабочее время.',
+      ).trim(),
+    };
+  }
+
+  async transferToInternalExtension(call, requestedExtension, reason) {
+    const policy = this.internalTransferPolicy();
+    const extension = String(requestedExtension || '').trim();
+    if (!policy.enabled) {
+      return { ok: false, error: 'Direct internal extension transfer is not enabled.' };
+    }
+    if (!/^\d{2,6}$/.test(extension)
+      || !policy.allowedExtension.test(extension)
+      || policy.blockedExtensions.has(extension)) {
+      return { ok: false, error: 'That internal extension is not allowlisted.' };
+    }
+    return this.transferToDestination(call, {
+      route: `extension:${extension}`,
+      owner: `extension:${extension}`,
+      extension,
+      reason,
+      destinationType: 'direct_extension',
+      timeoutSeconds: policy.timeoutSeconds,
+      fallbackMessage: policy.noAnswerMessage,
+    });
+  }
+
+  async transferToDestination(call, destination) {
+    const route = String(destination?.route || '').trim();
+    const owner = String(destination?.owner || route).trim();
+    const extension = String(destination?.extension || '').trim();
+    const reason = String(destination?.reason || '').trim();
+    const destinationType = String(destination?.destinationType || 'named_route');
     if (!call.dialogEstablished || !call.acknowledged || call.status === 'ended') {
       return { ok: false, error: 'The SIP dialog is not ready for transfer.' };
     }
     if (call.managerTransfer && call.managerTransfer.status !== 'ended') {
       return { ok: false, error: 'A manager transfer is already in progress.' };
     }
-    const timeoutSeconds = Math.min(60, Math.max(5, asInt(this.pbx.managerTransferTimeoutSeconds, 15)));
+    const timeoutSeconds = Math.min(60, Math.max(5, asInt(destination?.timeoutSeconds, 15)));
     const fallbackMessage = String(
-      this.pbx.managerTransferNoAnswerMessage
+      destination?.fallbackMessage
       || 'Менеджер сейчас не смог ответить. Возможно, он ненадолго отошёл от рабочего места. Пожалуйста, отправьте все детали и техническое описание запроса на sales собака nbr точка ru. Менеджер свяжется с вами по этому номеру в ближайшее рабочее время.',
     ).trim();
     const leg = {
       id: `manager_${Date.now()}_${randomHex(4)}`,
       route,
       extension,
-      reason: String(reason || '').trim(),
+      reason,
+      destinationType,
       callId: `${randomHex(12)}@agenticmail-manager`,
       localTag: randomHex(6),
       remoteTag: '',
@@ -2126,8 +2213,9 @@ class SipSidecar {
     this.logEvent('call_transfer_started', {
       callId: call.id,
       route,
+      destinationType,
       timeoutSeconds,
-      reasonPresent: Boolean(String(reason || '').trim()),
+      reasonPresent: Boolean(reason),
     });
     try {
       leg.rtp = this.createRtpSession({
@@ -2148,30 +2236,46 @@ class SipSidecar {
         call.status = 'manager_connected';
         this.managerLegsBySipId.set(leg.callId, { call, leg });
         call.recordSystemTranscript?.('Manager transfer connected.', {
-          kind: 'manager_transfer', route, status: 'connected',
+          kind: 'internal_transfer', route, destinationType, status: 'connected',
         });
-        this.logEvent('call_transfer_connected', { callId: call.id, route });
-        return { ok: true, connected: true, route, status: 'connected', suppressResponse: true };
+        this.logEvent('call_transfer_connected', { callId: call.id, route, destinationType });
+        return {
+          ok: true,
+          connected: true,
+          route,
+          owner,
+          destinationType,
+          status: 'connected',
+          suppressResponse: true,
+        };
       }
       this.finishManagerTransferAttempt(call, leg, dial.status);
       call.recordSystemTranscript?.('Manager did not answer the assisted transfer; callback follow-up requested.', {
-        kind: 'manager_transfer', route, status: dial.status,
+        kind: 'internal_transfer', route, destinationType, status: dial.status,
       });
-      this.logEvent('call_transfer_returned_to_agent', { callId: call.id, route, status: dial.status });
+      this.logEvent('call_transfer_returned_to_agent', {
+        callId: call.id, route, destinationType, status: dial.status,
+      });
       return {
         ok: true,
         connected: false,
         route,
+        owner,
+        destinationType,
         status: dial.status,
         responseInstructions: `Скажите клиенту дословно, без дополнительных обещаний: «${fallbackMessage}»`,
       };
     } catch (err) {
       this.finishManagerTransferAttempt(call, leg, 'failed');
-      this.logEvent('call_transfer_failed', { callId: call.id, route, errorType: err?.name || 'Error' });
+      this.logEvent('call_transfer_failed', {
+        callId: call.id, route, destinationType, errorType: err?.name || 'Error',
+      });
       return {
         ok: true,
         connected: false,
         route,
+        owner,
+        destinationType,
         status: 'failed',
         responseInstructions: `Скажите клиенту дословно, без дополнительных обещаний: «${fallbackMessage}»`,
       };
@@ -2573,6 +2677,10 @@ class SipSidecar {
   health() {
     const missing = this.missing();
     const hours = this.businessHoursStatus();
+    const internalTransfer = this.internalTransferPolicy();
+    const namedRoutes = this.pbx.managerExtensions && typeof this.pbx.managerExtensions === 'object'
+      ? Object.keys(this.pbx.managerExtensions)
+      : [];
     return {
       status: missing.length === 0 && this.registered ? 'ok' : 'blocked',
       server: this.server,
@@ -2591,13 +2699,17 @@ class SipSidecar {
       maxConcurrentCalls: this.maxConcurrentCalls,
       maxCallDurationSeconds: Math.max(60, asInt(this.pbx.maxCallDurationSeconds, 1800)),
       rtpInactivityTimeoutSeconds: Math.max(15, asInt(this.pbx.rtpInactivityTimeoutSeconds, 45)),
-      transferConfigured: Boolean(this.pbx.managerExtensions && Object.keys(this.pbx.managerExtensions).length > 0),
+      transferConfigured: namedRoutes.length > 0 || internalTransfer.enabled,
       managerTransfer: {
         mode: 'assisted_rtp_bridge',
         timeoutSeconds: Math.min(60, Math.max(5, asInt(this.pbx.managerTransferTimeoutSeconds, 15))),
-        routes: this.pbx.managerExtensions && typeof this.pbx.managerExtensions === 'object'
-          ? Object.keys(this.pbx.managerExtensions)
-          : [],
+        routes: namedRoutes,
+        directExtension: {
+          enabled: internalTransfer.enabled,
+          allowedExtensionPattern: internalTransfer.pattern,
+          blockedExtensions: [...internalTransfer.blockedExtensions],
+          timeoutSeconds: internalTransfer.timeoutSeconds,
+        },
         activeLegs: this.managerLegsBySipId.size,
         fallbackEmail: 'sales@nbr.ru',
       },

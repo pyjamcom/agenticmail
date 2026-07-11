@@ -74,6 +74,13 @@ $payload = [ordered]@{
   agenticmailDirectSipSupported = $false
   sipSidecarSupported = $true
   sipSidecarScript = (Join-Path $PSScriptRoot "sip-sidecar\sip-sidecar.mjs")
+  internalTransfer = [ordered]@{
+    enabled = $true
+    allowedExtensionPattern = "^1[0-9]{2}$"
+    blockedExtensions = @($Username)
+    timeoutSeconds = 15
+    noAnswerMessage = "Сотрудник по этому внутреннему номеру сейчас не смог ответить. Пожалуйста, отправьте все детали и техническое описание запроса на sales собака nbr точка ru. Ответственный сотрудник свяжется с вами по этому номеру в ближайшее рабочее время."
+  }
   status = if ($secretStored) { "profile_and_secret_saved" } else { "profile_saved_secret_missing" }
   configuredAt = (Get-Date).ToString("o")
   notes = @(

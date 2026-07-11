@@ -426,6 +426,78 @@ test('assisted manager transfer switches to the manager only after answer', asyn
   assert.equal(updates[0].outcome, 'transferred');
 });
 
+test('caller-confirmed internal extension transfer connects only after answer', async () => {
+  const updates = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.pbx = {
+    internalTransfer: {
+      enabled: true,
+      allowedExtensionPattern: '^1[0-9]{2}$',
+      blockedExtensions: ['199'],
+      timeoutSeconds: 15,
+    },
+  };
+  sidecar.server = 'pbx.test';
+  sidecar.port = 5060;
+  sidecar.username = '199';
+  sidecar.localIp = '127.0.0.1';
+  sidecar.managerLegsBySipId = new Map();
+  sidecar.allocateRtpPort = () => 40224;
+  sidecar.createRtpSession = () => ({ start: async () => {}, close: () => {} });
+  sidecar.sendManagerInvite = async (_call, leg) => {
+    assert.equal(leg.extension, '114');
+    return { connected: true, status: 'connected' };
+  };
+  sidecar.logEvent = () => {};
+  sidecar.missionClient = {
+    updateIntake: async (_missionId, patch) => {
+      updates.push(patch);
+      return { success: true, complete: true, intake: { missingFields: [] } };
+    },
+  };
+  const call = {
+    id: 'sip-extension-connected',
+    missionId: 'mission-extension-connected',
+    dialogEstablished: true,
+    acknowledged: true,
+    status: 'media_active',
+    managerTransfer: null,
+    rtp: { clearOutboundAudio: () => {} },
+    openai: { setAutoResponseEnabled: () => {} },
+    recordSystemTranscript: () => {},
+  };
+
+  const result = await sidecar.executeCallTool(call, 'transfer_to_extension', {
+    extension: '114', reason: 'Caller explicitly requested and confirmed extension 114',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.transferStatus, 'connected');
+  assert.equal(result.destinationType, 'direct_extension');
+  assert.equal(result.connected, true);
+  assert.equal(call.managerTransfer.extension, '114');
+  assert.equal(updates[0].nextAction.owner, 'extension:114');
+  assert.equal(updates[0].outcome, 'transferred');
+});
+
+test('direct extension transfer blocks self, external and non-allowlisted numbers', async () => {
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.username = '199';
+  sidecar.pbx = {
+    internalTransfer: {
+      enabled: true,
+      allowedExtensionPattern: '^1[0-9]{2}$',
+      blockedExtensions: ['199'],
+    },
+  };
+
+  for (const extension of ['199', '099', '200', '911', '88122411844', '+78122411844']) {
+    const result = await sidecar.transferToInternalExtension({}, extension, 'test');
+    assert.equal(result.ok, false, extension);
+    assert.match(result.error, /not allowlisted/u);
+  }
+});
+
 test('sales instructions expose only the active service playbook after routing', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-prompt-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
