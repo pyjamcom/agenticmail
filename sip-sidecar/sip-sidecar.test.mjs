@@ -557,7 +557,7 @@ test('sales instructions expose only the active service playbook after routing',
   const routingPrompt = sidecar.buildInstructions({ direction: 'inbound', loadedSkills: [] });
   assert.equal(
     sidecar.salesScenario.openings.inbound,
-    'Невский Брокер, меня зовут Елена, слушаю вас.',
+    'Здравствуйте. Невский Брокер, меня зовут Елена, слушаю вас.',
   );
   assert.doesNotMatch(sidecar.salesScenario.openings.inbound, /ИИ-помощник/u);
   assert.match(routingPrompt, /# Routing/);
