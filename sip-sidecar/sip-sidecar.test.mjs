@@ -111,7 +111,8 @@ test('retransmitted inbound INVITE creates one call and one Realtime greeting', 
 
   releaseRealtime();
   const call = await first;
-  assert.equal(call.status, 'media_ready');
+  assert.equal(call.status, 'media_active');
+  assert.equal(greetingCount, 1);
   assert.equal(sent.at(-1).startLine, 'SIP/2.0 200 OK');
 
   await sidecar.handleInvite(invite, { address: '192.0.2.10', port: 5060 });
@@ -127,6 +128,45 @@ test('retransmitted inbound INVITE creates one call and one Realtime greeting', 
   assert.equal(call.status, 'ended');
   assert.equal(sidecar.callsBySipId.has(callId), false);
   assert.equal(rtpClosed, true);
+});
+
+test('missing ACK does not end an inbound call with confirmed RTP media', () => {
+  const events = [];
+  const call = Object.create(SipCall.prototype);
+  Object.assign(call, {
+    id: 'sip-no-ack-with-rtp',
+    status: 'media_active',
+    acknowledged: false,
+    mediaConfirmedByRtp: true,
+    ackTimer: {},
+    rtp: { stats: () => ({ inboundPackets: 42 }) },
+    sidecar: { logEvent: (type, details) => events.push({ type, details }) },
+    end: () => { throw new Error('call must not end while RTP is active'); },
+  });
+
+  call.handleAckTimeout();
+
+  assert.equal(call.status, 'media_active');
+  assert.equal(call.ackTimer, null);
+  assert.equal(events[0].type, 'inbound_ack_missing_media_confirmed');
+  assert.equal(events[0].details.inboundPackets, 42);
+});
+
+test('missing ACK still ends an inbound call when no RTP media arrives', () => {
+  let endedReason = null;
+  const call = Object.create(SipCall.prototype);
+  Object.assign(call, {
+    id: 'sip-no-ack-no-rtp',
+    status: 'media_active',
+    acknowledged: false,
+    mediaConfirmedByRtp: false,
+    rtp: { stats: () => ({ inboundPackets: 0 }) },
+    sidecar: { logEvent: () => {} },
+    end: (reason) => { endedReason = reason; },
+  });
+
+  call.handleAckTimeout();
+  assert.equal(endedReason, 'ack_timeout');
 });
 
 test('post-greeting silence prompt is one-shot and cancelled by caller speech', () => {

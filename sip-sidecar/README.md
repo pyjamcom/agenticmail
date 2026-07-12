@@ -58,6 +58,12 @@ has not started speaking, the sidecar requests the configured follow-up
 sentence. Any caller `speech_started` event cancels the timer immediately, so
 the follow-up never talks over the caller.
 
+The opening starts immediately after the inbound `200 OK`; it does not wait
+for a separate SIP `ACK`. Some PBX paths deliver bidirectional RTP without an
+observable `ACK`. In that case, inbound RTP confirms the live dialog and the
+ACK timeout must not end the call. A dialog with neither `ACK` nor inbound RTP
+still fails closed on the normal timeout.
+
 On Windows, run `setup-sip-firewall.ps1` from an elevated PowerShell session
 to allow the configured SIP signaling port and RTP range on the Domain
 profile. The signaling rule is restricted to the configured PBX address.

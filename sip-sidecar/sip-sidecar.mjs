@@ -1463,6 +1463,7 @@ class SipCall {
     this.remoteUri = '';
     this.dialogEstablished = false;
     this.acknowledged = false;
+    this.mediaConfirmedByRtp = false;
     this.mediaPreparePromise = null;
     this.mediaReadyAt = null;
     this.setupStartedAt = null;
@@ -1656,6 +1657,8 @@ class SipCall {
       remoteIp: this.remoteRtpIp,
       remotePort: this.remoteRtpPort,
       onInboundAudio: (payload) => {
+        this.mediaConfirmedByRtp = true;
+        if (this.status === 'media_ready') this.activateMedia();
         const transfer = this.managerTransfer;
         if (transfer?.status === 'connected') {
           transfer.rtp?.sendAudio(payload);
@@ -1747,7 +1750,7 @@ class SipCall {
   }
 
   activateMedia() {
-    if (this.status === 'ended') return false;
+    if (this.status === 'ended' || this.status === 'media_active') return false;
     const started = this.openai?.startResponse() ?? false;
     if (!started && this.status === 'media_active') return false;
     this.status = 'media_active';
@@ -1773,6 +1776,21 @@ class SipCall {
     return started;
   }
 
+  handleAckTimeout() {
+    if (this.status === 'ended' || this.acknowledged) return;
+    const inboundPackets = Number(this.rtp?.stats?.().inboundPackets) || 0;
+    if (this.mediaConfirmedByRtp || inboundPackets > 0) {
+      this.mediaConfirmedByRtp = true;
+      this.ackTimer = null;
+      this.sidecar.logEvent('inbound_ack_missing_media_confirmed', {
+        callId: this.id,
+        inboundPackets,
+      });
+      return;
+    }
+    this.end('ack_timeout', { notifyRemote: false });
+  }
+
   end(reason = 'ended', { notifyRemote = false } = {}) {
     if (this.status === 'ended') return;
     const rtpStats = this.rtp?.stats?.() ?? null;
@@ -1782,7 +1800,9 @@ class SipCall {
     this.cancelPostGreetingPrompt();
     clearInterval(this.mediaWatchTimer);
     this.sidecar.endManagerTransfer?.(this, reason);
-    if (notifyRemote && this.dialogEstablished && this.acknowledged) this.sidecar.sendBye(this);
+    if (notifyRemote && this.dialogEstablished && (this.acknowledged || this.mediaConfirmedByRtp)) {
+      this.sidecar.sendBye(this);
+    }
     try { this.openai?.close(); } catch { /* ignore */ }
     try { this.rtp?.close(); } catch { /* ignore */ }
     this.finalizePersistence(reason);
@@ -2234,7 +2254,9 @@ class SipSidecar {
     const extension = String(destination?.extension || '').trim();
     const reason = String(destination?.reason || '').trim();
     const destinationType = String(destination?.destinationType || 'named_route');
-    if (!call.dialogEstablished || !call.acknowledged || call.status === 'ended') {
+    if (!call.dialogEstablished
+      || (!call.acknowledged && !call.mediaConfirmedByRtp)
+      || call.status === 'ended') {
       return { ok: false, error: 'The SIP dialog is not ready for transfer.' };
     }
     if (call.managerTransfer && call.managerTransfer.status !== 'ended') {
@@ -3067,7 +3089,8 @@ class SipSidecar {
       ], answerSdp);
       call.dialogEstablished = true;
       this.sendInboundFinal(tx, answer, 200);
-      call.ackTimer = setTimeout(() => call.end('ack_timeout', { notifyRemote: false }), INBOUND_ACK_TIMEOUT_MS);
+      call.activateMedia();
+      call.ackTimer = setTimeout(() => call.handleAckTimeout(), INBOUND_ACK_TIMEOUT_MS);
       call.ackTimer.unref?.();
       this.logEvent('inbound_invite_answered', {
         callId: call.id,
