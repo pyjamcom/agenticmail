@@ -25,6 +25,11 @@ dials the internal extension as a second SIP leg, switches RTP only after a
 `200 OK`, and cancels the manager leg on timeout. A failed attempt returns
 the caller to the Realtime agent and records a callback follow-up.
 
+Before the second SIP leg is dialed, the sidecar waits for the queued transfer
+confirmation to finish playing. The wait is bounded, logged, and occurs before
+any residual audio is cleared, so starting a transfer cannot cut off Elena's
+spoken sentence.
+
 ```json
 {
   "managerExtensions": { "sales": "135" },

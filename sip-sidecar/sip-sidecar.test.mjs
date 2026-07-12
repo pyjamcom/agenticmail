@@ -274,6 +274,22 @@ test('outbound PCMU preserves queued audio when the safety buffer overflows', ()
   rtp.close();
 });
 
+test('RTP transfer preparation waits for queued speech to finish', async () => {
+  const rtp = Object.create(RtpSession.prototype);
+  Object.assign(rtp, {
+    outboundQueue: Buffer.alloc(320),
+    closed: false,
+  });
+  setTimeout(() => { rtp.outboundQueue = Buffer.alloc(0); }, 30);
+
+  const result = await rtp.waitForOutboundDrain({ timeoutMs: 500 });
+
+  assert.equal(result.drained, true);
+  assert.equal(result.initialBytes, 320);
+  assert.equal(result.remainingBytes, 0);
+  assert.ok(result.waitedMs >= 20);
+});
+
 test('CANCEL during Realtime setup terminates the one pending inbound call', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-cancel-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -506,6 +522,7 @@ test('assisted manager transfer switches to the manager only after answer', asyn
 
 test('caller-confirmed internal extension transfer connects only after answer', async () => {
   const updates = [];
+  const sequence = [];
   const sidecar = Object.create(SipSidecar.prototype);
   sidecar.pbx = {
     internalTransfer: {
@@ -523,6 +540,7 @@ test('caller-confirmed internal extension transfer connects only after answer', 
   sidecar.allocateRtpPort = () => 40224;
   sidecar.createRtpSession = () => ({ start: async () => {}, close: () => {} });
   sidecar.sendManagerInvite = async (_call, leg) => {
+    sequence.push('invite');
     assert.equal(leg.extension, '114');
     return { connected: true, status: 'connected' };
   };
@@ -540,7 +558,14 @@ test('caller-confirmed internal extension transfer connects only after answer', 
     acknowledged: true,
     status: 'media_active',
     managerTransfer: null,
-    rtp: { clearOutboundAudio: () => {} },
+    rtp: {
+      stats: () => ({ outboundQueuedBytes: 320 }),
+      waitForOutboundDrain: async () => {
+        sequence.push('drain');
+        return { drained: true, initialBytes: 320, remainingBytes: 0, waitedMs: 40 };
+      },
+      clearOutboundAudio: () => sequence.push('clear'),
+    },
     openai: { setAutoResponseEnabled: () => {} },
     recordSystemTranscript: () => {},
   };
@@ -553,6 +578,7 @@ test('caller-confirmed internal extension transfer connects only after answer', 
   assert.equal(result.transferStatus, 'connected');
   assert.equal(result.destinationType, 'direct_extension');
   assert.equal(result.connected, true);
+  assert.deepEqual(sequence, ['drain', 'clear', 'invite']);
   assert.equal(call.managerTransfer.extension, '114');
   assert.equal(updates[0].nextAction.owner, 'extension:114');
   assert.equal(updates[0].outcome, 'transferred');

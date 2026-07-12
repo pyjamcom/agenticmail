@@ -1410,6 +1410,23 @@ class RtpSession {
     this.outboundQueue = Buffer.alloc(0);
   }
 
+  async waitForOutboundDrain({ timeoutMs = 12_000 } = {}) {
+    const startedAt = Date.now();
+    const initialBytes = this.outboundQueue.length;
+    const boundedTimeoutMs = Math.min(15_000, Math.max(0, Number(timeoutMs) || 0));
+    while (!this.closed
+      && this.outboundQueue.length >= RTP_PACKET_BYTES
+      && Date.now() - startedAt < boundedTimeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, RTP_PACKET_INTERVAL_MS));
+    }
+    return {
+      drained: this.outboundQueue.length < RTP_PACKET_BYTES,
+      initialBytes,
+      remainingBytes: this.outboundQueue.length,
+      waitedMs: Date.now() - startedAt,
+    };
+  }
+
   stats() {
     return {
       inboundPackets: this.inboundPackets,
@@ -2267,6 +2284,39 @@ class SipSidecar {
       destination?.fallbackMessage
       || 'Менеджер сейчас не смог ответить. Возможно, он ненадолго отошёл от рабочего места. Пожалуйста, отправьте все детали и техническое описание запроса на sales собака nbr точка ru. Менеджер свяжется с вами по этому номеру в ближайшее рабочее время.',
     ).trim();
+    call.status = 'transfer_preparing';
+    call.openai?.setAutoResponseEnabled?.(false);
+    const queuedBefore = Number(call.rtp?.stats?.().outboundQueuedBytes) || 0;
+    const drainTimeoutMs = Math.min(12_000, Math.max(1_000, Math.ceil(queuedBefore / 8) + 1_000));
+    let drainResult = {
+      drained: queuedBefore < RTP_PACKET_BYTES,
+      initialBytes: queuedBefore,
+      remainingBytes: queuedBefore,
+      waitedMs: 0,
+    };
+    try {
+      if (typeof call.rtp?.waitForOutboundDrain === 'function') {
+        drainResult = await call.rtp.waitForOutboundDrain({ timeoutMs: drainTimeoutMs });
+      }
+    } catch (err) {
+      this.logEvent('call_transfer_prompt_drain_failed', {
+        callId: call.id,
+        route,
+        errorType: err?.name || 'Error',
+      });
+    }
+    if (call.status === 'ended') {
+      return { ok: false, error: 'The caller ended the call before transfer dialing started.' };
+    }
+    call.rtp?.clearOutboundAudio?.('manager_transfer');
+    this.logEvent('call_transfer_prompt_drained', {
+      callId: call.id,
+      route,
+      drained: drainResult.drained === true,
+      initialBytes: Number(drainResult.initialBytes) || queuedBefore,
+      remainingBytes: Number(drainResult.remainingBytes) || 0,
+      waitedMs: Number(drainResult.waitedMs) || 0,
+    });
     const leg = {
       id: `manager_${Date.now()}_${randomHex(4)}`,
       route,
@@ -2291,8 +2341,6 @@ class SipSidecar {
     };
     call.managerTransfer = leg;
     call.status = 'transfer_pending';
-    call.rtp?.clearOutboundAudio?.('manager_transfer');
-    call.openai?.setAutoResponseEnabled?.(false);
     this.logEvent('call_transfer_started', {
       callId: call.id,
       route,
