@@ -30,6 +30,12 @@ acknowledgement failure cannot create a duplicate message. Audit logs contain
 only hashes, body length, delivery state, and error types, never transcript
 text.
 
+The message shows the decrypted caller number to the allowlisted internal
+recipient, uses plain `Елена:` / `Клиент:` dialog lines without per-turn
+timestamps, and translates call-end codes into Russian descriptions. Its HTML
+view bolds caller turns with logistics or customs intent and renders cost or
+rate questions in bold red. Transcript text is HTML-escaped before formatting.
+
 The transcript archive is enabled with `INCOMING_CALL_MEMPALACE_PATH`. Stored
 documents contain the full call text and a structured intake card, but are
 marked as untrusted case history and are never treated as verified company

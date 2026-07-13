@@ -390,6 +390,7 @@ class ExchangeEwsSidecar:
         mission_id = str(payload.get("missionId") or "").strip()
         subject = str(payload.get("subject") or "").strip()[:255]
         text_body = str(payload.get("textBody") or "").strip()
+        html_body = str(payload.get("htmlBody") or "").strip()
         if not mission_id or not subject or not text_body:
             raise ValueError("missionId, subject and textBody are required")
         if not self.transcript_email_enabled:
@@ -400,12 +401,12 @@ class ExchangeEwsSidecar:
             item_id = str(getattr(existing[0], "id", "") or subject)
             return hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:24], False
 
-        from exchangelib import Mailbox, Message
+        from exchangelib import HTMLBody, Mailbox, Message
 
         message = Message(
             account=self.account,
             subject=subject,
-            body=text_body,
+            body=HTMLBody(html_body) if html_body else text_body,
             to_recipients=[Mailbox(email_address=self.transcript_email_recipient)],
         )
         message.send_and_save()

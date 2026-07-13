@@ -41,6 +41,10 @@ class FakeMailbox:
         self.email_address = email_address
 
 
+class FakeHTMLBody(str):
+    pass
+
+
 class FakeMessage:
     send_count = 0
 
@@ -76,8 +80,9 @@ class ExchangeEwsSidecarTests(unittest.TestCase):
             "missionId": "sip_test_1",
             "subject": "Расшифровка звонка 199 - sip_test_1",
             "textBody": "Клиент: Нужна доставка.\nЕлена: Уточните город отправления.",
+            "htmlBody": "<p><strong>Клиент:</strong> Нужна доставка.</p>",
         }
-        fake_module = types.SimpleNamespace(Mailbox=FakeMailbox, Message=FakeMessage)
+        fake_module = types.SimpleNamespace(HTMLBody=FakeHTMLBody, Mailbox=FakeMailbox, Message=FakeMessage)
 
         with patch.dict(sys.modules, {"exchangelib": fake_module}):
             first_ref, first_created = self.sidecar.send_transcript_email(payload)
@@ -90,7 +95,8 @@ class ExchangeEwsSidecarTests(unittest.TestCase):
         self.assertEqual(self.sidecar.health["transcriptEmail"]["sentCount"], 1)
         sent = self.sidecar.account.sent.items[0]
         self.assertEqual(sent.subject, payload["subject"])
-        self.assertEqual(sent.body, payload["textBody"])
+        self.assertIsInstance(sent.body, FakeHTMLBody)
+        self.assertEqual(sent.body, payload["htmlBody"])
         self.assertEqual(sent.to_recipients[0].email_address, "pavel@nbr.ru")
 
 

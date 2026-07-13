@@ -359,33 +359,102 @@ function moscowTimestamp(value: unknown): string {
   }).format(date);
 }
 
+function humanCallEndReason(value: unknown): string {
+  const reasons: Record<string, string> = {
+    manager_bye: 'Разговор завершен после соединения с сотрудником',
+    remote_bye: 'Звонящий завершил разговор',
+    local_bye: 'Разговор завершен оператором',
+    max_call_duration: 'Достигнута максимальная продолжительность разговора',
+    rtp_inbound_timeout: 'Звук от звонящего перестал поступать',
+    ack_timeout: 'Телефонная станция не подтвердила соединение',
+    openai_error: 'Произошла техническая ошибка голосового сервиса',
+    openai_closed: 'Соединение с голосовым сервисом завершилось',
+    transcript_durability_failed: 'Не удалось полностью сохранить расшифровку',
+    media_failed: 'Не удалось установить аудиосоединение',
+    persistence_failed: 'Не удалось сохранить данные разговора',
+    dial_failed: 'Не удалось установить телефонное соединение',
+    cancelled: 'Звонок был отменен',
+    call_ended: 'Разговор завершен',
+  };
+  return reasons[requestString(value)] || 'Разговор завершен';
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&#39;');
+}
+
+const COST_INTENT_PATTERN = /(?:стоим|цен[аыуе]?|сколько\s+(?:будет\s+)?сто|тариф|ставк|бюджет|расцен|оплат|рубл|доллар|евро|usd|eur|cny|юан|₽|\$|€)/iu;
+const COMMERCIAL_INTENT_PATTERN = /(?:достав|перевоз|растамож|тамож|груз|контейнер|авто(?:мобил)?|машин|мото|экспорт|импорт|логист|фрахт|китай|море|морск|авиа|железнодорож|\bж\/?д\b|инкотерм|incoterm|склад|постав|закуп|брокер|документ|срок|маршрут|порт|\bвэд\b|тн\s*вэд|страхован|quotation|quote|shipping|freight|customs|delivery)/iu;
+
+function callerEmphasis(text: string): 'cost' | 'commercial' | 'normal' {
+  if (COST_INTENT_PATTERN.test(text)) return 'cost';
+  if (COMMERCIAL_INTENT_PATTERN.test(text)) return 'commercial';
+  return 'normal';
+}
+
 export function formatSipTranscriptEmail(
   mission: import('@agenticmail/core').PhoneCallMission,
-): { subject: string; textBody: string } {
+  callerPhone = '',
+): { subject: string; textBody: string; htmlBody: string } {
   const direction = requestString(mission.metadata.direction) === 'outbound' ? 'Исходящий' : 'Входящий';
   const endedAt = requestString(mission.metadata.endedAt) || mission.updatedAt;
-  const endReason = requestString(mission.metadata.endReason) || 'не указана';
-  const dialog = mission.transcript
+  const endReason = humanCallEndReason(mission.metadata.endReason);
+  const phone = requestString(callerPhone) || 'Не определен';
+  const dialogEntries = mission.transcript
     .filter((entry) => entry.source === 'provider' || entry.source === 'agent' || entry.source === 'operator')
     .map((entry) => {
       const speaker = entry.source === 'provider' ? 'Клиент' : entry.source === 'agent' ? 'Елена' : 'Оператор';
-      return `[${moscowTimestamp(entry.at)} МСК] ${speaker}: ${entry.text.trim()}`;
+      return { speaker, source: entry.source, text: entry.text.trim() };
     })
-    .filter((line) => !line.endsWith(': '));
-  const subject = `Расшифровка звонка 199 - ${moscowTimestamp(endedAt)} МСК - ${mission.id}`;
+    .filter((entry) => entry.text);
+  const dialog = dialogEntries.map((entry) => `${entry.speaker}: ${entry.text}`);
+  const htmlDialog = dialogEntries.map((entry) => {
+    const escapedText = escapeHtml(entry.text);
+    let renderedText = escapedText;
+    if (entry.source === 'provider') {
+      const emphasis = callerEmphasis(entry.text);
+      if (emphasis === 'cost') {
+        renderedText = `<strong style="color:#c00000">${escapedText}</strong>`;
+      } else if (emphasis === 'commercial') {
+        renderedText = `<strong>${escapedText}</strong>`;
+      }
+    }
+    return `<p style="margin:0 0 8px 0"><span style="font-weight:600">${entry.speaker}:</span> ${renderedText}</p>`;
+  });
+  const displayId = mission.id.replace(/^call_/u, '');
+  const subject = `Расшифровка звонка на 199 - ${moscowTimestamp(endedAt)} МСК - № ${displayId}`;
   const lines = [
-    'Полная текстовая расшифровка разговора голосового агента на внутреннем номере 199.',
+    'Расшифровка разговора на внутреннем номере 199.',
     '',
+    `Телефон звонящего: ${phone}`,
     `Направление: ${direction}`,
     `Начало: ${moscowTimestamp(mission.createdAt)} МСК`,
     `Завершение: ${moscowTimestamp(endedAt)} МСК`,
-    `Причина завершения: ${endReason}`,
-    `Идентификатор разговора: ${mission.id}`,
+    `Результат: ${endReason}`,
     '',
     'Диалог:',
     ...(dialog.length > 0 ? dialog : ['Распознанные реплики отсутствуют.']),
   ];
-  return { subject, textBody: lines.join('\n') };
+  const htmlBody = [
+    '<html><body style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;line-height:1.45;color:#202124">',
+    '<p style="margin:0 0 14px 0">Расшифровка разговора на внутреннем номере 199.</p>',
+    '<table style="border-collapse:collapse;margin:0 0 18px 0">',
+    `<tr><td style="padding:2px 12px 2px 0;font-weight:600">Телефон звонящего:</td><td>${escapeHtml(phone)}</td></tr>`,
+    `<tr><td style="padding:2px 12px 2px 0;font-weight:600">Направление:</td><td>${direction}</td></tr>`,
+    `<tr><td style="padding:2px 12px 2px 0;font-weight:600">Начало:</td><td>${moscowTimestamp(mission.createdAt)} МСК</td></tr>`,
+    `<tr><td style="padding:2px 12px 2px 0;font-weight:600">Завершение:</td><td>${moscowTimestamp(endedAt)} МСК</td></tr>`,
+    `<tr><td style="padding:2px 12px 2px 0;font-weight:600">Результат:</td><td>${escapeHtml(endReason)}</td></tr>`,
+    '</table>',
+    '<h2 style="font-size:16px;margin:0 0 10px 0">Диалог</h2>',
+    ...(htmlDialog.length > 0 ? htmlDialog : ['<p>Распознанные реплики отсутствуют.</p>']),
+    '</body></html>',
+  ].join('');
+  return { subject, textBody: lines.join('\n'), htmlBody };
 }
 
 function ensureSipKnowledgeArchiveTable(
@@ -830,7 +899,9 @@ export function createPhoneRoutes(
       const emails = [];
       for (const row of rows) {
         const mission = await phoneManager.getSipMissionAsync(row.missionId);
-        emails.push({ ...row, ...formatSipTranscriptEmail(mission) });
+        const contacts = phoneManager.getSipSalesContactSecrets(row.missionId);
+        const callerPhone = contacts.callerNumber || contacts.callbackPhone || '';
+        emails.push({ ...row, ...formatSipTranscriptEmail(mission, callerPhone) });
       }
       res.json({ emails });
     } catch (err) {

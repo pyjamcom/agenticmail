@@ -141,6 +141,12 @@ describe('phone routes', () => {
             text: 'I will record the request for the sales manager.',
             metadata: { eventId: 'route-turn-2' },
           },
+          {
+            at: '2026-07-10T10:00:07.000Z',
+            source: 'provider',
+            text: 'Сколько стоит доставка контейнера из Китая?',
+            metadata: { eventId: 'route-turn-3' },
+          },
         ],
       }),
     });
@@ -243,7 +249,7 @@ describe('phone routes', () => {
 
     const finalized = await request(baseUrl, `/calls/sip/${missionId}/finalize`, {
       method: 'POST',
-      body: JSON.stringify({ status: 'completed', reason: 'remote_bye' }),
+      body: JSON.stringify({ status: 'completed', reason: 'manager_bye' }),
     });
     expect(finalized.status).toBe(200);
     expect(finalized.body.mission.status).toBe('completed');
@@ -258,10 +264,19 @@ describe('phone routes', () => {
     const transcriptEmails = await request(baseUrl, '/calls/sip/transcript-emails/pending');
     expect(transcriptEmails.body.emails).toHaveLength(1);
     expect(transcriptEmails.body.emails[0].missionId).toBe(missionId);
-    expect(transcriptEmails.body.emails[0].subject).toContain(missionId);
+    expect(transcriptEmails.body.emails[0].subject).toContain(missionId.replace(/^call_/u, ''));
     expect(transcriptEmails.body.emails[0].textBody).toContain('Клиент: Please prepare a quotation.');
     expect(transcriptEmails.body.emails[0].textBody)
       .toContain('Елена: I will record the request for the sales manager.');
+    expect(transcriptEmails.body.emails[0].textBody).toContain('Телефон звонящего: +12025550999');
+    expect(transcriptEmails.body.emails[0].textBody)
+      .toContain('Результат: Разговор завершен после соединения с сотрудником');
+    expect(transcriptEmails.body.emails[0].textBody).not.toContain('manager_bye');
+    expect(transcriptEmails.body.emails[0].textBody).not.toContain('[10.07.2026');
+    expect(transcriptEmails.body.emails[0].htmlBody)
+      .toContain('<strong>Please prepare a quotation.</strong>');
+    expect(transcriptEmails.body.emails[0].htmlBody)
+      .toContain('<strong style="color:#c00000">Сколько стоит доставка контейнера из Китая?</strong>');
     expect(transcriptEmails.body.emails[0].textBody).not.toContain('Verified knowledge lookup recorded');
     const transcriptEmailEnqueued = await request(
       baseUrl,
