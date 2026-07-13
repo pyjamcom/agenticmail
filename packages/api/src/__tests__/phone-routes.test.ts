@@ -263,6 +263,16 @@ describe('phone routes', () => {
     expect(transcriptEmails.body.emails[0].textBody)
       .toContain('Елена: I will record the request for the sales manager.');
     expect(transcriptEmails.body.emails[0].textBody).not.toContain('Verified knowledge lookup recorded');
+    const transcriptEmailEnqueued = await request(
+      baseUrl,
+      `/calls/sip/transcript-emails/${missionId}/enqueue`,
+      { method: 'POST', body: '{}' },
+    );
+    expect(transcriptEmailEnqueued.body.delivery).toMatchObject({
+      missionId,
+      status: 'pending',
+      attempts: 0,
+    });
     const transcriptEmailFailed = await request(
       baseUrl,
       `/calls/sip/transcript-emails/${missionId}/failed`,

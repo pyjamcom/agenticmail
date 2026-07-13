@@ -838,6 +838,21 @@ export function createPhoneRoutes(
     }
   });
 
+  router.post('/calls/sip/transcript-emails/:missionId/enqueue', requireMaster, (req: Request, res: Response) => {
+    try {
+      const mission = phoneManager.getMission(req.params.missionId);
+      if (!mission || mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+      queueSipTranscriptEmail(db, mission.id);
+      const delivery = db.prepare(`
+        SELECT mission_id AS missionId, status, attempts, next_attempt_at AS nextAttemptAt
+        FROM sip_transcript_email_delivery WHERE mission_id = ?
+      `).get(mission.id);
+      res.json({ success: true, delivery });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
   router.get('/calls/sip/transcript-emails/:missionId/status', requireMaster, (req: Request, res: Response) => {
     try {
       const delivery = db.prepare(`
