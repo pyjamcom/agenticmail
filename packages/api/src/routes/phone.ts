@@ -303,6 +303,91 @@ function queueSipRecapDelivery(
   `).run(missionId, draftId);
 }
 
+function ensureSipTranscriptEmailDeliveryTable(
+  db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
+): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sip_transcript_email_delivery (
+      mission_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      exchange_ref_hash TEXT,
+      next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sip_transcript_email_status
+      ON sip_transcript_email_delivery(status, next_attempt_at, created_at);
+  `);
+}
+
+function queueSipTranscriptEmail(
+  db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
+  missionId: string,
+): void {
+  ensureSipTranscriptEmailDeliveryTable(db);
+  db.prepare(`
+    INSERT INTO sip_transcript_email_delivery (mission_id, status, next_attempt_at)
+    VALUES (?, 'pending', datetime('now'))
+    ON CONFLICT(mission_id) DO UPDATE SET
+      status = CASE
+        WHEN sip_transcript_email_delivery.status = 'delivered' THEN 'delivered'
+        ELSE 'pending'
+      END,
+      next_attempt_at = CASE
+        WHEN sip_transcript_email_delivery.status = 'delivered'
+          THEN sip_transcript_email_delivery.next_attempt_at
+        ELSE datetime('now')
+      END,
+      updated_at = datetime('now')
+  `).run(missionId);
+}
+
+function moscowTimestamp(value: unknown): string {
+  const date = new Date(requestString(value) || Date.now());
+  if (!Number.isFinite(date.getTime())) return 'время не зафиксировано';
+  return new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).format(date);
+}
+
+export function formatSipTranscriptEmail(
+  mission: import('@agenticmail/core').PhoneCallMission,
+): { subject: string; textBody: string } {
+  const direction = requestString(mission.metadata.direction) === 'outbound' ? 'Исходящий' : 'Входящий';
+  const endedAt = requestString(mission.metadata.endedAt) || mission.updatedAt;
+  const endReason = requestString(mission.metadata.endReason) || 'не указана';
+  const dialog = mission.transcript
+    .filter((entry) => entry.source === 'provider' || entry.source === 'agent' || entry.source === 'operator')
+    .map((entry) => {
+      const speaker = entry.source === 'provider' ? 'Клиент' : entry.source === 'agent' ? 'Елена' : 'Оператор';
+      return `[${moscowTimestamp(entry.at)} МСК] ${speaker}: ${entry.text.trim()}`;
+    })
+    .filter((line) => !line.endsWith(': '));
+  const subject = `Расшифровка звонка 199 - ${moscowTimestamp(endedAt)} МСК - ${mission.id}`;
+  const lines = [
+    'Полная текстовая расшифровка разговора голосового агента на внутреннем номере 199.',
+    '',
+    `Направление: ${direction}`,
+    `Начало: ${moscowTimestamp(mission.createdAt)} МСК`,
+    `Завершение: ${moscowTimestamp(endedAt)} МСК`,
+    `Причина завершения: ${endReason}`,
+    `Идентификатор разговора: ${mission.id}`,
+    '',
+    'Диалог:',
+    ...(dialog.length > 0 ? dialog : ['Распознанные реплики отсутствуют.']),
+  ];
+  return { subject, textBody: lines.join('\n') };
+}
+
 function ensureSipKnowledgeArchiveTable(
   db: ReturnType<typeof import('@agenticmail/core').getDatabase>,
 ): void {
@@ -537,6 +622,7 @@ export function createPhoneRoutes(
   const router = Router();
   const phoneManager = new PhoneManager(db as any, config.masterKey);
   ensureSipRecapDeliveryTable(db);
+  ensureSipTranscriptEmailDeliveryTable(db);
   ensureSipFollowupTable(db);
   ensureSipKnowledgeArchiveTable(db);
   queueHistoricalInboundSipArchives(db);
@@ -723,6 +809,90 @@ export function createPhoneRoutes(
     }
   });
 
+  router.get('/calls/sip/transcript-emails/pending', requireMaster, async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1), 50);
+      const rows = db.prepare(`
+        SELECT mission_id AS missionId, status, attempts,
+               next_attempt_at AS nextAttemptAt, created_at AS createdAt
+        FROM sip_transcript_email_delivery
+        WHERE status IN ('pending', 'failed')
+          AND COALESCE(next_attempt_at, datetime('now')) <= datetime('now')
+        ORDER BY created_at ASC
+        LIMIT ?
+      `).all(limit) as Array<{
+        missionId: string;
+        status: string;
+        attempts: number;
+        nextAttemptAt: string;
+        createdAt: string;
+      }>;
+      const emails = [];
+      for (const row of rows) {
+        const mission = await phoneManager.getSipMissionAsync(row.missionId);
+        emails.push({ ...row, ...formatSipTranscriptEmail(mission) });
+      }
+      res.json({ emails });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.get('/calls/sip/transcript-emails/:missionId/status', requireMaster, (req: Request, res: Response) => {
+    try {
+      const delivery = db.prepare(`
+        SELECT mission_id AS missionId, status, attempts, last_error AS lastError,
+               exchange_ref_hash AS exchangeRefHash, next_attempt_at AS nextAttemptAt,
+               created_at AS createdAt, updated_at AS updatedAt
+        FROM sip_transcript_email_delivery WHERE mission_id = ?
+      `).get(req.params.missionId);
+      if (!delivery) return res.status(404).json({ error: 'SIP transcript email delivery not found' });
+      res.json({ success: true, delivery });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.post('/calls/sip/transcript-emails/:missionId/delivered', requireMaster, (req: Request, res: Response) => {
+    try {
+      const ref = requestString(req.body?.exchangeRefHash).slice(0, 256);
+      const result = db.prepare(`
+        UPDATE sip_transcript_email_delivery
+        SET status = 'delivered', attempts = attempts + 1, last_error = NULL,
+            exchange_ref_hash = ?, updated_at = datetime('now')
+        WHERE mission_id = ? AND status != 'delivered'
+      `).run(ref || null, req.params.missionId);
+      if (!result.changes) {
+        const existing = db.prepare('SELECT status FROM sip_transcript_email_delivery WHERE mission_id = ?')
+          .get(req.params.missionId) as { status: string } | undefined;
+        if (!existing) return res.status(404).json({ error: 'SIP transcript email delivery not found' });
+      }
+      res.json({ success: true });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
+  router.post('/calls/sip/transcript-emails/:missionId/failed', requireMaster, (req: Request, res: Response) => {
+    try {
+      const errorType = requestString(req.body?.errorType).slice(0, 200) || 'TranscriptEmailError';
+      const current = db.prepare('SELECT attempts FROM sip_transcript_email_delivery WHERE mission_id = ?')
+        .get(req.params.missionId) as { attempts: number } | undefined;
+      if (!current) return res.status(404).json({ error: 'SIP transcript email delivery not found' });
+      const retryDelaySeconds = Math.min(300, 2 ** Math.min(Math.max(current.attempts, 0) + 1, 8));
+      const nextAttemptAt = new Date(Date.now() + retryDelaySeconds * 1000).toISOString();
+      db.prepare(`
+        UPDATE sip_transcript_email_delivery
+        SET status = 'failed', attempts = attempts + 1, last_error = ?, next_attempt_at = ?,
+            updated_at = datetime('now')
+        WHERE mission_id = ? AND status != 'delivered'
+      `).run(errorType, nextAttemptAt, req.params.missionId);
+      res.json({ success: true });
+    } catch (err) {
+      sendPhoneError(res, err);
+    }
+  });
+
   router.get('/calls/sip/knowledge-archive/pending', requireMaster, (req: Request, res: Response) => {
     try {
       const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '10'), 10) || 10, 1), 50);
@@ -884,6 +1054,7 @@ export function createPhoneRoutes(
       const followupTaskId = upsertSipFollowupTask(db, mission);
       const recapDraftId = ensureSipRecapDraft(db, mission);
       queueSipRecapDelivery(db, mission.id, recapDraftId);
+      queueSipTranscriptEmail(db, mission.id);
       const patched = phoneManager.patchSipMissionMetadata(mission.id, { followupTaskId, recapDraftId });
       mission = patched.mission;
       const knowledgeArchiveQueued = queueSipKnowledgeArchive(db, mission);
@@ -894,6 +1065,7 @@ export function createPhoneRoutes(
         recapDraftId,
         followupTaskId,
         exchangeDraftStatus: 'pending',
+        transcriptEmailStatus: 'pending',
         knowledgeArchiveStatus: knowledgeArchiveQueued ? 'pending' : 'not_applicable',
       });
     } catch (err) {

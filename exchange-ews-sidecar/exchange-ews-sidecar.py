@@ -110,6 +110,17 @@ class ExchangeEwsSidecar:
             "importedCount": int(self.state.get("importedCount", 0)),
             "draftsCreated": int(self.state.get("draftsCreated", 0)),
             "lastDraftAt": None,
+            "transcriptEmail": {
+                "enabled": False,
+                "status": "disabled",
+                "sender": None,
+                "recipient": None,
+                "lastPoll": None,
+                "lastSuccess": None,
+                "lastError": None,
+                "sentCount": int(self.state.get("transcriptEmailsSent", 0)),
+                "lastSentAt": None,
+            },
             "callArchive": {
                 "enabled": False,
                 "status": "disabled",
@@ -124,6 +135,30 @@ class ExchangeEwsSidecar:
         self.agentic_config = read_json(Path(self.config["agenticmailConfigPath"]), {})
         self.inbound_secret = self._agentic_secret("inboundSecret")
         self.internal_api_key = self._agentic_secret("masterKey")
+        transcript_email = self.config.get("postCallTranscriptEmail") or {}
+        self.transcript_email_enabled = transcript_email.get("enabled") is True
+        self.transcript_email_sender = str(transcript_email.get("sender") or "").strip().lower()
+        self.transcript_email_recipient = str(transcript_email.get("recipient") or "").strip().lower()
+        self.transcript_email_allowed_recipients = {
+            str(value).strip().lower()
+            for value in transcript_email.get("allowedRecipients") or []
+            if str(value).strip()
+        }
+        self.transcript_email_poll_seconds = max(2, int(transcript_email.get("pollSeconds") or 2))
+        if self.transcript_email_enabled:
+            mailbox = str(self.config.get("mailbox") or "").strip().lower()
+            if self.transcript_email_sender != mailbox:
+                raise RuntimeError("Post-call transcript sender must match the authenticated Exchange mailbox")
+            if not self.transcript_email_recipient:
+                raise RuntimeError("Post-call transcript recipient is missing")
+            if self.transcript_email_recipient not in self.transcript_email_allowed_recipients:
+                raise RuntimeError("Post-call transcript recipient is not allowlisted")
+            self.health["transcriptEmail"].update({
+                "enabled": True,
+                "status": "starting",
+                "sender": self.transcript_email_sender,
+                "recipient": self.transcript_email_recipient,
+            })
         palace_path = str(os.getenv("INCOMING_CALL_MEMPALACE_PATH") or "").strip()
         self.call_archiver = (
             IncomingCallMempalaceArchiver(
@@ -204,6 +239,7 @@ class ExchangeEwsSidecar:
                 "seenIds": seen,
                 "importedCount": self.health["importedCount"],
                 "draftsCreated": self.health["draftsCreated"],
+                "transcriptEmailsSent": self.health["transcriptEmail"]["sentCount"],
                 "callArchiveDrawersWritten": self.health["callArchive"]["drawersWritten"],
                 "updatedAt": now_iso(),
             }
@@ -350,6 +386,100 @@ class ExchangeEwsSidecar:
                     pass
                 raise
 
+    def send_transcript_email(self, payload: dict[str, Any]) -> tuple[str, bool]:
+        mission_id = str(payload.get("missionId") or "").strip()
+        subject = str(payload.get("subject") or "").strip()[:255]
+        text_body = str(payload.get("textBody") or "").strip()
+        if not mission_id or not subject or not text_body:
+            raise ValueError("missionId, subject and textBody are required")
+        if not self.transcript_email_enabled:
+            raise RuntimeError("Post-call transcript email delivery is disabled")
+
+        existing = list(self.account.sent.filter(subject=subject).only("id")[:1])
+        if existing:
+            item_id = str(getattr(existing[0], "id", "") or subject)
+            return hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:24], False
+
+        from exchangelib import Mailbox, Message
+
+        message = Message(
+            account=self.account,
+            subject=subject,
+            body=text_body,
+            to_recipients=[Mailbox(email_address=self.transcript_email_recipient)],
+        )
+        message.send_and_save()
+        item_id = str(getattr(message, "id", "") or subject)
+        ref_hash = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:24]
+        with self.lock:
+            transcript_health = self.health["transcriptEmail"]
+            transcript_health["sentCount"] += 1
+            transcript_health["lastSentAt"] = now_iso()
+        self.log(
+            "post_call_transcript_email_sent",
+            missionHash=hashlib.sha256(mission_id.encode("utf-8")).hexdigest()[:16],
+            recipientHash=hashlib.sha256(self.transcript_email_recipient.encode("utf-8")).hexdigest()[:16],
+            exchangeRefHash=ref_hash,
+            bodyLength=len(text_body),
+        )
+        self._save_state()
+        return ref_hash, True
+
+    def sync_transcript_emails_once(self) -> None:
+        if not self.transcript_email_enabled:
+            return
+        api_root = self.config["apiBase"].rstrip("/")
+        response = requests.get(
+            f"{api_root}/api/agenticmail/calls/sip/transcript-emails/pending?limit=10",
+            headers=self._agentic_headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+        for email in response.json().get("emails", []):
+            mission_id = str(email.get("missionId") or "")
+            if not mission_id:
+                continue
+            try:
+                ref_hash, _created = self.send_transcript_email(email)
+                ack = requests.post(
+                    f"{api_root}/api/agenticmail/calls/sip/transcript-emails/{mission_id}/delivered",
+                    headers={**self._agentic_headers(), "Content-Type": "application/json"},
+                    json={"exchangeRefHash": ref_hash},
+                    timeout=15,
+                )
+                ack.raise_for_status()
+            except Exception as exc:
+                try:
+                    requests.post(
+                        f"{api_root}/api/agenticmail/calls/sip/transcript-emails/{mission_id}/failed",
+                        headers={**self._agentic_headers(), "Content-Type": "application/json"},
+                        json={"errorType": type(exc).__name__},
+                        timeout=10,
+                    ).raise_for_status()
+                except Exception:
+                    pass
+                raise
+
+    def run_transcript_email_loop(self) -> None:
+        while not self.stop_event.is_set():
+            with self.lock:
+                self.health["transcriptEmail"]["lastPoll"] = now_iso()
+            try:
+                self.sync_transcript_emails_once()
+                with self.lock:
+                    transcript_health = self.health["transcriptEmail"]
+                    transcript_health["status"] = "ok"
+                    transcript_health["lastSuccess"] = now_iso()
+                    transcript_health["lastError"] = None
+            except Exception as exc:
+                message = safe_error(exc)
+                with self.lock:
+                    transcript_health = self.health["transcriptEmail"]
+                    transcript_health["status"] = "degraded"
+                    transcript_health["lastError"] = message
+                self.log("post_call_transcript_email_sync_failed", errorType=type(exc).__name__, message=message)
+            self.stop_event.wait(self.transcript_email_poll_seconds)
+
     def poll_once(self) -> None:
         with self.lock:
             self.health["lastPoll"] = now_iso()
@@ -427,6 +557,12 @@ class ExchangeEwsSidecar:
             threading.Thread(
                 target=self.run_call_archive_loop,
                 name="incoming-call-mempalace",
+                daemon=True,
+            ).start()
+        if self.transcript_email_enabled:
+            threading.Thread(
+                target=self.run_transcript_email_loop,
+                name="post-call-transcript-email",
                 daemon=True,
             ).start()
         while not self.stop_event.is_set():

@@ -128,12 +128,20 @@ describe('phone routes', () => {
     const persisted = await request(baseUrl, `/calls/sip/${missionId}/transcript`, {
       method: 'POST',
       body: JSON.stringify({
-        entries: [{
-          at: '2026-07-10T10:00:05.000Z',
-          source: 'provider',
-          text: 'Please prepare a quotation.',
-          metadata: { eventId: 'route-turn-1' },
-        }],
+        entries: [
+          {
+            at: '2026-07-10T10:00:05.000Z',
+            source: 'provider',
+            text: 'Please prepare a quotation.',
+            metadata: { eventId: 'route-turn-1' },
+          },
+          {
+            at: '2026-07-10T10:00:06.000Z',
+            source: 'agent',
+            text: 'I will record the request for the sales manager.',
+            metadata: { eventId: 'route-turn-2' },
+          },
+        ],
       }),
     });
     expect(persisted.status).toBe(200);
@@ -242,10 +250,49 @@ describe('phone routes', () => {
     expect(finalized.body.mission.transcript).toEqual([]);
     expect(finalized.body.transcriptCount).toBeGreaterThan(0);
     expect(finalized.body.knowledgeArchiveStatus).toBe('pending');
+    expect(finalized.body.transcriptEmailStatus).toBe('pending');
     const finalizedTranscript = await request(baseUrl, `/calls/sip/${missionId}/transcript`);
     expect(finalizedTranscript.body.transcript.map((entry: any) => entry.text))
       .toContain('Please prepare a quotation.');
     expect(finalizedTranscript.body.direction).toBe('inbound');
+    const transcriptEmails = await request(baseUrl, '/calls/sip/transcript-emails/pending');
+    expect(transcriptEmails.body.emails).toHaveLength(1);
+    expect(transcriptEmails.body.emails[0].missionId).toBe(missionId);
+    expect(transcriptEmails.body.emails[0].subject).toContain(missionId);
+    expect(transcriptEmails.body.emails[0].textBody).toContain('Клиент: Please prepare a quotation.');
+    expect(transcriptEmails.body.emails[0].textBody)
+      .toContain('Елена: I will record the request for the sales manager.');
+    expect(transcriptEmails.body.emails[0].textBody).not.toContain('Verified knowledge lookup recorded');
+    const transcriptEmailFailed = await request(
+      baseUrl,
+      `/calls/sip/transcript-emails/${missionId}/failed`,
+      { method: 'POST', body: JSON.stringify({ errorType: 'ExchangeUnavailable' }) },
+    );
+    expect(transcriptEmailFailed.status).toBe(200);
+    const transcriptEmailNotDue = await request(baseUrl, '/calls/sip/transcript-emails/pending');
+    expect(transcriptEmailNotDue.body.emails).toHaveLength(0);
+    db.prepare("UPDATE sip_transcript_email_delivery SET next_attempt_at = datetime('now', '-1 second') WHERE mission_id = ?")
+      .run(missionId);
+    const transcriptEmailRetry = await request(baseUrl, '/calls/sip/transcript-emails/pending');
+    expect(transcriptEmailRetry.body.emails).toHaveLength(1);
+    const transcriptEmailDelivered = await request(
+      baseUrl,
+      `/calls/sip/transcript-emails/${missionId}/delivered`,
+      { method: 'POST', body: JSON.stringify({ exchangeRefHash: 'sha256:transcript-email' }) },
+    );
+    expect(transcriptEmailDelivered.status).toBe(200);
+    const transcriptEmailStatus = await request(
+      baseUrl,
+      `/calls/sip/transcript-emails/${missionId}/status`,
+    );
+    expect(transcriptEmailStatus.body.delivery).toMatchObject({
+      missionId,
+      status: 'delivered',
+      attempts: 2,
+      exchangeRefHash: 'sha256:transcript-email',
+    });
+    const noTranscriptEmails = await request(baseUrl, '/calls/sip/transcript-emails/pending');
+    expect(noTranscriptEmails.body.emails).toHaveLength(0);
     const archivePending = await request(baseUrl, '/calls/sip/knowledge-archive/pending');
     expect(archivePending.body.archives).toHaveLength(1);
     expect(archivePending.body.archives[0]).toMatchObject({ missionId, status: 'pending', room: 'incoming_calls' });
