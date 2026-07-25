@@ -13,6 +13,8 @@ $packet = [ordered]@{
   processRunning = $false
   healthReachable = $false
   health = $null
+  tnvedHealthReachable = $false
+  tnvedHealth = $null
   blocking = @()
 }
 
@@ -20,8 +22,17 @@ $proc = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*
 $managedTask = Get-ScheduledTask -TaskName "AgenticMail-SIP-Sidecar-Service" -ErrorAction SilentlyContinue
 $managedTaskRunning = $managedTask -and [string]$managedTask.State -eq "Running"
 $signalingPort = 5070
+$tnvedApiBase = "http://127.0.0.1:8099"
+$tnvedEnabled = $true
 if (Test-Path -LiteralPath $ConfigPath) {
-  try { $signalingPort = [int](Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json).signalingPort } catch {}
+  try {
+    $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    $signalingPort = [int]$config.signalingPort
+    if ($config.tnvedApiBase) { $tnvedApiBase = ([string]$config.tnvedApiBase).TrimEnd("/") }
+    if ($null -ne $config.tnvedConsultationEnabled) {
+      $tnvedEnabled = [bool]$config.tnvedConsultationEnabled
+    }
+  } catch {}
 }
 $udpListener = Get-NetUDPEndpoint -LocalPort $signalingPort -ErrorAction SilentlyContinue | Select-Object -First 1
 $packet.processRunning = $proc.Count -gt 0 -or $managedTaskRunning -or $null -ne $udpListener
@@ -42,6 +53,19 @@ try {
   }
 } catch {
   $packet.blocking += "sip_sidecar_health_unreachable"
+}
+
+if ($tnvedEnabled) {
+  try {
+    $tnvedHealth = Get-LocalJson -Uri "$tnvedApiBase/tnved/health" -TimeoutSeconds 10
+    $packet.tnvedHealthReachable = $true
+    $packet.tnvedHealth = $tnvedHealth
+    if ($tnvedHealth.status -ne "ok" -or $tnvedHealth.preflight.ok -ne $true) {
+      $packet.blocking += "tnved_api_health_blocked"
+    }
+  } catch {
+    $packet.blocking += "tnved_api_health_unreachable"
+  }
 }
 
 $packet.blocking = @($packet.blocking | Select-Object -Unique)

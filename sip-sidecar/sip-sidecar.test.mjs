@@ -40,13 +40,14 @@ function inviteMessage(callId = 'inbound-test@example.invalid') {
   ], sdp);
 }
 
-function inDialogRequest(method, callId, cseq) {
+function inDialogRequest(method, callId, cseq, extraHeaders = []) {
   return buildSipMessage(`${method} sip:1000@pbx.test SIP/2.0`, [
     ['Via', `SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-${method.toLowerCase()}`],
     ['From', '<sip:114@pbx.test>;tag=caller-tag'],
     ['To', '<sip:1000@pbx.test>;tag=agent-tag'],
     ['Call-ID', callId],
     ['CSeq', `${cseq} ${method}`],
+    ...extraHeaders,
   ]);
 }
 
@@ -54,6 +55,27 @@ test('extracts only dialable caller identities from SIP URIs', () => {
   assert.equal(sipDialableUser('<sip:+12025550123@pbx.test>;tag=caller'), '+12025550123');
   assert.equal(sipDialableUser('sip:114@pbx.test'), '114');
   assert.equal(sipDialableUser('sip:not-a-number@pbx.test'), '');
+});
+
+test('loads UTF-8 JSON configuration files with a BOM', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'agenticmail-sip-bom-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, 'pbx.json');
+  const agenticmailConfigPath = join(dir, 'agenticmail.json');
+  writeFileSync(configPath, `\uFEFF${JSON.stringify({
+    server: '127.0.0.1',
+    username: '1000',
+    localIp: '127.0.0.1',
+    transcriptPersistenceRequired: false,
+  })}`);
+  writeFileSync(agenticmailConfigPath, `\uFEFF${JSON.stringify({ openaiApiKey: 'test-key' })}`);
+
+  const sidecar = new SipSidecar({ configPath, agenticmailConfigPath });
+  t.after(() => {
+    try { sidecar.socket.close(); } catch { /* socket was never bound */ }
+  });
+  assert.equal(sidecar.username, '1000');
+  assert.equal(sidecar.openaiKey, 'test-key');
 });
 
 test('retransmitted inbound INVITE creates one call and one Realtime greeting', async (t) => {
@@ -326,13 +348,40 @@ test('CANCEL during Realtime setup terminates the one pending inbound call', asy
   const callId = 'cancel-call@example.invalid';
   const pending = sidecar.handleInvite(parseSipMessage(inviteMessage(callId)), { address: '192.0.2.10', port: 5060 });
   while (!rejectRealtime) await new Promise((resolve) => setImmediate(resolve));
-  await sidecar.handleSip(Buffer.from(inDialogRequest('CANCEL', callId, 1)), { address: '192.0.2.10', port: 5060 });
+  await sidecar.handleSip(Buffer.from(inDialogRequest('CANCEL', callId, 1, [
+    ['Reason', 'SIP;cause=200;text="Call completed elsewhere"'],
+  ])), { address: '192.0.2.10', port: 5060 });
   const call = await pending;
 
   assert.equal(call.status, 'ended');
+  assert.equal(call.endReason, 'remote_cancel_completed_elsewhere');
   assert.equal(sidecar.callsBySipId.has(callId), false);
   assert.equal(sent.filter((msg) => msg.startLine === 'SIP/2.0 487 Request Terminated').length, 1);
   assert.equal(sent.filter((msg) => msg.startLine === 'SIP/2.0 200 OK').length, 1);
+  const events = readFileSync(join(dir, 'events.jsonl'), 'utf8')
+    .trim().split(/\r?\n/u).map((line) => JSON.parse(line));
+  assert.equal(events.some((event) => event.type === 'call_setup_failed'), false);
+  assert.equal(events.some((event) => event.type === 'call_setup_cancelled'), true);
+});
+
+test('pre-answer CANCEL finalizes a persisted SIP mission as cancelled', () => {
+  const finalized = [];
+  const sidecar = {
+    transcriptPersistenceRequired: true,
+    missionClient: { finalize: (missionId, body) => finalized.push({ missionId, body }) },
+    logEvent: () => {},
+    onCallEnded: () => {},
+    sendBye: () => {},
+    endManagerTransfer: () => {},
+  };
+  const call = new SipCall({ id: 'sip-cancelled', direction: 'inbound', sidecar });
+  call.missionId = 'call-cancelled';
+
+  call.end('remote_cancel');
+
+  assert.equal(finalized[0].body.status, 'cancelled');
+  assert.equal(finalized[0].body.reason, 'remote_cancel');
+  assert.equal(finalized[0].body.metadata.transcriptTurnCount, 0);
 });
 
 test('final caller and agent transcript text is persisted in sequence', () => {
@@ -415,6 +464,122 @@ test('sales intake tools persist structured facts and callback requests without 
   assert.equal(updates[2].nextAction.type, 'callback_request');
   assert.equal(updates[2].outcome, 'needs_follow_up');
   assert.equal(knowledge.count, 1);
+});
+
+test('guided TNVED consultation asks one question and then speaks an unblocked tariff result', async () => {
+  const requests = [];
+  const updates = [];
+  const transcripts = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.tnvedConsultationEnabled = true;
+  sidecar.logEvent = () => {};
+  sidecar.missionClient = {
+    updateIntake: async (_missionId, patch) => {
+      updates.push(patch);
+      return { success: true, complete: false, intake: { missingFields: [] } };
+    },
+  };
+  sidecar.requestTnved = async (path, options) => {
+    requests.push({ path, options });
+    if (path === '/tnved/classify') {
+      return {
+        draft: {
+          request_id: '11111111-1111-1111-1111-111111111111',
+          status: 'needs_clarification',
+          best_candidate_preview: { code: '3919900000' },
+          top3: [{ code: '3919900000' }],
+        },
+      };
+    }
+    return {
+      advisory: {
+        blocked: false,
+        code: '3919900000',
+        spoken_code: '3919 90 000 0',
+        title: 'Пленка самоклеящаяся из пластмасс: прочая',
+        spoken_title: 'Пленка самоклеящаяся из пластмасс, прочая',
+        duty: { base: { note_key: 'duty-1', rate_text: '6.5 %' } },
+        vat: { base: { note_key: 'vat-1', rate_text: '22 %' } },
+        non_tariff: {
+          status: 'ok',
+          necessity: 'checks_identified',
+          spoken_summary: 'Нужно проверить оценку соответствия.',
+          source: 'CTM.GetCargoSpecFeatures',
+          features: [],
+        },
+        payments: {
+          status: 'calculated',
+          duty_amount_rub: 6500,
+          vat_amount_rub: 23430,
+          duty_plus_vat_rub: 29930,
+        },
+        kb_version: 'kb_test',
+      },
+    };
+  };
+  const call = {
+    id: 'sip-tnved-test',
+    missionId: 'mission-tnved-test',
+    tnvedConsultation: { fields: {}, requestId: null, lastAdvisory: null },
+    recordSystemTranscript: (text, metadata) => transcripts.push({ text, metadata }),
+  };
+
+  const first = await sidecar.executeCallTool(call, 'consult_tnved', {
+    productName: 'самоклеящаяся пленка ПЭТ',
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.action, 'ask_question');
+  assert.equal(first.field, 'purpose');
+  assert.equal(requests.length, 0);
+
+  const technicalQuestion = await sidecar.executeCallTool(call, 'consult_tnved', {
+    productName: 'самоклеящаяся пленка ПЭТ',
+    purpose: 'для изготовления этикеток',
+    composition: 'полиэфирная пленка с акриловым клеем',
+  });
+  assert.equal(technicalQuestion.field, 'technicalParameters');
+  assert.match(technicalQuestion.question, /ширину и толщину/u);
+  assert.equal(requests.length, 0);
+
+  const result = await sidecar.executeCallTool(call, 'consult_tnved', {
+    productName: 'самоклеящаяся пленка ПЭТ',
+    purpose: 'для изготовления этикеток',
+    composition: 'полиэфирная пленка с акриловым клеем',
+    technicalParameters: 'ширина 50 сантиметров, толщина 50 микрометров',
+    processingStage: 'готовая пленка',
+    packagingOrForm: 'в рулонах',
+    originCountry: 'Китай',
+    customsValueRub: 100000,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'speak_result');
+  assert.equal(result.result.code, '3919900000');
+  assert.equal(result.result.spokenCode, '3919 90 000 0');
+  assert.equal(result.result.wording, 'Пленка самоклеящаяся из пластмасс, прочая');
+  assert.equal(result.result.importDuty.rate_text, '6.5 %');
+  assert.equal(result.result.vat.rate_text, '22 %');
+  assert.equal(result.result.payments.duty_plus_vat_rub, 29930);
+  assert.deepEqual(requests.map((item) => item.path), [
+    '/tnved/classify',
+    '/tnved/classify/11111111-1111-1111-1111-111111111111/advisory',
+  ]);
+  assert.equal(updates[0].serviceTopic, 'customs');
+  assert.match(updates[0].requestDescription, /3919900000/u);
+  assert.equal(transcripts[0].metadata.kbVersion, 'kb_test');
+
+  const vehicleStart = await sidecar.executeCallTool(call, 'consult_tnved', {
+    restart: true,
+    productName: 'легковой автомобиль',
+  });
+  assert.equal(vehicleStart.field, 'purpose');
+  const vehicleTechnical = await sidecar.executeCallTool(call, 'consult_tnved', {
+    productName: 'легковой автомобиль',
+    purpose: 'для личного использования',
+  });
+  assert.equal(vehicleTechnical.field, 'technicalParameters');
+  assert.match(vehicleTechnical.question, /марку, модель, год выпуска/u);
+  assert.equal(requests.length, 2);
 });
 
 test('assisted manager transfer returns to Elena after no answer and records callback follow-up', async () => {
@@ -520,6 +685,103 @@ test('assisted manager transfer switches to the manager only after answer', asyn
   assert.equal(updates[0].outcome, 'transferred');
 });
 
+test('topic manager routes rotate between employees in the configured department', async () => {
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.username = '199';
+  sidecar.managerRouteCursor = new Map();
+  sidecar.pbx = {
+    managerRoutes: {
+      logistics: {
+        label: 'Логистика',
+        selection: 'round_robin',
+        topics: ['международные перевозки', 'внутрироссийские перевозки'],
+        destinations: [
+          { extension: '171', employee: 'Viktoria E.', aliases: ['Виктория Е'] },
+          { extension: '173', employee: 'Sergey O.', aliases: ['Сергей О'] },
+        ],
+      },
+    },
+    managerTransferTimeoutSeconds: 15,
+  };
+  sidecar.transferToDestination = async (_call, destination) => destination;
+
+  const first = await sidecar.transferToManager({}, 'logistics', 'International freight request');
+  const second = await sidecar.transferToManager({}, 'logistics', 'Domestic freight request');
+  const third = await sidecar.transferToManager({}, 'logistics', 'Ocean freight request');
+
+  assert.equal(first.extension, '171');
+  assert.equal(first.owner, 'Viktoria E.');
+  assert.equal(first.destinationType, 'named_route');
+  assert.equal(second.extension, '173');
+  assert.equal(second.owner, 'Sergey O.');
+  assert.equal(third.extension, '171');
+});
+
+test('explicitly named employee overrides round robin without guessing an ambiguous name', async () => {
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.username = '199';
+  sidecar.managerRouteCursor = new Map();
+  sidecar.pbx = {
+    managerRoutes: {
+      customs_certification: {
+        label: 'Таможенное оформление и сертификация',
+        selection: 'round_robin',
+        destinations: [
+          { extension: '145', employee: "Natal'ya E.", aliases: ['Наталья Е', 'Natalya E'] },
+          { extension: '147', employee: 'Natalia B.', aliases: ['Наталия Б', 'Наталья Б'] },
+        ],
+      },
+    },
+  };
+  sidecar.transferToDestination = async (_call, destination) => destination;
+
+  const named = await sidecar.transferToManager(
+    {},
+    'customs_certification',
+    'Caller requested Natalia B.',
+    'Наталья Б',
+  );
+  const ambiguous = await sidecar.transferToManager(
+    {},
+    'customs_certification',
+    'Caller requested Natalia without an initial',
+    'Наталья',
+  );
+
+  assert.equal(named.extension, '147');
+  assert.equal(named.owner, 'Natalia B.');
+  assert.equal(named.destinationType, 'named_employee');
+  assert.equal(ambiguous.ok, false);
+  assert.match(ambiguous.error, /not configured or allowlisted/u);
+});
+
+test('legacy sales and operator route aliases resolve to customer service', async () => {
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.username = '199';
+  sidecar.managerRouteCursor = new Map();
+  sidecar.pbx = {
+    managerRouteAliases: {
+      sales: 'customer_service',
+      operator: 'customer_service',
+    },
+    managerRoutes: {
+      customer_service: {
+        selection: 'primary',
+        destinations: [{ extension: '135', employee: 'Irina A.', aliases: ['Ирина'] }],
+      },
+    },
+  };
+  sidecar.transferToDestination = async (_call, destination) => destination;
+
+  const sales = await sidecar.transferToManager({}, 'sales', 'Generic manager request');
+  const operator = await sidecar.transferToManager({}, 'operator', 'Operator request');
+
+  assert.equal(sales.route, 'customer_service');
+  assert.equal(sales.extension, '135');
+  assert.equal(operator.route, 'customer_service');
+  assert.equal(operator.extension, '135');
+});
+
 test('caller-confirmed internal extension transfer connects only after answer', async () => {
   const updates = [];
   const sequence = [];
@@ -612,6 +874,17 @@ test('sales instructions expose only the active service playbook after routing',
     username: '1000',
     localIp: '127.0.0.1',
     salesScenarioPath: join(process.cwd(), 'sip-sidecar', 'sales-call-scenario.json'),
+    managerRoutes: {
+      customer_service: {
+        label: 'Отдел по работе с клиентами',
+        selection: 'round_robin',
+        topics: ['общие вопросы', 'вопросы без конкретизации'],
+        destinations: [
+          { extension: '135', employee: 'Irina A.', aliases: ['Ирина'] },
+          { extension: '136', employee: 'Marina S.', aliases: ['Марина'] },
+        ],
+      },
+    },
   }));
   writeFileSync(agenticmailConfigPath, JSON.stringify({}));
 
@@ -625,8 +898,14 @@ test('sales instructions expose only the active service playbook after routing',
     sidecar.salesScenario.openings.inbound,
     'Здравствуйте. Невский Брокер, меня зовут Елена, слушаю вас.',
   );
+  assert.equal(sidecar.salesScenario.id, 'nevsky-broker-sales-intake-v13');
+  assert.equal(sidecar.salesScenario.version, 13);
   assert.doesNotMatch(sidecar.salesScenario.openings.inbound, /ИИ-помощник/u);
   assert.match(routingPrompt, /# Routing/);
+  assert.match(routingPrompt, /# Internal Department Routing Directory/u);
+  assert.match(routingPrompt, /route customer_service/u);
+  assert.match(routingPrompt, /Irina A\., Marina S\./u);
+  assert.doesNotMatch(routingPrompt, /extension 135/u);
   assert.match(routingPrompt, /Я виртуальный голосовой помощник/u);
   assert.match(routingPrompt, /не обманывай и не уклоняйся/u);
   assert.doesNotMatch(routingPrompt, /голосовой ИИ-помощник/u);

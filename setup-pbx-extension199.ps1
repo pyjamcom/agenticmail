@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$Server = "10.1.0.223",
   [string]$ServerAlias = "pbx.nbr.ru",
   [int]$Port = 5060,
@@ -9,6 +9,7 @@ param(
   [int]$RtpPortMin = 40200,
   [int]$RtpPortMax = 40398,
   [int]$SidecarHttpPort = 3899,
+  [string]$TnvedApiBase = "http://127.0.0.1:8099",
   [string]$ConfigPath = "$env:USERPROFILE\.agenticmail\pbx199.local.json",
   [string]$SecretPath = "$env:USERPROFILE\.agenticmail\pbx199.secret.dpapi",
   [switch]$EnableLiveAnswer,
@@ -66,6 +67,8 @@ $payload = [ordered]@{
   rtpPortMin = $RtpPortMin
   rtpPortMax = $RtpPortMax
   sidecarHttpPort = $SidecarHttpPort
+  tnvedApiBase = $TnvedApiBase.TrimEnd("/")
+  tnvedConsultationEnabled = $true
   secretRef = $SecretPath
   secretFormat = "windows_dpapi_local_machine_v1"
   secretStored = [bool]$secretStored
@@ -75,6 +78,86 @@ $payload = [ordered]@{
   sipSidecarSupported = $true
   sipSidecarScript = (Join-Path $PSScriptRoot "sip-sidecar\sip-sidecar.mjs")
   postGreetingSilencePromptDelayMs = 2000
+  managerExtensions = [ordered]@{
+    sales = "135"
+  }
+  managerRouteAliases = [ordered]@{
+    sales = "customer_service"
+    operator = "customer_service"
+    general = "customer_service"
+  }
+  managerRoutes = [ordered]@{
+    customer_service = [ordered]@{
+      label = "Отдел по работе с клиентами"
+      selection = "round_robin"
+      topics = @(
+        "общие вопросы"
+        "вопросы без конкретизации"
+        "первичное обращение, когда профиль не определён"
+      )
+      destinations = @(
+        [ordered]@{ extension = "135"; employee = "Irina A."; aliases = @("Ирина", "Ирина А", "Irina A") }
+        [ordered]@{ extension = "136"; employee = "Marina S."; aliases = @("Марина", "Марина С", "Marina S") }
+      )
+    }
+    payment_agent = [ordered]@{
+      label = "Оплаты через платёжного агента"
+      selection = "primary"
+      topics = @(
+        "оплата поставщикам"
+        "оплата автомобилей и других товаров"
+        "оплата в другие страны"
+        "услуги платёжного агента"
+      )
+      destinations = @(
+        [ordered]@{ extension = "141"; employee = "Anton M."; aliases = @("Антон", "Антон М", "Anton M") }
+      )
+    }
+    customs_certification = [ordered]@{
+      label = "Таможенное оформление и сертификация"
+      selection = "round_robin"
+      topics = @(
+        "расчёт таможенных платежей"
+        "таможенное оформление автомобилей и мототехники"
+        "консультации по таможенному оформлению"
+        "сертификация продукции"
+        "разрешительные документы"
+      )
+      destinations = @(
+        [ordered]@{ extension = "145"; employee = "Natal'ya E."; aliases = @("Наталья Е", "Natalya E", "Natal'ya E") }
+        [ordered]@{ extension = "147"; employee = "Natalia B."; aliases = @("Наталия Б", "Наталья Б", "Natalia B") }
+      )
+    }
+    accounting = [ordered]@{
+      label = "Бухгалтерия"
+      selection = "round_robin"
+      topics = @(
+        "бухгалтерские документы"
+        "акты, счета и сверки"
+        "вопросы бухгалтерии"
+      )
+      destinations = @(
+        [ordered]@{ extension = "152"; employee = "Nastya"; aliases = @("Настя", "Анастасия", "Nastya") }
+        [ordered]@{ extension = "153"; employee = "Nastya Z."; aliases = @("Настя З", "Анастасия З", "Nastya Z") }
+      )
+    }
+    logistics = [ordered]@{
+      label = "Логистика"
+      selection = "round_robin"
+      topics = @(
+        "международные перевозки"
+        "внутрироссийские перевозки"
+        "морская, автомобильная, железнодорожная, авиационная и мультимодальная логистика"
+        "перевозка грузов"
+      )
+      destinations = @(
+        [ordered]@{ extension = "171"; employee = "Viktoria E."; aliases = @("Виктория", "Виктория Е", "Viktoria E") }
+        [ordered]@{ extension = "173"; employee = "Sergey O."; aliases = @("Сергей", "Сергей О", "Sergey O") }
+      )
+    }
+  }
+  managerTransferTimeoutSeconds = 15
+  managerTransferNoAnswerMessage = "Сотрудник сейчас не смог ответить. Возможно, он ненадолго отошёл от рабочего места. Пожалуйста, отправьте все детали и техническое описание запроса на sales собака nbr точка ru. Ответственный сотрудник свяжется с вами по этому номеру в ближайшее рабочее время."
   internalTransfer = [ordered]@{
     enabled = $true
     allowedExtensionPattern = "^1[0-9]{2}$"
@@ -91,7 +174,7 @@ $payload = [ordered]@{
   )
 }
 
-Write-Utf8NoBom -Path $ConfigPath -Text ($payload | ConvertTo-Json -Depth 6)
+Write-Utf8NoBom -Path $ConfigPath -Text ($payload | ConvertTo-Json -Depth 8)
 
 [pscustomobject]@{
   status = "ok"

@@ -8,6 +8,7 @@ Responsibilities:
 - answer inbound calls on the extension;
 - place outbound SIP calls through the PBX;
 - bridge RTP G.711 PCMU audio to OpenAI Realtime over WebSocket;
+- run a guided TN VED consultation through the internal CTM-backed API;
 - perform an assisted manager transfer that keeps the caller with the agent
   until the allowlisted internal extension answers;
 - fail closed when credentials or `OPENAI_API_KEY` are missing.
@@ -20,6 +21,32 @@ Provide a local JSON profile with the PBX server, username, signaling and
 RTP ports, plus references to the protected PBX and OpenAI credentials. Then
 run the sidecar through environment-specific setup/start scripts.
 
+The TN VED tool is configured in the PBX profile:
+
+```json
+{
+  "tnvedConsultationEnabled": true,
+  "tnvedApiBase": "http://10.0.200.101:8100"
+}
+```
+
+After the caller finishes the first product description, Elena offers the
+consultation once. The tool asks one missing question at a time and uses
+category-specific prompts: vehicles request model/year/engine/new-or-used
+facts, films request width/thickness/adhesive/roll facts, and machinery
+requests function/model/power/finished-device facts. Multiple goods are
+processed one at a time with `restart=true`.
+
+The result contains a speech-grouped 10-digit code, compact wording, import
+duty, VAT, a short product-context-aware non-tariff summary, and duty/VAT
+amounts when customs value in roubles is known. A specific or combined duty
+rate is spoken in full; the model must not calculate only its percentage
+component. The ordinary classifier finalization gates remain available for
+audit, but they do not block the voice advisory response. Tariff values must
+never be supplied from model memory. The sum is described as "duty plus VAT",
+not as all customs payments, because customs fees, excise, preferences and
+trade-remedy duties are outside this calculator.
+
 An assisted transfer is configured in the local PBX profile. The sidecar
 dials the internal extension as a second SIP leg, switches RTP only after a
 `200 OK`, and cancels the manager leg on timeout. A failed attempt returns
@@ -29,6 +56,34 @@ Before the second SIP leg is dialed, the sidecar waits for the queued transfer
 confirmation to finish playing. The wait is bounded, logged, and occurs before
 any residual audio is cleared, so starting a transfer cannot cut off Elena's
 spoken sentence.
+
+Department routes can contain one or more named employees. With
+`selection: "round_robin"`, unnamed requests rotate between the employees;
+an employee explicitly named by the caller is selected by an exact configured
+name or alias. The route directory and selected internal destination are
+recorded in local health/audit output.
+
+```json
+{
+  "managerRoutes": {
+    "customer_service": {
+      "label": "Отдел по работе с клиентами",
+      "selection": "round_robin",
+      "topics": ["общие вопросы", "вопросы без конкретизации"],
+      "destinations": [
+        { "extension": "135", "employee": "Irina A.", "aliases": ["Ирина", "Ирина А"] },
+        { "extension": "136", "employee": "Marina S.", "aliases": ["Марина", "Марина С"] }
+      ]
+    }
+  },
+  "managerRouteAliases": {
+    "sales": "customer_service",
+    "operator": "customer_service"
+  }
+}
+```
+
+Legacy one-extension routes remain supported:
 
 ```json
 {
