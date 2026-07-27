@@ -2,6 +2,7 @@ param(
   [string]$HealthUri = "http://127.0.0.1:3899/health",
   [string]$ApiHealthUri = "http://127.0.0.1:3829/api/agenticmail/health",
   [string]$ExchangeHealthUri = "http://127.0.0.1:3901/health",
+  [string]$TnvedHealthUri = "http://127.0.0.1:8111/tnved/health",
   [int]$TimeoutSeconds = 5,
   [string]$ServiceProfile = $env:AGENTICMAIL_SERVICE_PROFILE
 )
@@ -47,6 +48,7 @@ function Restart-ManagedTask {
     ($TaskName -eq "AgenticMail-Stalwart-Service" -and $_.Name -ieq "stalwart.exe") -or
     ($TaskName -eq "AgenticMail-API-Service" -and $_.Name -ieq "node.exe" -and $_.CommandLine -like "*packages/api/dist/index.js*") -or
     ($TaskName -eq "AgenticMail-SIP-Sidecar-Service" -and $_.Name -ieq "node.exe" -and $_.CommandLine -like "*sip-sidecar.mjs*") -or
+    ($TaskName -eq "AgenticMail-SIP-Sidecar-Service" -and $_.Name -like "python*.exe" -and $_.CommandLine -like "*tnved_api_server.py*" -and $_.CommandLine -like "*--port 8111*") -or
     ($TaskName -eq "AgenticMail-Exchange-EWS-Service" -and $_.Name -like "python*.exe" -and $_.CommandLine -like "*exchange-ews-sidecar.py*")
   } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -60,9 +62,29 @@ function Stop-AgenticMailRuntimeProcesses {
     ($_.Name -ieq "stalwart.exe") -or
     ($_.Name -ieq "node.exe" -and $_.CommandLine -like "*packages/api/dist/index.js*") -or
     ($_.Name -ieq "node.exe" -and $_.CommandLine -like "*sip-sidecar.mjs*") -or
-    ($_.Name -like "python*.exe" -and $_.CommandLine -like "*exchange-ews-sidecar.py*")
+    ($_.Name -like "python*.exe" -and $_.CommandLine -like "*exchange-ews-sidecar.py*") -or
+    ($_.Name -like "python*.exe" -and $_.CommandLine -like "*tnved_api_server.py*" -and $_.CommandLine -like "*--port 8111*")
   } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Get-TnvedRuntimeProcess {
+  return Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -like "python*.exe" -and
+    $_.CommandLine -like "*tnved_api_server.py*" -and
+    $_.CommandLine -like "*--port 8111*"
+  } | Select-Object -First 1
+}
+
+function Test-SystemProcess {
+  param($Process)
+  if (-not $Process) { return $false }
+  try {
+    $owner = Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid
+    return $owner.Sid -eq "S-1-5-18"
+  } catch {
+    return $false
   }
 }
 
@@ -127,14 +149,58 @@ try {
       param($value)
       $value.status -eq "ok" -and $value.registered -eq $true -and $value.transcriptPersistence.ready -eq $true
     }
+    $tnvedHealth = Wait-LocalHealth -Uri $TnvedHealthUri -WaitSeconds 60 -Ready {
+      param($value)
+      $value.status -eq "ok" -and $value.preflight.ok -eq $true
+    }
     Write-WatchdogEvent "full_system_restart_succeeded" @{ lastRegister = $sipHealth.lastRegister }
     [pscustomobject]@{
       status = "full_system_restart_succeeded"
       apiReady = $apiHealth.status -eq "ok"
       exchangeReady = $exchangeHealth.status -eq "ok"
       sipRegistered = [bool]$sipHealth.registered
+      tnvedReady = $tnvedHealth.status -eq "ok"
     } | ConvertTo-Json
     exit 0
+  }
+
+  $tnvedHealth = $null
+  $tnvedProcess = Get-TnvedRuntimeProcess
+  try {
+    $tnvedHealth = Get-LocalJson -Uri $TnvedHealthUri -TimeoutSeconds $TimeoutSeconds
+  } catch {
+    $tnvedHealth = $null
+  }
+  $tnvedReady = $tnvedHealth -and
+    $tnvedHealth.status -eq "ok" -and
+    $tnvedHealth.preflight.ok -eq $true -and
+    (Test-SystemProcess $tnvedProcess)
+  if (-not $tnvedReady) {
+    $liveSip = $null
+    try { $liveSip = Get-LocalJson -Uri $HealthUri -TimeoutSeconds $TimeoutSeconds } catch {}
+    if ($liveSip -and [int]$liveSip.activeCalls -gt 0) {
+      Write-WatchdogEvent "tnved_restart_deferred" @{ activeCalls = [int]$liveSip.activeCalls }
+    } else {
+      Write-WatchdogEvent "tnved_restart_started" @{
+        reason = if ($tnvedHealth) { "wrong_identity_or_blocked" } else { "health_unreachable" }
+      }
+      $null = Restart-ManagedTask "AgenticMail-SIP-Sidecar-Service"
+      $tnvedHealth = Wait-LocalHealth -Uri $TnvedHealthUri -WaitSeconds 60 -Ready {
+        param($value)
+        $value.status -eq "ok" -and $value.preflight.ok -eq $true
+      }
+      $null = Wait-LocalHealth -Uri $HealthUri -WaitSeconds 60 -Ready {
+        param($value)
+        $value.status -eq "ok" -and $value.registered -eq $true -and $value.transcriptPersistence.ready -eq $true
+      }
+      $tnvedProcess = Get-TnvedRuntimeProcess
+      if (-not (Test-SystemProcess $tnvedProcess)) {
+        throw "TNVED API is healthy but is not running as NT AUTHORITY\SYSTEM"
+      }
+      Write-WatchdogEvent "tnved_restart_succeeded" @{
+        kbVersion = [string]$tnvedHealth.preflight.kb_version
+      }
+    }
   }
 
   $apiRestarted = $false

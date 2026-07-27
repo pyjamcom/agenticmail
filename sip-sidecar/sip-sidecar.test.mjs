@@ -146,6 +146,13 @@ test('vehicle TNVED chapter gate defines only relevant headings', () => {
   assert.deepEqual(allowedTnvedCodePrefixesForProduct('самоклеящаяся пленка'), []);
 });
 
+test('household matches TNVED chapter gate allows only heading 3605', () => {
+  assert.deepEqual(allowedTnvedCodePrefixesForProduct('обычные бытовые спички'), ['3605']);
+  assert.deepEqual(allowedTnvedCodePrefixesForProduct('wooden safety matches'), ['3605']);
+  assert.deepEqual(allowedTnvedCodePrefixesForProduct('пиротехнические изделия и фейерверки'), ['3604']);
+  assert.deepEqual(allowedTnvedCodePrefixesForProduct('бытовая швейная машина'), ['8452']);
+});
+
 function inviteMessage(callId = 'inbound-test@example.invalid') {
   const sdp = [
     'v=0',

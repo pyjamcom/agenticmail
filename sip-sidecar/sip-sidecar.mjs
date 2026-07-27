@@ -242,6 +242,17 @@ function detectCustomsIntent(text) {
 
 function allowedTnvedCodePrefixesForProduct(productName) {
   const name = String(productName || '').toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
+  if (
+    /(?:спичк|\bmatches?\b)/iu.test(name)
+    && !/(?:пиротех|фейервер|сигнальн\w*\s+ракет|pyrotechnic|firework)/iu.test(name)
+  ) return ['3605'];
+  if (/(?:пиротех|фейервер|салют\w*|сигнальн\w*\s+ракет|pyrotechnic|firework)/iu.test(name)) {
+    return ['3604'];
+  }
+  if (
+    (/(?:швейн\w*)/iu.test(name) && /(?:машин\w*|оборудован\w*)/iu.test(name))
+    || /\bsewing\s+machines?\b/iu.test(name)
+  ) return ['8452'];
   if (/(?:седельн.*тягач|тягач.*полуприцеп|road\s+tractor)/iu.test(name)) return ['8701'];
   if (/(?:грузов.*автомобил|грузовик|пикап|самосвал|фургон|категори.*n[123]|truck)/iu.test(name)) {
     return ['8704'];
@@ -261,6 +272,15 @@ function allowedTnvedCodePrefixesForProduct(productName) {
 
 function tnvedTechnicalQuestion(productName) {
   const name = String(productName || '').toLocaleLowerCase('ru-RU');
+  if (/(?:спичк|\bmatches?\b)/u.test(name)) {
+    return 'Уточните, это обычные спички для поджигания, а не пиротехническое изделие?';
+  }
+  if (/(?:пиротех|фейервер|салют\w*|pyrotechnic|firework)/u.test(name)) {
+    return 'Уточните вид пиротехнического изделия, его назначение и основные технические характеристики.';
+  }
+  if (/(?:швейн\w*)/u.test(name) && /(?:машин\w*|оборудован\w*)/u.test(name)) {
+    return 'Уточните, это бытовая или промышленная швейная машина, автоматическая ли она и какие операции выполняет.';
+  }
   if (/(пленк|лент|лист|рулон|film|tape|sheet)/u.test(name)) {
     return 'Уточните ширину и толщину материала, самоклеящийся ли он и поставляется ли в рулонах.';
   }
@@ -302,6 +322,9 @@ function tnvedFieldFlow(productName) {
   const select = (...argumentsToKeep) => TNVED_FIELD_FLOW.filter(
     (item) => argumentsToKeep.includes(item.argument),
   );
+  if (/(?:спичк|\bmatches?\b)/u.test(name)) {
+    return select('purpose', 'technicalParameters', 'originCountry');
+  }
   if (/(автомоб|мотоцикл|легков|грузов(ой|ик)|автобус|транспортн.*средств|vehicle|motorcycle|car)/u.test(name)) {
     return select('purpose', 'technicalParameters', 'originCountry');
   }
@@ -463,7 +486,9 @@ const SALES_REALTIME_TOOLS = [
         originCountry: { type: 'string', description: 'Country of origin or supply for import into Russia.' },
         modelOrArticle: { type: 'string', description: 'Manufacturer model or article when known.' },
         knownCode: { type: 'string', description: 'A TN VED code stated by the caller for verification.' },
-        customsValueRub: { type: 'number', minimum: 0, description: 'Customs value in Russian rubles for payment calculation.' },
+        customsValueAmount: { type: 'number', minimum: 0, description: 'Numeric customs value in the currency stated by the caller. Never reinterpret a foreign-currency amount as RUB.' },
+        customsValueCurrency: { type: 'string', description: 'ISO 4217 currency code stated by the caller, for example RUB, USD, EUR, or CNY.' },
+        calculationDate: { type: 'string', description: 'Optional exchange-rate date in YYYY-MM-DD. Omit to use today.' },
         netWeightKg: { type: 'number', minimum: 0 },
         quantity: { type: 'number', minimum: 0 },
         finishNow: { type: 'boolean', description: 'Use the available facts now when the caller does not know another detail or does not need an amount calculation.' },
@@ -2899,6 +2924,9 @@ class SipSidecar {
     mergeText('modelOrArticle', 'part_number');
     mergeText('knownCode');
     mergeNumber('customsValueRub');
+    mergeNumber('customsValueAmount');
+    mergeText('customsValueCurrency');
+    mergeText('calculationDate');
     mergeNumber('netWeightKg');
     mergeNumber('quantity');
     state.fields = fields;
@@ -2926,14 +2954,27 @@ class SipSidecar {
           instruction: 'Задайте только этот вопрос. Не перечисляйте остальные вопросы заранее.',
         };
       }
-      if (!Number.isFinite(fields.customsValueRub)) {
+      if (Number.isFinite(fields.customsValueAmount) && !fields.customsValueCurrency) {
         return {
           ok: true,
           action: 'ask_question',
-          field: 'customsValueRub',
+          field: 'customsValueCurrency',
+          optional: false,
+          question: 'В какой валюте указана стоимость товара?',
+          instruction: 'Задайте только этот вопрос, затем снова вызовите consult_tnved с суммой и валютой.',
+        };
+      }
+      if (
+        !Number.isFinite(fields.customsValueAmount)
+        && !Number.isFinite(fields.customsValueRub)
+      ) {
+        return {
+          ok: true,
+          action: 'ask_question',
+          field: 'customsValueAmount',
           optional: true,
-          question: 'Какова таможенная стоимость товара в рублях? Она нужна, чтобы сразу посчитать суммы пошлины и НДС. Если стоимость пока неизвестна, так и скажите.',
-          instruction: 'Задайте только этот вопрос. Если клиент не знает стоимость, снова вызовите consult_tnved с finishNow=true.',
+          question: 'Какова стоимость товара и в какой валюте? Уточните также, включена ли доставка до границы ЕАЭС. Для предварительного расчета сервис пересчитает сумму по официальному курсу Банка России.',
+          instruction: 'Задайте только этот вопрос. Передайте сумму в customsValueAmount, а валюту в customsValueCurrency. Если клиент не знает стоимость, снова вызовите consult_tnved с finishNow=true.',
         };
       }
     }
@@ -2992,9 +3033,15 @@ class SipSidecar {
 
       if (!state.requestId) throw new Error('TNVED classifier did not return request_id');
       const advisoryPayload = {
-        ...(Number.isFinite(fields.customsValueRub)
+        ...(Number.isFinite(fields.customsValueAmount)
+          ? {
+            customs_value_amount: fields.customsValueAmount,
+            customs_value_currency: String(fields.customsValueCurrency || '').toUpperCase(),
+          }
+          : Number.isFinite(fields.customsValueRub)
           ? { customs_value_rub: fields.customsValueRub }
           : {}),
+        ...(fields.calculationDate ? { calculation_date: fields.calculationDate } : {}),
         ...(Number.isFinite(fields.netWeightKg) ? { net_weight_kg: fields.netWeightKg } : {}),
         ...(Number.isFinite(fields.quantity) ? { quantity: fields.quantity } : {}),
       };
@@ -3115,6 +3162,7 @@ class SipSidecar {
         instruction: [
           'Сразу сообщите результат в таком порядке: «По указанным вами характеристикам», код spokenCode, краткая формулировка wording, ставка пошлины, ставка НДС и nonTariff.spoken_summary.',
           'Если payments.status=calculated, назовите отдельно сумму пошлины, сумму НДС и сумму пошлины с НДС. Не называйте ее полной суммой всех таможенных платежей.',
+          'Если payments.currency_conversion присутствует, назовите исходную сумму и валюту, официальный курс и дату курса, а также полученную таможенную стоимость в рублях. Все числа берите только из result.',
           'Если payments.status=specific_or_combined_rate, дословно назовите полную ставку importDuty.rate_text и объясните, что для суммы нужны указанная единица товара и применимый курс валюты. Не рассчитывайте только процентную часть.',
           'Не называйте внутренние статусы, confidence, KB, источники или технические идентификаторы.',
           'Не требуйте документы или подтверждение сотрудника и не переводите звонок, если клиент сам этого не попросил.',
