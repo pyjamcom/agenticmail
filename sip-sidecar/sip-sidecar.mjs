@@ -37,6 +37,7 @@ const RTP_PACKET_INTERVAL_MS = 20;
 // so a normal response is paced instead of having its middle silently cut.
 const RTP_MAX_QUEUED_BYTES = RTP_PACKET_BYTES * 3000;
 const RTP_MAX_CATCH_UP_PACKETS = 3;
+const RTP_PACER_SEVERE_LATE_MS = 100;
 const MAX_COMPANY_CONTEXT_BYTES = 256 * 1024;
 const MAX_LOADED_SKILLS = 2;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
@@ -1501,6 +1502,23 @@ class OpenAiRealtimeBridge {
     this.completedToolCalls = new Set();
     this.pendingAssistantTranscripts = new Map();
     this.pendingCallerTranscripts = new Map();
+    this.activeResponseId = null;
+    this.responseCreatePending = false;
+    this.responseBlockedByServer = false;
+    this.pendingResponseRequest = null;
+    this.lastSentResponseRequest = null;
+    this.responseRequestSequence = 0;
+    this.responseFlushHandle = null;
+    this.responseMetrics = {
+      created: 0,
+      completed: 0,
+      requestsSent: 0,
+      requestsQueued: 0,
+      requestsCoalesced: 0,
+      activeResponseConflicts: 0,
+      outputAudioDeltaCount: 0,
+      outputAudioBytes: 0,
+    };
   }
 
   connect() {
@@ -1592,13 +1610,60 @@ class OpenAiRealtimeBridge {
     return this.requestResponse();
   }
 
+  queueResponseRequest(request) {
+    if (this.pendingResponseRequest) {
+      this.responseMetrics.requestsCoalesced += 1;
+      if (request.instructions) this.pendingResponseRequest = request;
+    } else {
+      this.pendingResponseRequest = request;
+      this.responseMetrics.requestsQueued += 1;
+    }
+    return true;
+  }
+
+  sendResponseRequest(request) {
+    if (!this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN || this.closing) return false;
+    const eventId = `agenticmail_response_${++this.responseRequestSequence}`;
+    const response = request.instructions
+      ? { response: { output_modalities: ['audio'], instructions: request.instructions } }
+      : {};
+    this.ws.send(JSON.stringify({ type: 'response.create', event_id: eventId, ...response }));
+    this.responseCreatePending = true;
+    this.lastSentResponseRequest = { ...request, eventId };
+    this.responseMetrics.requestsSent += 1;
+    return true;
+  }
+
+  schedulePendingResponse() {
+    if (this.responseFlushHandle || !this.pendingResponseRequest || this.closing) return false;
+    this.responseFlushHandle = setImmediate(() => {
+      this.responseFlushHandle = null;
+      if (!this.pendingResponseRequest || this.closing) return;
+      if (this.activeResponseId || this.responseCreatePending || this.responseBlockedByServer) return;
+      const request = this.pendingResponseRequest;
+      this.pendingResponseRequest = null;
+      if (!this.sendResponseRequest(request)) this.queueResponseRequest(request);
+    });
+    this.responseFlushHandle.unref?.();
+    return true;
+  }
+
   requestResponse(instructions = '') {
     if (!this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN || this.closing) return false;
-    const response = String(instructions || '').trim()
-      ? { response: { output_modalities: ['audio'], instructions: String(instructions).trim() } }
-      : {};
-    this.ws.send(JSON.stringify({ type: 'response.create', ...response }));
-    return true;
+    const request = { instructions: String(instructions || '').trim() };
+    if (this.activeResponseId || this.responseCreatePending || this.responseBlockedByServer) {
+      return this.queueResponseRequest(request);
+    }
+    return this.sendResponseRequest(request);
+  }
+
+  stats() {
+    return {
+      ...this.responseMetrics,
+      activeResponse: Boolean(this.activeResponseId),
+      responseCreatePending: this.responseCreatePending,
+      queuedResponse: Boolean(this.pendingResponseRequest),
+    };
   }
 
   appendAudio(payload) {
@@ -1695,6 +1760,55 @@ class OpenAiRealtimeBridge {
     if (msg.type === 'error' && !this.ready) {
       this.rejectConnect(new Error(msg.error?.message || 'OpenAI Realtime session setup failed'));
     }
+    if (msg.type === 'response.created') {
+      this.activeResponseId = String(msg.response?.id || msg.response_id || 'active');
+      this.responseCreatePending = false;
+      this.responseMetrics.created += 1;
+      this.onEvent?.({
+        type: msg.type,
+        responseId: this.activeResponseId,
+        responseStatus: String(msg.response?.status || ''),
+      });
+      return;
+    }
+    if (msg.type === 'response.done') {
+      const responseId = String(msg.response?.id || msg.response_id || '');
+      if (!responseId || !this.activeResponseId || responseId === this.activeResponseId) {
+        this.activeResponseId = null;
+      }
+      this.responseCreatePending = false;
+      this.responseBlockedByServer = false;
+      this.lastSentResponseRequest = null;
+      this.responseMetrics.completed += 1;
+      this.onEvent?.({
+        type: msg.type,
+        responseId,
+        responseStatus: String(msg.response?.status || ''),
+      });
+      this.schedulePendingResponse();
+      return;
+    }
+    if (msg.type === 'error' && msg.error?.code === 'conversation_already_has_active_response') {
+      const failedEventId = String(msg.error?.event_id || msg.event_id || '');
+      if (
+        this.lastSentResponseRequest
+        && (!failedEventId || failedEventId === this.lastSentResponseRequest.eventId)
+      ) {
+        this.queueResponseRequest({
+          instructions: this.lastSentResponseRequest.instructions,
+        });
+      }
+      this.responseCreatePending = false;
+      this.responseBlockedByServer = true;
+      this.responseMetrics.activeResponseConflicts += 1;
+    } else if (msg.type === 'error' && this.responseCreatePending) {
+      const failedEventId = String(msg.error?.event_id || msg.event_id || '');
+      if (!failedEventId || failedEventId === this.lastSentResponseRequest?.eventId) {
+        this.responseCreatePending = false;
+        this.lastSentResponseRequest = null;
+        this.schedulePendingResponse();
+      }
+    }
     if (msg.type === 'response.output_item.added' || msg.type === 'response.output_item.done') {
       const item = msg.item && typeof msg.item === 'object' ? msg.item : {};
       if (item.type === 'function_call' && item.call_id && item.name) {
@@ -1719,6 +1833,8 @@ class OpenAiRealtimeBridge {
     if (msg.type === 'response.output_audio.delta' || msg.type === 'response.audio.delta') {
       if (typeof msg.delta === 'string' && msg.delta) {
         const audio = Buffer.from(msg.delta, 'base64');
+        this.responseMetrics.outputAudioDeltaCount += 1;
+        this.responseMetrics.outputAudioBytes += audio.length;
         this.onEvent?.({
           type: msg.type,
           itemId: String(msg.item_id || msg.response_id || ''),
@@ -1819,15 +1935,9 @@ class OpenAiRealtimeBridge {
       },
     }));
     if (typeof output?.responseInstructions === 'string' && output.responseInstructions.trim()) {
-      this.ws.send(JSON.stringify({
-        type: 'response.create',
-        response: {
-          output_modalities: ['audio'],
-          instructions: output.responseInstructions.trim(),
-        },
-      }));
+      this.requestResponse(output.responseInstructions.trim());
     } else if (output?.suppressResponse !== true) {
-      this.ws.send(JSON.stringify({ type: 'response.create' }));
+      this.requestResponse();
     }
     this.onEvent?.({ type: 'tool.completed', toolName: name, ok: output?.ok !== false });
   }
@@ -1835,6 +1945,9 @@ class OpenAiRealtimeBridge {
   close() {
     this.closing = true;
     this.ready = false;
+    clearImmediate(this.responseFlushHandle);
+    this.responseFlushHandle = null;
+    this.pendingResponseRequest = null;
     this.flushPendingTranscripts();
     this.rejectConnect(new Error('OpenAI Realtime connection closed locally'));
     try {
@@ -1866,12 +1979,16 @@ class RtpSession {
     this.outboundOverflowDroppedBytes = 0;
     this.outboundInterruptedBytes = 0;
     this.outboundAbandonedBytes = 0;
-    this.outboundQueue = Buffer.alloc(0);
+    this.outboundChunks = [];
+    this.outboundChunkHead = 0;
+    this.outboundChunkOffset = 0;
+    this.outboundQueuedBytes = 0;
     this.sendTimer = null;
     this.nextSendAt = 0;
     this.pacerLateTicks = 0;
     this.pacerMaxLateMs = 0;
     this.pacerResyncs = 0;
+    this.pacerSevereLateTicks = 0;
     this.closed = false;
   }
 
@@ -1906,9 +2023,11 @@ class RtpSession {
   sendAudio(buffer) {
     if (!buffer?.length || this.closed) return;
     const incoming = Buffer.from(buffer);
-    const available = Math.max(0, RTP_MAX_QUEUED_BYTES - this.outboundQueue.length);
+    const available = Math.max(0, RTP_MAX_QUEUED_BYTES - this.outboundQueuedBytes);
     if (available > 0) {
-      this.outboundQueue = Buffer.concat([this.outboundQueue, incoming.subarray(0, available)]);
+      const accepted = incoming.subarray(0, available);
+      this.outboundChunks.push(accepted);
+      this.outboundQueuedBytes += accepted.length;
     }
     if (incoming.length > available) this.outboundOverflowDroppedBytes += incoming.length - available;
   }
@@ -1918,14 +2037,19 @@ class RtpSession {
     const tick = () => {
       if (this.closed) return;
       const now = performance.now();
-      if (this.outboundQueue.length < RTP_PACKET_BYTES) {
+      if (this.outboundQueuedBytes < RTP_PACKET_BYTES) {
         this.nextSendAt = now + RTP_PACKET_INTERVAL_MS;
       } else {
         let sent = 0;
+        const initialLateMs = Math.max(0, now - this.nextSendAt);
+        const catchUpLimit = initialLateMs >= RTP_PACER_SEVERE_LATE_MS
+          ? 1
+          : RTP_MAX_CATCH_UP_PACKETS;
+        if (initialLateMs >= RTP_PACER_SEVERE_LATE_MS) this.pacerSevereLateTicks += 1;
         while (
-          this.outboundQueue.length >= RTP_PACKET_BYTES
+          this.outboundQueuedBytes >= RTP_PACKET_BYTES
           && now >= this.nextSendAt
-          && sent < RTP_MAX_CATCH_UP_PACKETS
+          && sent < catchUpLimit
         ) {
           const lateMs = Math.max(0, now - this.nextSendAt);
           if (lateMs >= 5) this.pacerLateTicks += 1;
@@ -1934,7 +2058,7 @@ class RtpSession {
           this.nextSendAt += RTP_PACKET_INTERVAL_MS;
           sent += 1;
         }
-        if (sent === RTP_MAX_CATCH_UP_PACKETS && now >= this.nextSendAt) {
+        if (sent === catchUpLimit && now >= this.nextSendAt) {
           this.pacerResyncs += 1;
           this.nextSendAt = now + RTP_PACKET_INTERVAL_MS;
         }
@@ -1950,10 +2074,47 @@ class RtpSession {
     this.sendTimer.unref?.();
   }
 
+  takeOutboundAudio(byteCount) {
+    if (this.outboundQueuedBytes < byteCount) return null;
+    const payload = Buffer.allocUnsafe(byteCount);
+    let written = 0;
+    while (written < byteCount) {
+      const chunk = this.outboundChunks[this.outboundChunkHead];
+      const available = chunk.length - this.outboundChunkOffset;
+      const take = Math.min(byteCount - written, available);
+      chunk.copy(
+        payload,
+        written,
+        this.outboundChunkOffset,
+        this.outboundChunkOffset + take,
+      );
+      written += take;
+      this.outboundChunkOffset += take;
+      if (this.outboundChunkOffset >= chunk.length) {
+        this.outboundChunkHead += 1;
+        this.outboundChunkOffset = 0;
+      }
+    }
+    this.outboundQueuedBytes -= byteCount;
+    if (
+      this.outboundChunkHead >= 128
+      && this.outboundChunkHead * 2 >= this.outboundChunks.length
+    ) {
+      this.outboundChunks = this.outboundChunks.slice(this.outboundChunkHead);
+      this.outboundChunkHead = 0;
+    }
+    if (this.outboundQueuedBytes === 0) {
+      this.outboundChunks = [];
+      this.outboundChunkHead = 0;
+      this.outboundChunkOffset = 0;
+    }
+    return payload;
+  }
+
   flushOutboundAudio() {
-    if (!this.remoteIp || !this.remotePort || this.closed || this.outboundQueue.length < RTP_PACKET_BYTES) return;
-    const payload = this.outboundQueue.subarray(0, RTP_PACKET_BYTES);
-    this.outboundQueue = this.outboundQueue.subarray(RTP_PACKET_BYTES);
+    if (!this.remoteIp || !this.remotePort || this.closed || this.outboundQueuedBytes < RTP_PACKET_BYTES) return;
+    const payload = this.takeOutboundAudio(RTP_PACKET_BYTES);
+    if (!payload) return;
     const packet = buildRtp({
       payload,
       payloadType: 0,
@@ -1968,24 +2129,27 @@ class RtpSession {
   }
 
   clearOutboundAudio(reason = 'interruption') {
-    if (reason === 'interruption') this.outboundInterruptedBytes += this.outboundQueue.length;
-    else this.outboundAbandonedBytes += this.outboundQueue.length;
-    this.outboundQueue = Buffer.alloc(0);
+    if (reason === 'interruption') this.outboundInterruptedBytes += this.outboundQueuedBytes;
+    else this.outboundAbandonedBytes += this.outboundQueuedBytes;
+    this.outboundChunks = [];
+    this.outboundChunkHead = 0;
+    this.outboundChunkOffset = 0;
+    this.outboundQueuedBytes = 0;
   }
 
   async waitForOutboundDrain({ timeoutMs = 12_000 } = {}) {
     const startedAt = Date.now();
-    const initialBytes = this.outboundQueue.length;
+    const initialBytes = this.outboundQueuedBytes;
     const boundedTimeoutMs = Math.min(15_000, Math.max(0, Number(timeoutMs) || 0));
     while (!this.closed
-      && this.outboundQueue.length >= RTP_PACKET_BYTES
+      && this.outboundQueuedBytes >= RTP_PACKET_BYTES
       && Date.now() - startedAt < boundedTimeoutMs) {
       await new Promise((resolve) => setTimeout(resolve, RTP_PACKET_INTERVAL_MS));
     }
     return {
-      drained: this.outboundQueue.length < RTP_PACKET_BYTES,
+      drained: this.outboundQueuedBytes < RTP_PACKET_BYTES,
       initialBytes,
-      remainingBytes: this.outboundQueue.length,
+      remainingBytes: this.outboundQueuedBytes,
       waitedMs: Date.now() - startedAt,
     };
   }
@@ -2000,10 +2164,11 @@ class RtpSession {
       outboundOverflowDroppedBytes: this.outboundOverflowDroppedBytes,
       outboundInterruptedBytes: this.outboundInterruptedBytes,
       outboundAbandonedBytes: this.outboundAbandonedBytes,
-      outboundQueuedBytes: this.outboundQueue.length,
+      outboundQueuedBytes: this.outboundQueuedBytes,
       pacerLateTicks: this.pacerLateTicks,
       pacerMaxLateMs: Math.round(this.pacerMaxLateMs * 100) / 100,
       pacerResyncs: this.pacerResyncs,
+      pacerSevereLateTicks: this.pacerSevereLateTicks,
       lastInboundAt: this.inboundPackets > 0 ? new Date(this.lastInboundAt).toISOString() : null,
     };
   }
@@ -2242,6 +2407,7 @@ class SipCall {
       metadata: {
         direction: this.direction,
         rtp: this.rtp?.stats?.() ?? null,
+        realtime: this.openai?.stats?.() ?? null,
         transcriptTurnCount: this.transcriptSequence,
       },
     }, (err) => {
@@ -2297,6 +2463,10 @@ class SipCall {
       tools: SALES_REALTIME_TOOLS,
       onAudio: (payload) => this.rtp?.sendAudio(payload),
       onEvent: (event) => {
+        const isOutputAudioDelta = (
+          event.type === 'response.output_audio.delta'
+          || event.type === 'response.audio.delta'
+        );
         if (event.type === 'response.output_item.added' && event.itemId) {
           this.currentOutputItem = {
             itemId: event.itemId,
@@ -2305,7 +2475,7 @@ class SipCall {
             generatedAudioBytes: 0,
           };
         }
-        if ((event.type === 'response.output_audio.delta' || event.type === 'response.audio.delta')
+        if (isOutputAudioDelta
           && this.currentOutputItem
           && (!event.itemId || event.itemId === this.currentOutputItem.itemId)) {
           const stats = this.rtp?.stats?.() ?? {};
@@ -2315,6 +2485,7 @@ class SipCall {
           }
           this.currentOutputItem.generatedAudioBytes += Math.max(0, Number(event.audioBytes) || 0);
         }
+        if (isOutputAudioDelta) return;
         if (event.type === 'input_audio_buffer.speech_started') {
           this.callerSpeechObserved = true;
           this.cancelPostGreetingPrompt();
@@ -2408,6 +2579,7 @@ class SipCall {
   end(reason = 'ended', { notifyRemote = false } = {}) {
     if (this.status === 'ended') return;
     const rtpStats = this.rtp?.stats?.() ?? null;
+    const realtimeStats = this.openai?.stats?.() ?? null;
     this.status = 'ended';
     this.endReason = reason;
     clearTimeout(this.ackTimer);
@@ -2422,7 +2594,12 @@ class SipCall {
     try { this.rtp?.close(); } catch { /* ignore */ }
     this.finalizePersistence(reason);
     this.sidecar.onCallEnded(this);
-    this.sidecar.logEvent('call_ended', { callId: this.id, reason, rtp: rtpStats });
+    this.sidecar.logEvent('call_ended', {
+      callId: this.id,
+      reason,
+      rtp: rtpStats,
+      realtime: realtimeStats,
+    });
   }
 }
 
@@ -2612,6 +2789,12 @@ class SipSidecar {
   }
 
   recordOpenAiEvent(call, event) {
+    if (
+      event.type === 'response.output_audio.delta'
+      || event.type === 'response.audio.delta'
+    ) {
+      return;
+    }
     const text = String(event.text || event.message || '');
     const payload = {
       callId: call.id,
@@ -2619,6 +2802,8 @@ class SipSidecar {
       textPresent: Boolean(text),
       textLength: text.length,
     };
+    if (event.responseId) payload.responseId = String(event.responseId).slice(0, 120);
+    if (event.responseStatus) payload.responseStatus = String(event.responseStatus).slice(0, 80);
     if (event.type === 'error' || event.type === 'openai_error') {
       payload.errorPresent = Boolean(text);
       payload.errorCode = String(event.errorCode || '').slice(0, 120);
@@ -4684,6 +4869,13 @@ class SipSidecar {
       maxConcurrentCalls: this.maxConcurrentCalls,
       maxCallDurationSeconds: Math.max(60, asInt(this.pbx.maxCallDurationSeconds, 1800)),
       rtpInactivityTimeoutSeconds: Math.max(15, asInt(this.pbx.rtpInactivityTimeoutSeconds, 45)),
+      audioStability: {
+        revision: 'rtp-stability-v2',
+        outboundBuffer: 'chunk_queue',
+        responseSerialization: true,
+        highFrequencyAudioAuditLogging: false,
+        severePacerLateThresholdMs: RTP_PACER_SEVERE_LATE_MS,
+      },
       transferConfigured: namedRoutes.length > 0 || internalTransfer.enabled,
       managerTransfer: {
         mode: 'assisted_rtp_bridge',

@@ -379,6 +379,28 @@ test('outbound PCMU is paced as one 20 ms RTP packet per flush', () => {
   rtp.close();
 });
 
+test('outbound PCMU chunk queue preserves byte order across OpenAI deltas', () => {
+  const packets = [];
+  const rtp = new RtpSession({
+    localIp: '127.0.0.1',
+    port: 40203,
+    remoteIp: '192.0.2.20',
+    remotePort: 41000,
+  });
+  rtp.socket.send = (packet) => packets.push(packet);
+
+  rtp.sendAudio(Buffer.alloc(100, 0x11));
+  rtp.sendAudio(Buffer.alloc(100, 0x22));
+  rtp.flushOutboundAudio();
+
+  assert.equal(packets.length, 1);
+  assert.deepEqual(packets[0].subarray(12, 112), Buffer.alloc(100, 0x11));
+  assert.deepEqual(packets[0].subarray(112), Buffer.alloc(60, 0x22));
+  assert.equal(rtp.stats().outboundQueuedBytes, 40);
+
+  rtp.close();
+});
+
 test('outbound PCMU buffers a ten second response without dropping audio', () => {
   const rtp = new RtpSession({
     localIp: '127.0.0.1',
@@ -427,10 +449,10 @@ test('outbound PCMU preserves queued audio when the safety buffer overflows', ()
 test('RTP transfer preparation waits for queued speech to finish', async () => {
   const rtp = Object.create(RtpSession.prototype);
   Object.assign(rtp, {
-    outboundQueue: Buffer.alloc(320),
+    outboundQueuedBytes: 320,
     closed: false,
   });
-  setTimeout(() => { rtp.outboundQueue = Buffer.alloc(0); }, 30);
+  setTimeout(() => { rtp.outboundQueuedBytes = 0; }, 30);
 
   const result = await rtp.waitForOutboundDrain({ timeoutMs: 500 });
 
@@ -1609,6 +1631,13 @@ test('configured company context is required and included in direct SIP instruct
     persona: 'Елена',
     personaGender: 'female',
   });
+  assert.deepEqual(health.audioStability, {
+    revision: 'rtp-stability-v2',
+    outboundBuffer: 'chunk_queue',
+    responseSerialization: true,
+    highFrequencyAudioAuditLogging: false,
+    severePacerLateThresholdMs: 100,
+  });
   assert.equal(health.salesScenario.detailedRequestEmail, 'sales@nbr.ru');
   assert.equal(health.salesScenario.documentSubmissionEmail, 'info@nbr.ru');
   assert.equal(health.salesScenario.documentSubmissionMark, 'для Елены');
@@ -1720,6 +1749,99 @@ test('Realtime request errors retain diagnostic metadata without closing the bri
   });
 });
 
+test('Realtime bridge waits for response.done before speaking a tool result', async () => {
+  const sent = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test',
+    model: 'gpt-realtime-2.1',
+    voice: 'marin',
+    instructions: 'test',
+    onToolCall: async () => ({ ok: true }),
+  });
+  bridge.ready = true;
+  bridge.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
+  bridge.handleMessage(JSON.stringify({
+    type: 'response.created',
+    response: { id: 'resp_active', status: 'in_progress' },
+  }));
+
+  await bridge.dispatchToolCall({ call_id: 'tool-1', name: 'lookup', arguments: '{}' });
+
+  assert.equal(sent.some((event) => event.type === 'conversation.item.create'), true);
+  assert.equal(sent.some((event) => event.type === 'response.create'), false);
+  assert.equal(bridge.stats().queuedResponse, true);
+
+  bridge.handleMessage(JSON.stringify({
+    type: 'response.done',
+    response: { id: 'resp_active', status: 'completed' },
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sent.filter((event) => event.type === 'response.create').length, 1);
+  assert.equal(bridge.stats().queuedResponse, false);
+  assert.equal(bridge.stats().completed, 1);
+});
+
+test('Realtime bridge retries a response.create rejected by an automatic VAD response', async () => {
+  const sent = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test',
+    model: 'gpt-realtime-2.1',
+    voice: 'marin',
+    instructions: 'test',
+  });
+  bridge.ready = true;
+  bridge.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
+
+  assert.equal(bridge.requestResponse('Speak after the active response.'), true);
+  const firstCreate = sent.find((event) => event.type === 'response.create');
+  bridge.handleMessage(JSON.stringify({
+    type: 'response.created',
+    response: { id: 'resp_vad', status: 'in_progress' },
+  }));
+  bridge.handleMessage(JSON.stringify({
+    type: 'error',
+    error: {
+      type: 'invalid_request_error',
+      code: 'conversation_already_has_active_response',
+      event_id: firstCreate.event_id,
+      message: 'A response is already active.',
+    },
+  }));
+  bridge.handleMessage(JSON.stringify({
+    type: 'response.done',
+    response: { id: 'resp_vad', status: 'completed' },
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const creates = sent.filter((event) => event.type === 'response.create');
+  assert.equal(creates.length, 2);
+  assert.equal(creates[1].response.instructions, 'Speak after the active response.');
+  assert.equal(bridge.stats().activeResponseConflicts, 1);
+});
+
+test('high-frequency Realtime audio deltas are not synchronously audit-logged', () => {
+  const logged = [];
+  const sidecar = {
+    logEvent: (...args) => logged.push(args),
+  };
+
+  SipSidecar.prototype.recordOpenAiEvent.call(
+    sidecar,
+    { id: 'call-audio' },
+    { type: 'response.output_audio.delta', audioBytes: 160 },
+  );
+  assert.equal(logged.length, 0);
+
+  SipSidecar.prototype.recordOpenAiEvent.call(
+    sidecar,
+    { id: 'call-audio' },
+    { type: 'response.done', responseId: 'resp-1', responseStatus: 'completed' },
+  );
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0][0], 'call_event');
+});
+
 test('Realtime bridge emits conversation truncation for interrupted playback', () => {
   const sent = [];
   const bridge = new OpenAiRealtimeBridge({
@@ -1778,6 +1900,7 @@ test('Realtime tool result can require one deterministic fallback response', asy
       responseInstructions: 'Скажите дословно: «Отправьте детали на sales собака nbr точка ru».',
     }),
   });
+  bridge.ready = true;
   bridge.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
 
   await bridge.dispatchToolCall({ call_id: 'transfer-1', name: 'transfer_to_manager', arguments: '{}' });
