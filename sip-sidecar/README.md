@@ -9,6 +9,9 @@ Responsibilities:
 - place outbound SIP calls through the PBX;
 - bridge RTP G.711 PCMU audio to OpenAI Realtime over WebSocket;
 - run a guided TN VED consultation through the internal CTM-backed API;
+- calculate current M1 passenger-car customs payments and recycling fee;
+- calculate a non-binding freight budget range through the internal
+  freight-rate verification API;
 - perform an assisted manager transfer that keeps the caller with the agent
   until the allowlisted internal extension answers;
 - fail closed when credentials or `OPENAI_API_KEY` are missing.
@@ -26,9 +29,55 @@ The TN VED tool is configured in the PBX profile:
 ```json
 {
   "tnvedConsultationEnabled": true,
+  "vehicleCustomsEnabled": true,
   "tnvedApiBase": "http://10.0.200.101:8100"
 }
 ```
+
+The freight calculator is a separate loopback-only service:
+
+```json
+{
+  "freightRateCalculationEnabled": true,
+  "freightRateApiBase": "http://127.0.0.1:8101"
+}
+```
+
+Nevsky Broker service-fee rates are stored next to the sidecar in
+`nbr-service-rates.json` and can be overridden in the PBX profile:
+
+```json
+{
+  "nbrServiceRatesPath": "C:\\codex_tools\\agenticmail\\sip-sidecar\\nbr-service-rates.json"
+}
+```
+
+`calculate_nbr_service_cost` uses only the configured C01-C14 base maximum
+rates. It can calculate the tiered container customs scenario, the sea-import
+second-and-later-container row, and explicit service lines for inspections,
+sampling, port forwarding, container delivery and terminal handling. The
+spoken result is a service-fee budget indication only; state customs payments,
+duties, VAT, excise, recycling fee, freight and third-party costs stay
+separate unless a returned line explicitly covers that scope.
+
+`calculate_freight_estimate` collects one missing shipment field at a time.
+It reads normalized internal quote records, performs a current public web
+comparison, rereads the internal snapshot, independently rechecks every used
+web source, and recomputes unit-based totals locally. A number reaches the
+Realtime model only when the service and sidecar both accept
+`VERIFIED_FOR_SPEECH`. Any failed or incomplete check removes all amount and
+currency fields from the tool result. Elena then asks the caller to send all
+documents to `info@nbr.ru` with the mark `для Елены` and states that the
+company will contact the caller after document analysis.
+
+The spoken result is a budget indication only. It does not accept a rate,
+confirm equipment or space, select a route, place a booking, or create another
+commercial commitment.
+
+TNVED POST bodies use the API's masked gzip-plus-Base64 transport mode with a
+SHA-256 integrity check so Russian UTF-8 content is preserved across the routed
+network between the voice host and the API host. This transport layer is not
+used as authentication or encryption.
 
 After the caller finishes the first product description, Elena offers the
 consultation once. The tool asks one missing question at a time and uses
@@ -46,6 +95,16 @@ audit, but they do not block the voice advisory response. Tariff values must
 never be supplied from model memory. The sum is described as "duty plus VAT",
 not as all customs payments, because customs fees, excise, preferences and
 trade-remedy duties are outside this calculator.
+
+Passenger-car customs calculation uses the separate
+`calculate_vehicle_customs` tool. It keeps personal import, confirmed EAEU
+goods status, temporary import, and a prospective release for sale separate.
+It returns the unified personal-use payment or the applicable
+duty/excise/VAT calculation, customs fee, recycling fee, known additional
+expenses, warnings, source trace, and calculation hash. The complete rate
+matrix is maintained by the TN VED API service; the voice model must not
+calculate or recall the values itself. Category `N1`, motorcycles, buses,
+trucks, and special-purpose vehicles are routed to a specialist.
 
 An assisted transfer is configured in the local PBX profile. The sidecar
 dials the internal extension as a second SIP leg, switches RTP only after a

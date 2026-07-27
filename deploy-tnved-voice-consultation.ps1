@@ -45,7 +45,7 @@ try {
     if (!(Test-Path -LiteralPath $ConfigPath)) {
       throw "Remote PBX config was not found: $ConfigPath"
     }
-    foreach ($name in @("sip-sidecar.mjs", "sales-call-scenario.json", "README.md")) {
+    foreach ($name in @("sip-sidecar.mjs", "sales-call-scenario.json", "README.md", "nbr-service-rates.json")) {
       $path = Join-Path $SidecarDir $name
       if (Test-Path -LiteralPath $path) {
         Copy-Item -LiteralPath $path -Destination "$path.tnved-$Stamp.bak" -Force
@@ -54,7 +54,7 @@ try {
     Copy-Item -LiteralPath $ConfigPath -Destination "$ConfigPath.tnved-$Stamp.bak" -Force
   } -ArgumentList $remoteSidecar, $remoteConfig, $stamp
 
-  foreach ($name in @("sip-sidecar.mjs", "sales-call-scenario.json", "README.md")) {
+  foreach ($name in @("sip-sidecar.mjs", "sales-call-scenario.json", "README.md", "nbr-service-rates.json")) {
     Copy-Item `
       -LiteralPath (Join-Path $PSScriptRoot "sip-sidecar\$name") `
       -Destination (Join-Path $remoteSidecar $name) `
@@ -63,11 +63,13 @@ try {
   }
 
   $result = Invoke-Command -Session $session -ScriptBlock {
-    param($ConfigPath, $ApiBase, $ServiceTask)
+    param($ConfigPath, $ApiBase, $ServiceTask, $SidecarDir)
     $ErrorActionPreference = "Stop"
     $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     $config | Add-Member -NotePropertyName tnvedApiBase -NotePropertyValue $ApiBase.TrimEnd("/") -Force
     $config | Add-Member -NotePropertyName tnvedConsultationEnabled -NotePropertyValue $true -Force
+    $config | Add-Member -NotePropertyName vehicleCustomsEnabled -NotePropertyValue $true -Force
+    $config | Add-Member -NotePropertyName nbrServiceRatesPath -NotePropertyValue (Join-Path $SidecarDir "nbr-service-rates.json") -Force
     $json = $config | ConvertTo-Json -Depth 20
     [IO.File]::WriteAllText($ConfigPath, $json, [Text.UTF8Encoding]::new($false))
 
@@ -79,6 +81,9 @@ try {
     $tnvedHealth = Invoke-RestMethod -Uri "$($ApiBase.TrimEnd('/'))/tnved/health" -TimeoutSec 15
     if ($tnvedHealth.status -ne "ok" -or $tnvedHealth.preflight.ok -ne $true) {
       throw "TNVED API health is not ok from the voice host"
+    }
+    if ($tnvedHealth.vehicle_customs.ready -ne $true) {
+      throw "Vehicle customs calculator is not ready on the TNVED API"
     }
 
     Stop-ScheduledTask -TaskName $ServiceTask -ErrorAction SilentlyContinue
@@ -96,6 +101,12 @@ try {
     if ($null -eq $sidecarHealth -or $sidecarHealth.status -ne "ok") {
       throw "SIP sidecar did not return healthy after restart"
     }
+    if ($sidecarHealth.tnvedConsultation.bodyEncoding -ne "masked-gzip-base64-v1") {
+      throw "TNVED request transport is not configured for masked-gzip-base64-v1"
+    }
+    if ($sidecarHealth.vehicleCustomsCalculation.enabled -ne $true) {
+      throw "Vehicle customs calculation is not enabled"
+    }
 
     [ordered]@{
       computer = $env:COMPUTERNAME
@@ -104,11 +115,13 @@ try {
       sidecar_status = [string]$sidecarHealth.status
       registered = [bool]$sidecarHealth.registered
       tnved_enabled = [bool]$sidecarHealth.tnvedConsultation.enabled
+      tnved_body_encoding = [string]$sidecarHealth.tnvedConsultation.bodyEncoding
+      vehicle_customs_enabled = [bool]$sidecarHealth.vehicleCustomsCalculation.enabled
       tnved_api = [string]$sidecarHealth.tnvedConsultation.apiBase
       tnved_kb = [string]$tnvedHealth.preflight.kb_version
       tnved_noise_ratio = [double]$tnvedHealth.preflight.retrieval_noise_ratio
     }
-  } -ArgumentList $remoteConfig, $TnvedApiBase, $TaskName
+  } -ArgumentList $remoteConfig, $TnvedApiBase, $TaskName, $remoteSidecar
 
   $result | ConvertTo-Json -Depth 8
 }

@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedSidecarHash,
     [Parameter(Mandatory = $true)][string]$ExpectedScenarioHash,
     [Parameter(Mandatory = $true)][string]$ExpectedReadmeHash,
+    [Parameter(Mandatory = $true)][string]$ExpectedServiceRatesHash,
+    [int]$ExpectedScenarioVersion = 17,
     [string]$TnvedApiBase = "http://10.0.200.101:8100",
     [string]$TaskName = "AgenticMail-SIP-Sidecar-Service",
     [string]$WatchdogTaskName = "AgenticMail-SIP-Sidecar-Watchdog",
@@ -19,12 +21,16 @@ $expected = @{
     "sip-sidecar.mjs" = $ExpectedSidecarHash
     "sales-call-scenario.json" = $ExpectedScenarioHash
     "README.md" = $ExpectedReadmeHash
+    "nbr-service-rates.json" = $ExpectedServiceRatesHash
 }
 $apiBase = $TnvedApiBase.TrimEnd("/")
 
 $sourceHealth = Invoke-RestMethod -Uri "$apiBase/tnved/health" -TimeoutSec 20
 if ($sourceHealth.status -ne "ok" -or $sourceHealth.preflight.ok -ne $true) {
     throw "TNVED API is not healthy from the voice host"
+}
+if ($sourceHealth.vehicle_customs.ready -ne $true) {
+    throw "Vehicle customs calculator is not ready on the TNVED API"
 }
 
 $currentHealth = Invoke-RestMethod -Uri "http://127.0.0.1:3899/health" -TimeoutSec 10
@@ -94,6 +100,8 @@ Copy-Item -LiteralPath $ConfigPath -Destination "$ConfigPath.tnved-$Stamp.bak" -
 $config = Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json
 $config | Add-Member -NotePropertyName tnvedApiBase -NotePropertyValue $apiBase -Force
 $config | Add-Member -NotePropertyName tnvedConsultationEnabled -NotePropertyValue $true -Force
+$config | Add-Member -NotePropertyName vehicleCustomsEnabled -NotePropertyValue $true -Force
+$config | Add-Member -NotePropertyName nbrServiceRatesPath -NotePropertyValue (Join-Path $TargetRoot "nbr-service-rates.json") -Force
 $configJson = $config | ConvertTo-Json -Depth 100
 [IO.File]::WriteAllText($ConfigPath, $configJson, [Text.UTF8Encoding]::new($false))
 
@@ -122,14 +130,26 @@ do {
 if (!$health -or $health.status -ne "ok" -or $health.registered -ne $true) {
     throw "Sidecar failed health/registration: $lastHealthError"
 }
-if ([int]$health.salesScenario.version -ne 13) {
-    throw "Expected scenario v13, got $($health.salesScenario.version)"
+if ([int]$health.salesScenario.version -ne $ExpectedScenarioVersion) {
+    throw "Expected scenario v$ExpectedScenarioVersion, got $($health.salesScenario.version)"
 }
 if ($health.tnvedConsultation.enabled -ne $true) {
     throw "TNVED consultation is not enabled"
 }
 if ($health.tnvedConsultation.apiBase -ne $apiBase) {
     throw "Unexpected TNVED API base"
+}
+if ($health.tnvedConsultation.bodyEncoding -ne "masked-gzip-base64-v1") {
+    throw "TNVED request transport is not configured for masked-gzip-base64-v1"
+}
+if ($health.vehicleCustomsCalculation.enabled -ne $true) {
+    throw "Vehicle customs calculation is not enabled"
+}
+if ($health.nbrServiceCostCalculation.configured -ne $true) {
+    throw "Nevsky Broker service-rate table is not configured"
+}
+if ([int]$health.nbrServiceCostCalculation.rateCount -ne 14) {
+    throw "Expected 14 Nevsky Broker service rates, got $($health.nbrServiceCostCalculation.rateCount)"
 }
 if (@($health.missing).Count -ne 0) {
     throw "Sidecar reports missing dependencies: $($health.missing -join ', ')"
@@ -146,6 +166,11 @@ $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
     scenario_id = [string]$health.salesScenario.id
     scenario_version = [int]$health.salesScenario.version
     tnved_enabled = [bool]$health.tnvedConsultation.enabled
+    tnved_body_encoding = [string]$health.tnvedConsultation.bodyEncoding
+    vehicle_customs_enabled = [bool]$health.vehicleCustomsCalculation.enabled
+    nbr_service_rates_configured = [bool]$health.nbrServiceCostCalculation.configured
+    nbr_service_rates_version = [string]$health.nbrServiceCostCalculation.version
+    nbr_service_rates_hash = [string]$health.nbrServiceCostCalculation.sourceHash
     tnved_api = [string]$health.tnvedConsultation.apiBase
     tnved_kb = [string]$sourceHealth.preflight.kb_version
     retrieval_noise_ratio = [double]$sourceHealth.preflight.retrieval_noise_ratio

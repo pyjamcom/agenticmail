@@ -373,10 +373,26 @@ function humanCallEndReason(value: unknown): string {
     media_failed: 'Не удалось установить аудиосоединение',
     persistence_failed: 'Не удалось сохранить данные разговора',
     dial_failed: 'Не удалось установить телефонное соединение',
+    remote_cancel: 'Вызов отменен до ответа на линии 199',
+    remote_cancel_completed_elsewhere: 'Вызов принят другим участником группы до ответа на линии 199',
     cancelled: 'Звонок был отменен',
     call_ended: 'Разговор завершен',
   };
   return reasons[requestString(value)] || 'Разговор завершен';
+}
+
+function emptySipDialogNotice(endReason: unknown): string {
+  const reason = requestString(endReason);
+  if (reason === 'remote_cancel_completed_elsewhere') {
+    return 'Аудиосоединение с линией 199 не устанавливалось: вызов был принят другим участником группы.';
+  }
+  if (reason === 'remote_cancel' || reason === 'cancelled') {
+    return 'Аудиосоединение с линией 199 не устанавливалось: вызов был отменен до ответа.';
+  }
+  if (reason === 'remote_bye') {
+    return 'Звонящий завершил вызов до появления распознаваемой речи.';
+  }
+  return 'Распознаваемая речь в этом вызове не поступила.';
 }
 
 function escapeHtml(value: string): string {
@@ -404,6 +420,7 @@ export function formatSipTranscriptEmail(
   const direction = requestString(mission.metadata.direction) === 'outbound' ? 'Исходящий' : 'Входящий';
   const endedAt = requestString(mission.metadata.endedAt) || mission.updatedAt;
   const endReason = humanCallEndReason(mission.metadata.endReason);
+  const emptyDialogNotice = emptySipDialogNotice(mission.metadata.endReason);
   const phone = requestString(callerPhone) || 'Не определен';
   const dialogEntries = mission.transcript
     .filter((entry) => entry.source === 'provider' || entry.source === 'agent' || entry.source === 'operator')
@@ -438,7 +455,7 @@ export function formatSipTranscriptEmail(
     `Результат: ${endReason}`,
     '',
     'Диалог:',
-    ...(dialog.length > 0 ? dialog : ['Распознанные реплики отсутствуют.']),
+    ...(dialog.length > 0 ? dialog : [emptyDialogNotice]),
   ];
   const htmlBody = [
     '<html><body style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;line-height:1.45;color:#202124">',
@@ -451,7 +468,7 @@ export function formatSipTranscriptEmail(
     `<tr><td style="padding:2px 12px 2px 0;font-weight:600">Результат:</td><td>${escapeHtml(endReason)}</td></tr>`,
     '</table>',
     '<h2 style="font-size:16px;margin:0 0 10px 0">Диалог</h2>',
-    ...(htmlDialog.length > 0 ? htmlDialog : ['<p>Распознанные реплики отсутствуют.</p>']),
+    ...(htmlDialog.length > 0 ? htmlDialog : [`<p>${escapeHtml(emptyDialogNotice)}</p>`]),
     '</body></html>',
   ].join('');
   return { subject, textBody: lines.join('\n'), htmlBody };
@@ -886,7 +903,7 @@ export function createPhoneRoutes(
                next_attempt_at AS nextAttemptAt, created_at AS createdAt
         FROM sip_transcript_email_delivery
         WHERE status IN ('pending', 'failed')
-          AND COALESCE(next_attempt_at, datetime('now')) <= datetime('now')
+          AND datetime(replace(replace(COALESCE(next_attempt_at, datetime('now')), 'T', ' '), 'Z', '')) <= datetime('now')
         ORDER BY created_at ASC
         LIMIT ?
       `).all(limit) as Array<{
@@ -987,7 +1004,7 @@ export function createPhoneRoutes(
                next_attempt_at AS nextAttemptAt, created_at AS createdAt, updated_at AS updatedAt
         FROM sip_knowledge_archive_delivery
         WHERE status IN ('pending', 'failed')
-          AND COALESCE(next_attempt_at, datetime('now')) <= datetime('now')
+          AND datetime(replace(replace(COALESCE(next_attempt_at, datetime('now')), 'T', ' '), 'Z', '')) <= datetime('now')
         ORDER BY created_at ASC
         LIMIT ?
       `).all(limit);
@@ -1130,7 +1147,9 @@ export function createPhoneRoutes(
   router.post('/calls/sip/:id/finalize', requireMaster, (req: Request, res: Response) => {
     try {
       const requestedStatus = requestString(req.body?.status);
-      const status: PhoneMissionState = requestedStatus === 'failed' ? 'failed' : 'completed';
+      const status: PhoneMissionState = requestedStatus === 'failed'
+        ? 'failed'
+        : requestedStatus === 'cancelled' ? 'cancelled' : 'completed';
       const reason = requestString(req.body?.reason).slice(0, 500) || 'call_ended';
       const metadata = req.body?.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
         ? req.body.metadata as Record<string, unknown>

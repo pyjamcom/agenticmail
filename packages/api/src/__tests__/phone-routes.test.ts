@@ -400,6 +400,45 @@ describe('phone routes', () => {
     db.close();
   });
 
+  it('reports a pre-answer SIP cancellation without implying a transcription failure', async () => {
+    const db = createDb();
+    const baseUrl = await listen(createSipPhoneApp(db));
+    const registered = await request(baseUrl, '/calls/sip/inbound', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent: 'ralf@example.com',
+        providerCallId: 'sha256:cancelled-route-test',
+        from: 'sha256:caller',
+        to: 'extension:redacted',
+        callerContact: '+12025550999',
+      }),
+    });
+    const missionId = registered.body.mission.id;
+
+    const finalized = await request(baseUrl, `/calls/sip/${missionId}/finalize`, {
+      method: 'POST',
+      body: JSON.stringify({
+        status: 'cancelled',
+        reason: 'remote_cancel',
+        metadata: {
+          direction: 'inbound',
+          rtp: { inboundPackets: 0, outboundPackets: 0 },
+          transcriptTurnCount: 0,
+        },
+      }),
+    });
+    expect(finalized.status).toBe(200);
+    expect(finalized.body.mission.status).toBe('cancelled');
+
+    const pending = await request(baseUrl, '/calls/sip/transcript-emails/pending');
+    expect(pending.body.emails).toHaveLength(1);
+    expect(pending.body.emails[0].textBody)
+      .toContain('Результат: Вызов отменен до ответа на линии 199');
+    expect(pending.body.emails[0].textBody)
+      .toContain('Аудиосоединение с линией 199 не устанавливалось');
+    expect(pending.body.emails[0].textBody).not.toContain('Распознанные реплики отсутствуют');
+  });
+
   it('rejects a transport setup with a weak webhook secret', async () => {
     const db = createDb();
     const baseUrl = await listen(createPhoneApp(db));
