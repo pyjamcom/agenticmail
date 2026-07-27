@@ -364,6 +364,94 @@ test('post-greeting silence prompt is one-shot and cancelled by caller speech', 
   assert.equal(prompts.length, 1);
 });
 
+test('short playback echo does not cancel or clear Elena audio', () => {
+  const actions = [];
+  const call = Object.create(SipCall.prototype);
+  Object.assign(call, {
+    id: 'sip-short-echo',
+    status: 'media_active',
+    managerTransfer: null,
+    postGreetingPromptTimer: null,
+    postGreetingPromptScheduled: false,
+    bargeInTimer: null,
+    callerTurnResponseTimer: null,
+    callerTurnAwaitingResponse: false,
+    currentOutputItem: {
+      itemId: 'assistant-item',
+      contentIndex: 0,
+      outboundStreamStart: 0,
+      generatedAudioBytes: 3_200,
+    },
+    lastAssistantTranscript: 'Здравствуйте Невский Брокер меня зовут Елена',
+    rtp: {
+      stats: () => ({ outboundQueuedBytes: 640, outboundBytes: 1_600 }),
+      clearOutboundAudio: () => actions.push('clear'),
+    },
+    openai: {
+      autoResponseEnabled: true,
+      stats: () => ({ activeResponse: true }),
+      cancelResponse: () => { actions.push('cancel'); return true; },
+      truncateAudio: () => actions.push('truncate'),
+      requestResponse: () => { actions.push('respond'); return true; },
+    },
+    sidecar: { logEvent: (type) => actions.push(type) },
+  });
+
+  call.beginCallerSpeech();
+  call.finishCallerSpeech();
+  call.handleCallerTranscript('Невский Брокер меня зовут Елена');
+
+  assert.equal(actions.includes('clear'), false);
+  assert.equal(actions.includes('cancel'), false);
+  assert.equal(actions.includes('respond'), false);
+  assert.equal(actions.includes('call_playback_echo_ignored'), true);
+});
+
+test('sustained caller speech cancels playback once and creates one response after transcription', () => {
+  const actions = [];
+  const call = Object.create(SipCall.prototype);
+  Object.assign(call, {
+    id: 'sip-confirmed-barge-in',
+    status: 'media_active',
+    managerTransfer: null,
+    postGreetingPromptTimer: null,
+    postGreetingPromptScheduled: false,
+    bargeInTimer: null,
+    callerTurnResponseTimer: null,
+    callerTurnAwaitingResponse: false,
+    currentOutputItem: {
+      itemId: 'assistant-item',
+      contentIndex: 0,
+      outboundStreamStart: 0,
+      generatedAudioBytes: 3_200,
+    },
+    lastAssistantTranscript: 'Расскажите пожалуйста с каким вопросом вы обращаетесь',
+    rtp: {
+      stats: () => ({ outboundQueuedBytes: 640, outboundBytes: 1_600 }),
+      clearOutboundAudio: (reason) => actions.push(`clear:${reason}`),
+    },
+    openai: {
+      autoResponseEnabled: true,
+      stats: () => ({ activeResponse: true }),
+      cancelResponse: () => { actions.push('cancel'); return true; },
+      truncateAudio: (_itemId, _contentIndex, audioEndMs) => actions.push(`truncate:${audioEndMs}`),
+      requestResponse: () => { actions.push('respond'); return true; },
+    },
+    sidecar: { logEvent: (type) => actions.push(type) },
+  });
+
+  call.beginCallerSpeech();
+  assert.equal(call.confirmCallerBargeIn(), true);
+  call.finishCallerSpeech();
+  assert.equal(call.handleCallerTranscript('Мне нужна доставка груза из Китая'), true);
+
+  assert.equal(actions.filter((action) => action === 'cancel').length, 1);
+  assert.equal(actions.filter((action) => action === 'clear:interruption').length, 1);
+  assert.equal(actions.filter((action) => action.startsWith('truncate:')).length, 1);
+  assert.equal(actions.filter((action) => action === 'respond').length, 1);
+  assert.equal(actions.includes('call_barge_in_confirmed'), true);
+});
+
 test('outbound PCMU is paced as one 20 ms RTP packet per flush', () => {
   const packets = [];
   const rtp = new RtpSession({
@@ -1639,9 +1727,14 @@ test('configured company context is required and included in direct SIP instruct
     personaGender: 'female',
   });
   assert.deepEqual(health.audioStability, {
-    revision: 'rtp-stability-v2',
+    revision: 'rtp-stability-v3',
     outboundBuffer: 'chunk_queue',
     responseSerialization: true,
+    turnResponseMode: 'manual_after_transcription',
+    serverAutoInterruption: false,
+    vadThreshold: 0.68,
+    vadSilenceMs: 600,
+    bargeInConfirmationMs: 280,
     highFrequencyAudioAuditLogging: false,
     severePacerLateThresholdMs: 100,
   });
@@ -1870,6 +1963,22 @@ test('Realtime bridge emits conversation truncation for interrupted playback', (
   assert.equal(bridge.setAutoResponseEnabled(false), true);
   assert.equal(sent[2].type, 'session.update');
   assert.equal(sent[2].session.audio.input.turn_detection.create_response, false);
+  assert.equal(sent[2].session.audio.input.turn_detection.interrupt_response, false);
+  assert.equal(bridge.stats().autoResponseEnabled, false);
+});
+
+test('Realtime bridge requests cancellation only for an active response', () => {
+  const sent = [];
+  const bridge = new OpenAiRealtimeBridge({
+    apiKey: 'test', model: 'gpt-realtime-2.1', voice: 'marin', instructions: 'test',
+  });
+  bridge.ws = { readyState: 1, send: (value) => sent.push(JSON.parse(value)) };
+
+  assert.equal(bridge.cancelResponse(), false);
+  bridge.activeResponseId = 'response-1';
+  assert.equal(bridge.cancelResponse(), true);
+  assert.deepEqual(sent[0], { type: 'response.cancel' });
+  assert.equal(bridge.stats().cancellationsRequested, 1);
 });
 
 test('playback truncation is bounded by generated audio duration', () => {

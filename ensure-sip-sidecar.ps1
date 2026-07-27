@@ -1,9 +1,10 @@
 param(
   [string]$HealthUri = "http://127.0.0.1:3899/health",
   [string]$ApiHealthUri = "http://127.0.0.1:3829/api/agenticmail/health",
+  [string]$ApiLiveUri = "http://127.0.0.1:3829/api/agenticmail/health/live",
   [string]$ExchangeHealthUri = "http://127.0.0.1:3901/health",
   [string]$TnvedHealthUri = "http://127.0.0.1:8111/tnved/health",
-  [int]$TimeoutSeconds = 5,
+  [int]$TimeoutSeconds = 10,
   [string]$ServiceProfile = $env:AGENTICMAIL_SERVICE_PROFILE
 )
 
@@ -105,6 +106,26 @@ function Wait-LocalHealth {
   throw "Timed out waiting for local service health: $Uri"
 }
 
+function Get-ActiveSipCallCount {
+  try {
+    $value = Get-LocalJson -Uri $HealthUri -TimeoutSeconds $TimeoutSeconds
+    return [int]$value.activeCalls
+  } catch {
+    return 0
+  }
+}
+
+function Test-RecoveryAllowed {
+  param([string]$Reason)
+  $activeCalls = Get-ActiveSipCallCount
+  if ($activeCalls -le 0) { return $true }
+  Write-WatchdogEvent "recovery_deferred" @{
+    reason = $Reason
+    activeCalls = $activeCalls
+  }
+  return $false
+}
+
 try {
   $HasMutex = $Mutex.WaitOne(0)
   if (-not $HasMutex) {
@@ -164,6 +185,11 @@ try {
     exit 0
   }
 
+  if (-not (Test-RecoveryAllowed -Reason "active_call_in_progress")) {
+    [pscustomobject]@{ status = "deferred"; reason = "active_call" } | ConvertTo-Json
+    exit 0
+  }
+
   $tnvedHealth = $null
   $tnvedProcess = Get-TnvedRuntimeProcess
   try {
@@ -204,6 +230,32 @@ try {
   }
 
   $apiRestarted = $false
+  $apiLive = $null
+  try {
+    $apiLive = Get-LocalJson -Uri $ApiLiveUri -TimeoutSeconds $TimeoutSeconds
+  } catch {
+    $apiLive = $null
+  }
+  $apiProcessReady = $apiLive `
+    -and $apiLive.status -eq "ok" `
+    -and $apiLive.services.api -eq "ok"
+  if (-not $apiProcessReady) {
+    if (-not (Test-RecoveryAllowed -Reason "api_liveness_unreachable")) {
+      [pscustomobject]@{ status = "deferred"; reason = "active_call" } | ConvertTo-Json
+      exit 0
+    }
+    Write-WatchdogEvent "api_restart_started" @{ reason = "api_liveness_unreachable" }
+    if (-not (Restart-ManagedTask "AgenticMail-API-Service")) {
+      $null = & $StartLocalScript
+    }
+    $apiLive = Wait-LocalHealth -Uri $ApiLiveUri -WaitSeconds 45 -Ready {
+      param($value)
+      $value.status -eq "ok" -and $value.services.api -eq "ok"
+    }
+    $apiRestarted = $true
+    Write-WatchdogEvent "api_restart_succeeded" @{ reason = "api_liveness_unreachable" }
+  }
+
   $apiHealth = $null
   try {
     $apiHealth = Get-LocalJson -Uri $ApiHealthUri -TimeoutSeconds $TimeoutSeconds
@@ -215,24 +267,21 @@ try {
     -and $apiHealth.services.api -eq "ok" `
     -and $apiHealth.services.stalwart -eq "ok"
   if (-not $apiReady) {
-    Write-WatchdogEvent "api_restart_started" @{
-      reason = if ($apiHealth) { "api_health_blocked" } else { "api_health_unreachable" }
+    if (-not (Test-RecoveryAllowed -Reason "stalwart_health_unavailable")) {
+      [pscustomobject]@{ status = "deferred"; reason = "active_call" } | ConvertTo-Json
+      exit 0
     }
-    $managedApi = Get-ScheduledTask -TaskName "AgenticMail-API-Service" -ErrorAction SilentlyContinue
-    $managedStalwart = Get-ScheduledTask -TaskName "AgenticMail-Stalwart-Service" -ErrorAction SilentlyContinue
-    if ($managedApi -and $managedStalwart) {
-      $null = Restart-ManagedTask "AgenticMail-Stalwart-Service"
-      Start-Sleep -Seconds 2
-      $null = Restart-ManagedTask "AgenticMail-API-Service"
-    } else {
+    Write-WatchdogEvent "stalwart_restart_started" @{
+      reason = if ($apiHealth) { "stalwart_health_degraded" } else { "api_dependency_health_timeout" }
+    }
+    if (-not (Restart-ManagedTask "AgenticMail-Stalwart-Service")) {
       $null = & $StartLocalScript
     }
     $apiHealth = Wait-LocalHealth -Uri $ApiHealthUri -WaitSeconds 45 -Ready {
       param($value)
       $value.status -eq "ok" -and $value.services.api -eq "ok" -and $value.services.stalwart -eq "ok"
     }
-    $apiRestarted = $true
-    Write-WatchdogEvent "api_restart_succeeded" @{}
+    Write-WatchdogEvent "stalwart_restart_succeeded" @{}
   }
 
   $exchangeRestarted = $false
@@ -243,6 +292,10 @@ try {
     $exchangeHealth = $null
   }
   if (-not $exchangeHealth -or $exchangeHealth.status -ne "ok") {
+    if (-not (Test-RecoveryAllowed -Reason "exchange_health_unavailable")) {
+      [pscustomobject]@{ status = "deferred"; reason = "active_call" } | ConvertTo-Json
+      exit 0
+    }
     Write-WatchdogEvent "exchange_restart_started" @{
       reason = if ($exchangeHealth) { "exchange_health_blocked" } else { "exchange_health_unreachable" }
     }
@@ -264,7 +317,18 @@ try {
     $health = $null
   }
 
-  if (-not $apiRestarted -and $health -and $health.status -eq "ok" -and $health.registered -eq $true `
+  if ($apiRestarted -and (-not $health -or $health.transcriptPersistence.ready -ne $true)) {
+    try {
+      $health = Wait-LocalHealth -Uri $HealthUri -WaitSeconds 35 -Ready {
+        param($value)
+        $value.status -eq "ok" -and $value.registered -eq $true -and $value.transcriptPersistence.ready -eq $true
+      }
+    } catch {
+      $health = $null
+    }
+  }
+
+  if ($health -and $health.status -eq "ok" -and $health.registered -eq $true `
       -and $health.transcriptPersistence.ready -eq $true) {
     [pscustomobject]@{
       status = if ($exchangeRestarted) { "exchange_restarted" } else { "ok" }
@@ -275,9 +339,7 @@ try {
     exit 0
   }
 
-  $reason = if ($apiRestarted) {
-    "api_restarted"
-  } elseif (-not $health) {
+  $reason = if (-not $health) {
     "health_unreachable"
   } elseif ($health.registered -ne $true) {
     "registration_missing"
@@ -285,6 +347,10 @@ try {
     "persistence_unavailable"
   } else {
     "health_blocked"
+  }
+  if (-not (Test-RecoveryAllowed -Reason "sip_$reason")) {
+    [pscustomobject]@{ status = "deferred"; reason = "active_call" } | ConvertTo-Json
+    exit 0
   }
   Write-WatchdogEvent "restart_started" @{ reason = $reason }
 

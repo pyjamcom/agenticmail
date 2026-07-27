@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getMediaCapabilities, type StalwartAdmin } from '@agenticmail/core';
+import type { StalwartAdmin } from '@agenticmail/core';
 
 const PKG_VERSION = (() => {
   try {
@@ -107,26 +107,30 @@ const ABOUT = {
 };
 
 /**
- * Compact media capability summary for the /health response. Never
- * throws — binary detection is fully wrapped in @agenticmail/core, so
- * a probe failure simply reports the binary as unavailable.
+ * Health must not execute external media binaries. Accurate detection stays
+ * available through the dedicated media_capabilities tool.
  */
 function mediaCapabilitySummary(): {
-  ready: boolean;
+  ready: false;
   binaries: Record<string, boolean>;
+  probeDeferred: true;
 } {
-  try {
-    const report = getMediaCapabilities();
-    const binaries: Record<string, boolean> = {};
-    for (const cap of report.capabilities) binaries[cap.binary] = cap.available;
-    return { ready: report.ready, binaries };
-  } catch {
-    return { ready: false, binaries: {} };
-  }
+  return { ready: false, binaries: {}, probeDeferred: true };
 }
 
 export function createHealthRoutes(stalwart: StalwartAdmin): Router {
   const router = Router();
+
+  // Process liveness must stay independent of Stalwart and media probes so the
+  // watchdog never restarts a healthy API because a downstream check is slow.
+  router.get('/health/live', (_req, res) => {
+    res.json({
+      status: 'ok',
+      version: ABOUT.version,
+      services: { api: 'ok' },
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   router.get('/health', async (_req, res) => {
     try {
@@ -139,11 +143,7 @@ export function createHealthRoutes(stalwart: StalwartAdmin): Router {
           api: 'ok',
           stalwart: stalwartOk ? 'ok' : 'unreachable',
         },
-        // Media is an OPT-IN capability — the toolset works only when the
-        // local binaries are installed. Surfacing the detection here lets
-        // an operator/agent see at a glance what media ops are available
-        // without it ever affecting the overall health status (a missing
-        // ffmpeg is not a degraded mail server).
+        // Media readiness is intentionally deferred to keep health non-blocking.
         media: mediaCapabilitySummary(),
         timestamp: new Date().toISOString(),
       });

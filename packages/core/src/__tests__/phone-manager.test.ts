@@ -114,6 +114,56 @@ describe('PhoneManager', () => {
     expect(asyncRead.transcript.map((entry) => entry.text)).toContain('I need a freight quotation.');
   });
 
+  it('serializes asynchronous live transcript encryption without losing concurrent turns', async () => {
+    const db = createDb();
+    dbs.push(db);
+    const manager = new PhoneManager(db, 'mk_test_key');
+    const mission = manager.registerInboundSipMission('agent1', {
+      providerCallId: 'sha256:async-live-transcript',
+      from: 'sha256:caller',
+      to: 'extension:redacted',
+    });
+    const first = {
+      at: '2026-07-10T10:00:01.000Z',
+      source: 'provider' as const,
+      text: 'First live turn.',
+      metadata: { eventId: 'async-turn-1' },
+    };
+    const second = {
+      at: '2026-07-10T10:00:02.000Z',
+      source: 'agent' as const,
+      text: 'Second live turn.',
+      metadata: { eventId: 'async-turn-2' },
+    };
+
+    const [, , , intakeResult] = await Promise.all([
+      manager.appendSipTranscriptEntriesAsync(mission.id, [first]),
+      manager.appendSipTranscriptEntriesAsync(mission.id, [second]),
+      manager.appendSipTranscriptEntriesAsync(mission.id, [first]),
+      manager.updateSipSalesIntakeAsync(mission.id, {
+        requestType: 'service',
+        requestDescription: 'Concurrent intake update.',
+      }),
+    ]);
+
+    const saved = await manager.getSipMissionAsync(mission.id);
+    expect(saved.transcript.filter((entry) => entry.metadata?.eventId === 'async-turn-1')).toHaveLength(1);
+    expect(saved.transcript.filter((entry) => entry.metadata?.eventId === 'async-turn-2')).toHaveLength(1);
+    expect(saved.transcript.map((entry) => entry.text).slice(-2)).toEqual([
+      'First live turn.',
+      'Second live turn.',
+    ]);
+    const raw = db.prepare('SELECT transcript_json FROM phone_missions WHERE id = ?')
+      .get(mission.id) as { transcript_json: string };
+    expect(raw.transcript_json).not.toContain('First live turn.');
+    expect(raw.transcript_json).not.toContain('Second live turn.');
+    expect(intakeResult.mission.transcript).toEqual([]);
+    expect(manager.getSipMissionSnapshot(mission.id).metadata.salesIntake).toMatchObject({
+      requestType: 'service',
+      requestDescription: 'Concurrent intake update.',
+    });
+  });
+
   it('encrypts extracted SIP contacts and keeps transcripts indefinitely until retention is explicit', () => {
     const db = createDb();
     dbs.push(db);

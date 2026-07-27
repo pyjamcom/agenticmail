@@ -41,6 +41,17 @@ export function encryptSecret(plaintext: string, key: string): string {
   return `enc2:${salt.toString('hex')}:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
 }
 
+/** Encrypt a secret without running scrypt on the event-loop thread. */
+export async function encryptSecretAsync(plaintext: string, key: string): Promise<string> {
+  const salt = randomBytes(16);
+  const derivedKey = await deriveKeyAsync(key, salt);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', derivedKey, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `enc2:${salt.toString('hex')}:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
 /**
  * Decrypt a string encrypted with {@link encryptSecret}.
  * Supports the new "enc2:" (scrypt) and legacy "enc:" (SHA-256) formats.

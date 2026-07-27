@@ -771,8 +771,7 @@ export function createPhoneRoutes(
 
   router.post('/calls/sip/:id/knowledge', requireMaster, async (req: Request, res: Response) => {
     try {
-      const mission = phoneManager.getMission(req.params.id);
-      if (!mission || mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+      const mission = phoneManager.getSipMissionSnapshot(req.params.id);
       const query = requestString(req.body?.query).slice(0, 500);
       if (!query) throw new Error('query is required');
       const allowedCategories = new Set(['knowledge', 'correction', 'system_notice']);
@@ -792,7 +791,7 @@ export function createPhoneRoutes(
           updatedAt: entry.updatedAt,
         }));
       const trace = selected.map(voiceKnowledgeTrace);
-      phoneManager.appendSipTranscriptEntries(mission.id, [{
+      await phoneManager.appendSipTranscriptEntriesAsync(mission.id, [{
         at: new Date().toISOString(),
         source: 'system',
         text: `Verified knowledge lookup recorded ${trace.length} fact(s).`,
@@ -845,9 +844,9 @@ export function createPhoneRoutes(
     }
   });
 
-  router.post('/calls/sip/:id/transcript', requireMaster, (req: Request, res: Response) => {
+  router.post('/calls/sip/:id/transcript', requireMaster, async (req: Request, res: Response) => {
     try {
-      const result = phoneManager.appendSipTranscriptEntries(
+      const result = await phoneManager.appendSipTranscriptEntriesAsync(
         req.params.id,
         sipTranscriptEntries(req.body?.entries),
       );
@@ -1128,9 +1127,12 @@ export function createPhoneRoutes(
     }
   });
 
-  router.patch('/calls/sip/:id/intake', requireMaster, (req: Request, res: Response) => {
+  router.patch('/calls/sip/:id/intake', requireMaster, async (req: Request, res: Response) => {
     try {
-      const result = phoneManager.updateSipSalesIntake(req.params.id, req.body?.patch ?? req.body ?? {});
+      const result = await phoneManager.updateSipSalesIntakeAsync(
+        req.params.id,
+        req.body?.patch ?? req.body ?? {},
+      );
       const followupTaskId = upsertSipFollowupTask(db, result.mission);
       res.json({
         success: true,

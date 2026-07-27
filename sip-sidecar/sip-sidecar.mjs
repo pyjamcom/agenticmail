@@ -38,6 +38,11 @@ const RTP_PACKET_INTERVAL_MS = 20;
 const RTP_MAX_QUEUED_BYTES = RTP_PACKET_BYTES * 3000;
 const RTP_MAX_CATCH_UP_PACKETS = 3;
 const RTP_PACER_SEVERE_LATE_MS = 100;
+const REALTIME_VAD_THRESHOLD = 0.68;
+const REALTIME_VAD_PREFIX_PADDING_MS = 300;
+const REALTIME_VAD_SILENCE_MS = 600;
+const BARGE_IN_CONFIRM_MS = 280;
+const CALLER_TURN_TRANSCRIPT_WAIT_MS = 1_200;
 const MAX_COMPANY_CONTEXT_BYTES = 256 * 1024;
 const MAX_LOADED_SKILLS = 2;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
@@ -1470,6 +1475,26 @@ function playbackTruncationMs(output, rtpStats) {
   return Math.floor(playedBytes / 8);
 }
 
+function normalizedSpeechText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+function isLikelyPlaybackEcho(callerText, assistantText) {
+  const caller = normalizedSpeechText(callerText);
+  const assistant = normalizedSpeechText(assistantText);
+  if (caller.length < 6 || assistant.length < 6) return false;
+  if (assistant.includes(caller)) return true;
+  const callerTokens = [...new Set(caller.split(' ').filter((token) => token.length >= 2))];
+  if (callerTokens.length < 2) return false;
+  const assistantTokens = new Set(assistant.split(' ').filter(Boolean));
+  const matched = callerTokens.filter((token) => assistantTokens.has(token)).length;
+  return matched / callerTokens.length >= 0.85;
+}
+
 function parseRtp(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 12) return null;
   const version = buffer[0] >> 6;
@@ -1534,9 +1559,11 @@ class OpenAiRealtimeBridge {
     this.lastSentResponseRequest = null;
     this.responseRequestSequence = 0;
     this.responseFlushHandle = null;
+    this.autoResponseEnabled = true;
     this.responseMetrics = {
       created: 0,
       completed: 0,
+      cancellationsRequested: 0,
       requestsSent: 0,
       requestsQueued: 0,
       requestsCoalesced: 0,
@@ -1575,11 +1602,11 @@ class OpenAiRealtimeBridge {
                 format: { type: 'audio/pcmu' },
                 turn_detection: {
                   type: 'server_vad',
-                  threshold: 0.5,
-                  prefix_padding_ms: 300,
-                  silence_duration_ms: 500,
-                  create_response: true,
-                  interrupt_response: true,
+                  threshold: REALTIME_VAD_THRESHOLD,
+                  prefix_padding_ms: REALTIME_VAD_PREFIX_PADDING_MS,
+                  silence_duration_ms: REALTIME_VAD_SILENCE_MS,
+                  create_response: false,
+                  interrupt_response: false,
                 },
                 transcription: { model: 'gpt-4o-mini-transcribe' },
               },
@@ -1682,12 +1709,21 @@ class OpenAiRealtimeBridge {
     return this.sendResponseRequest(request);
   }
 
+  cancelResponse() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.closing) return false;
+    if (!this.activeResponseId && !this.responseCreatePending) return false;
+    this.ws.send(JSON.stringify({ type: 'response.cancel' }));
+    this.responseMetrics.cancellationsRequested += 1;
+    return true;
+  }
+
   stats() {
     return {
       ...this.responseMetrics,
       activeResponse: Boolean(this.activeResponseId),
       responseCreatePending: this.responseCreatePending,
       queuedResponse: Boolean(this.pendingResponseRequest),
+      autoResponseEnabled: this.autoResponseEnabled,
     };
   }
 
@@ -1726,6 +1762,7 @@ class OpenAiRealtimeBridge {
 
   setAutoResponseEnabled(enabled) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.closing) return false;
+    this.autoResponseEnabled = enabled === true;
     this.ws.send(JSON.stringify({
       type: 'session.update',
       session: {
@@ -1734,11 +1771,11 @@ class OpenAiRealtimeBridge {
           input: {
             turn_detection: {
               type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500,
-              create_response: enabled,
-              interrupt_response: enabled,
+              threshold: REALTIME_VAD_THRESHOLD,
+              prefix_padding_ms: REALTIME_VAD_PREFIX_PADDING_MS,
+              silence_duration_ms: REALTIME_VAD_SILENCE_MS,
+              create_response: false,
+              interrupt_response: false,
             },
           },
         },
@@ -2251,6 +2288,13 @@ class SipCall {
     this.postGreetingPromptTimer = null;
     this.postGreetingPromptScheduled = false;
     this.callerSpeechObserved = false;
+    this.callerSpeechActive = false;
+    this.callerSpeechStartedDuringPlayback = false;
+    this.callerBargeInConfirmed = false;
+    this.callerTurnAwaitingResponse = false;
+    this.bargeInTimer = null;
+    this.callerTurnResponseTimer = null;
+    this.lastAssistantTranscript = '';
     this.initialAgentTurnCompleted = false;
     this.tnvedConsultation = {
       fields: {},
@@ -2408,6 +2452,117 @@ class SipCall {
     return true;
   }
 
+  hasAgentPlayback() {
+    const stats = this.rtp?.stats?.() ?? {};
+    const queuedBytes = Math.max(0, Number(stats.outboundQueuedBytes) || 0);
+    const realtime = this.openai?.stats?.() ?? {};
+    return queuedBytes >= RTP_PACKET_BYTES
+      || realtime.activeResponse === true
+      || realtime.responseCreatePending === true;
+  }
+
+  beginCallerSpeech() {
+    this.callerSpeechObserved = true;
+    this.callerSpeechActive = true;
+    this.callerBargeInConfirmed = false;
+    this.callerTurnAwaitingResponse = true;
+    this.callerSpeechStartedDuringPlayback = this.hasAgentPlayback();
+    this.cancelPostGreetingPrompt();
+    clearTimeout(this.bargeInTimer);
+    this.bargeInTimer = null;
+    if (!this.callerSpeechStartedDuringPlayback || this.managerTransfer || this.status === 'ended') return false;
+    this.bargeInTimer = setTimeout(() => {
+      this.bargeInTimer = null;
+      this.confirmCallerBargeIn();
+    }, BARGE_IN_CONFIRM_MS);
+    this.bargeInTimer.unref?.();
+    return true;
+  }
+
+  confirmCallerBargeIn() {
+    if (!this.callerSpeechActive
+      || !this.callerSpeechStartedDuringPlayback
+      || this.callerBargeInConfirmed
+      || this.managerTransfer
+      || this.status === 'ended') return false;
+    this.callerBargeInConfirmed = true;
+    const output = this.currentOutputItem;
+    const stats = this.rtp?.stats?.() ?? {};
+    const audioEndMs = playbackTruncationMs(output, stats);
+    const queuedBytes = Math.max(0, Number(stats.outboundQueuedBytes) || 0);
+    const cancellationRequested = this.openai?.cancelResponse?.() === true;
+    this.rtp?.clearOutboundAudio?.('interruption');
+    if (output && audioEndMs !== null) {
+      this.openai?.truncateAudio(output.itemId, output.contentIndex, audioEndMs);
+    }
+    this.currentOutputItem = null;
+    this.sidecar.logEvent('call_barge_in_confirmed', {
+      callId: this.id,
+      confirmationMs: BARGE_IN_CONFIRM_MS,
+      queuedBytes,
+      cancellationRequested,
+      audioEndMs,
+    });
+    return true;
+  }
+
+  finishCallerSpeech() {
+    this.callerSpeechActive = false;
+    clearTimeout(this.bargeInTimer);
+    this.bargeInTimer = null;
+    clearTimeout(this.callerTurnResponseTimer);
+    this.callerTurnResponseTimer = setTimeout(() => {
+      this.callerTurnResponseTimer = null;
+      this.requestCallerTurnResponse('transcription_timeout');
+    }, CALLER_TURN_TRANSCRIPT_WAIT_MS);
+    this.callerTurnResponseTimer.unref?.();
+  }
+
+  requestCallerTurnResponse(reason) {
+    if (!this.callerTurnAwaitingResponse) return false;
+    this.callerTurnAwaitingResponse = false;
+    clearTimeout(this.callerTurnResponseTimer);
+    this.callerTurnResponseTimer = null;
+    if (reason === 'transcription_timeout'
+      && this.callerSpeechStartedDuringPlayback
+      && !this.callerBargeInConfirmed) {
+      this.sidecar.logEvent('call_short_playback_noise_ignored', {
+        callId: this.id,
+        waitMs: CALLER_TURN_TRANSCRIPT_WAIT_MS,
+      });
+      return false;
+    }
+    if (this.status === 'ended'
+      || this.managerTransfer
+      || this.openai?.autoResponseEnabled === false) return false;
+    const requested = this.openai?.requestResponse?.() === true;
+    this.sidecar.logEvent('call_caller_turn_response_requested', {
+      callId: this.id,
+      reason,
+      requested,
+      bargeInConfirmed: this.callerBargeInConfirmed,
+    });
+    return requested;
+  }
+
+  handleCallerTranscript(text) {
+    const content = String(text || '').trim();
+    if (!this.callerTurnAwaitingResponse) return false;
+    if (this.callerSpeechStartedDuringPlayback
+      && !this.callerBargeInConfirmed
+      && isLikelyPlaybackEcho(content, this.lastAssistantTranscript)) {
+      this.callerTurnAwaitingResponse = false;
+      clearTimeout(this.callerTurnResponseTimer);
+      this.callerTurnResponseTimer = null;
+      this.sidecar.logEvent('call_playback_echo_ignored', {
+        callId: this.id,
+        textLength: content.length,
+      });
+      return false;
+    }
+    return this.requestCallerTurnResponse('transcription_completed');
+  }
+
   finalizePersistence(reason) {
     if (!this.missionId || !this.sidecar.missionClient) return;
     const failedReasons = new Set([
@@ -2512,19 +2667,20 @@ class SipCall {
         }
         if (isOutputAudioDelta) return;
         if (event.type === 'input_audio_buffer.speech_started') {
-          this.callerSpeechObserved = true;
-          this.cancelPostGreetingPrompt();
-          const output = this.currentOutputItem;
-          const audioEndMs = playbackTruncationMs(output, this.rtp?.stats?.());
-          this.rtp?.clearOutboundAudio?.();
-          if (output && audioEndMs !== null) {
-            this.openai?.truncateAudio(output.itemId, output.contentIndex, audioEndMs);
-          }
-          this.currentOutputItem = null;
+          this.beginCallerSpeech();
+        } else if (event.type === 'input_audio_buffer.speech_stopped') {
+          this.finishCallerSpeech();
+        }
+        if (event.type === 'response.output_audio_transcript.done'
+          || event.type === 'response.output_text.done') {
+          this.lastAssistantTranscript = String(event.text || '').trim();
         }
         this.sidecar.observeCustomsRouting(this, event);
         this.sidecar.recordOpenAiEvent(this, event);
         this.recordTranscriptEvent(event);
+        if (event.type === 'conversation.item.input_audio_transcription.completed') {
+          this.handleCallerTranscript(event.text);
+        }
         if (!this.initialAgentTurnCompleted
           && (event.type === 'response.output_audio_transcript.done'
             || event.type === 'response.output_text.done')) {
@@ -2609,6 +2765,8 @@ class SipCall {
     this.endReason = reason;
     clearTimeout(this.ackTimer);
     clearTimeout(this.callLimitTimer);
+    clearTimeout(this.bargeInTimer);
+    clearTimeout(this.callerTurnResponseTimer);
     this.cancelPostGreetingPrompt();
     clearInterval(this.mediaWatchTimer);
     this.sidecar.endManagerTransfer?.(this, reason);
@@ -4918,9 +5076,14 @@ class SipSidecar {
       maxCallDurationSeconds: Math.max(60, asInt(this.pbx.maxCallDurationSeconds, 1800)),
       rtpInactivityTimeoutSeconds: Math.max(15, asInt(this.pbx.rtpInactivityTimeoutSeconds, 45)),
       audioStability: {
-        revision: 'rtp-stability-v2',
+        revision: 'rtp-stability-v3',
         outboundBuffer: 'chunk_queue',
         responseSerialization: true,
+        turnResponseMode: 'manual_after_transcription',
+        serverAutoInterruption: false,
+        vadThreshold: REALTIME_VAD_THRESHOLD,
+        vadSilenceMs: REALTIME_VAD_SILENCE_MS,
+        bargeInConfirmationMs: BARGE_IN_CONFIRM_MS,
         highFrequencyAudioAuditLogging: false,
         severePacerLateThresholdMs: RTP_PACER_SEVERE_LATE_MS,
       },

@@ -1,6 +1,12 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Database } from '../storage/db.js';
-import { encryptSecret, decryptSecret, decryptSecretAsync, isEncryptedSecret } from '../crypto/secrets.js';
+import {
+  encryptSecret,
+  encryptSecretAsync,
+  decryptSecret,
+  decryptSecretAsync,
+  isEncryptedSecret,
+} from '../crypto/secrets.js';
 import { normalizePhoneNumber } from '../sms/manager.js';
 import { buildTwilioStreamTwiML } from './twilio.js';
 import { TWILIO_REALTIME_WS_PATH } from './realtime-paths.js';
@@ -482,9 +488,28 @@ export class PhoneManager {
   private initialized = false;
   /** Per-agent outbound-call timestamps (ms) for the in-memory rate limiter. */
   private readonly callTimestamps = new Map<string, number[]>();
+  /** Serialize live SIP writes per mission so transcript and intake updates cannot overwrite each other. */
+  private readonly sipMissionWriteQueues = new Map<string, Promise<void>>();
 
   constructor(private db: Database, private encryptionKey?: string) {
     this.ensureTables();
+  }
+
+  private async queueSipMissionWrite<T>(
+    missionId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.sipMissionWriteQueues.get(missionId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    const queueTail = current.then(() => undefined, () => undefined);
+    this.sipMissionWriteQueues.set(missionId, queueTail);
+    try {
+      return await current;
+    } finally {
+      if (this.sipMissionWriteQueues.get(missionId) === queueTail) {
+        this.sipMissionWriteQueues.delete(missionId);
+      }
+    }
   }
 
   /**
@@ -559,6 +584,23 @@ export class PhoneManager {
       ...entry,
       text: isEncryptedSecret(entry.text) ? entry.text : encryptSecret(entry.text, this.encryptionKey!),
     }));
+  }
+
+  private async encodeTranscriptEntriesAsync(
+    provider: PhoneTransportProvider,
+    entries: PhoneMissionTranscriptEntry[],
+  ): Promise<PhoneMissionTranscriptEntry[]> {
+    if (provider !== 'sip' || !this.encryptionKey) return entries;
+    const encoded: PhoneMissionTranscriptEntry[] = [];
+    for (const entry of entries) {
+      encoded.push({
+        ...entry,
+        text: isEncryptedSecret(entry.text)
+          ? entry.text
+          : await encryptSecretAsync(entry.text, this.encryptionKey),
+      });
+    }
+    return encoded;
   }
 
   private missionFromRow(row: unknown): PhoneCallMission {
@@ -1244,6 +1286,64 @@ export class PhoneManager {
     return { missionId, transcriptCount: mission.transcript.length + uniqueEntries.length };
   }
 
+  /**
+   * Non-blocking live transcript persistence. Per-mission serialization keeps
+   * concurrent HTTP requests idempotent while scrypt runs in the worker pool.
+   */
+  async appendSipTranscriptEntriesAsync(
+    missionId: string,
+    entries: PhoneMissionTranscriptEntry[],
+  ): Promise<{ missionId: string; transcriptCount: number }> {
+    return this.queueSipMissionWrite(missionId, async () => {
+      const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+      if (!row) throw new Error('SIP phone mission not found');
+      const mission = rowToMission(row);
+      if (mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+      const existingEventIds = new Set(
+        mission.transcript.map((entry) => asString(entry.metadata?.eventId)).filter(Boolean),
+      );
+      const uniqueEntries = entries.filter((entry) => {
+        const eventId = asString(entry.metadata?.eventId);
+        if (!eventId || existingEventIds.has(eventId)) return false;
+        existingEventIds.add(eventId);
+        return true;
+      });
+      if (uniqueEntries.length > 0) {
+        const nextTranscript = [
+          ...mission.transcript,
+          ...await this.encodeTranscriptEntriesAsync('sip', uniqueEntries),
+        ];
+        const nextStatus = TERMINAL_MISSION_STATES.includes(mission.status)
+          ? mission.status
+          : 'conversing';
+        const now = new Date().toISOString();
+        const nextMetadata = { ...mission.metadata, transcriptLastPersistedAt: now };
+        this.db.prepare(`
+          UPDATE phone_missions
+          SET status = ?, transcript_json = ?, metadata_json = ?, updated_at = ?
+          WHERE id = ?
+        `).run(
+          nextStatus,
+          JSON.stringify(nextTranscript),
+          JSON.stringify(nextMetadata),
+          now,
+          missionId,
+        );
+      }
+      return { missionId, transcriptCount: mission.transcript.length + uniqueEntries.length };
+    });
+  }
+
+  /** Read SIP mission metadata without decrypting historical transcript text. */
+  getSipMissionSnapshot(missionId: string): PhoneCallMission {
+    const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+    if (!row) throw new Error('SIP phone mission not found');
+    const mission = rowToMission(row);
+    if (mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+    mission.transcript = [];
+    return mission;
+  }
+
   /** Read a SIP mission while deriving transcript keys off the event-loop thread. */
   async getSipMissionAsync(missionId: string): Promise<PhoneCallMission> {
     const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
@@ -1396,6 +1496,54 @@ export class PhoneManager {
       intakeComplete: intake.missingFields.length === 0,
     });
     return { mission: updated, intake };
+  }
+
+  /** Merge live sales intake without decrypting the accumulated transcript. */
+  async updateSipSalesIntakeAsync(
+    missionId: string,
+    patch: unknown,
+  ): Promise<{ mission: PhoneCallMission; intake: SalesCallIntake }> {
+    return this.queueSipMissionWrite(missionId, async () => {
+      const row = this.db.prepare('SELECT * FROM phone_missions WHERE id = ?').get(missionId);
+      if (!row) throw new Error('SIP phone mission not found');
+      const mission = rowToMission(row);
+      if (mission.provider !== 'sip') throw new Error('SIP phone mission not found');
+      const input = patch && typeof patch === 'object' && !Array.isArray(patch)
+        ? patch as Record<string, unknown>
+        : {};
+      const email = asString(input.email).trim().toLowerCase();
+      const callbackPhone = asString(input.callbackPhone).trim();
+      if ((email || callbackPhone) && !this.encryptionKey) {
+        throw new Error('SIP contact secret encryption is unavailable');
+      }
+      const currentSecrets = mission.metadata.salesContactSecrets
+        && typeof mission.metadata.salesContactSecrets === 'object'
+        && !Array.isArray(mission.metadata.salesContactSecrets)
+        ? mission.metadata.salesContactSecrets as Record<string, unknown>
+        : {};
+      const salesContactSecrets = {
+        ...currentSecrets,
+        ...(email ? { email: await encryptSecretAsync(email, this.encryptionKey!) } : {}),
+        ...(callbackPhone
+          ? { callbackPhone: await encryptSecretAsync(callbackPhone, this.encryptionKey!) }
+          : {}),
+      };
+      const intake = mergeSalesCallIntake(mission.metadata.salesIntake, patch);
+      const updatedAt = new Date().toISOString();
+      const metadata = {
+        ...mission.metadata,
+        salesIntake: intake,
+        ...(Object.keys(salesContactSecrets).length > 0 ? { salesContactSecrets } : {}),
+        intakeComplete: intake.missingFields.length === 0,
+      };
+      this.db.prepare(`
+        UPDATE phone_missions SET metadata_json = ?, updated_at = ? WHERE id = ?
+      `).run(JSON.stringify(metadata), updatedAt, missionId);
+      return {
+        mission: { ...mission, transcript: [], metadata, updatedAt },
+        intake,
+      };
+    });
   }
 
   /** Resolve encrypted contact values for a master-authorized local workflow. */
