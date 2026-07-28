@@ -5,7 +5,7 @@
   [ValidateSet("udp", "tcp")]
   [string]$Transport = "udp",
   [string]$Username = "199",
-  [int]$SignalingPort = 5070,
+  [int]$SignalingPort = 5060,
   [int]$RtpPortMin = 40200,
   [int]$RtpPortMax = 40398,
   [int]$SidecarHttpPort = 3899,

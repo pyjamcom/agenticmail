@@ -25,7 +25,7 @@ const DEFAULT_NBR_SERVICE_RATES_PATH = join(SIDECAR_DIR, 'nbr-service-rates.json
 const DEFAULT_MODEL = 'gpt-realtime-2.1';
 const DEFAULT_VOICE = 'coral';
 const DEFAULT_VOICE_SPEED = 1.20;
-const DEFAULT_SIP_PORT = 5070;
+const DEFAULT_SIP_PORT = 5060;
 const DEFAULT_RTP_MIN = 40200;
 const DEFAULT_RTP_MAX = 40398;
 const DEFAULT_HTTP_PORT = 3899;
@@ -41,7 +41,7 @@ const RTP_PACER_SEVERE_LATE_MS = 100;
 const REALTIME_VAD_THRESHOLD = 0.68;
 const REALTIME_VAD_PREFIX_PADDING_MS = 300;
 const REALTIME_VAD_SILENCE_MS = 600;
-const BARGE_IN_CONFIRM_MS = 280;
+const BARGE_IN_CONFIRM_MS = 1_800;
 const CALLER_TURN_TRANSCRIPT_WAIT_MS = 1_200;
 const MAX_COMPANY_CONTEXT_BYTES = 256 * 1024;
 const MAX_LOADED_SKILLS = 2;
@@ -2479,12 +2479,13 @@ class SipCall {
     return true;
   }
 
-  confirmCallerBargeIn() {
-    if (!this.callerSpeechActive
+  confirmCallerBargeIn({ transcriptConfirmed = false } = {}) {
+    if ((!this.callerSpeechActive && !transcriptConfirmed)
       || !this.callerSpeechStartedDuringPlayback
       || this.callerBargeInConfirmed
       || this.managerTransfer
       || this.status === 'ended') return false;
+    if (!this.hasAgentPlayback() && !this.currentOutputItem) return false;
     this.callerBargeInConfirmed = true;
     const output = this.currentOutputItem;
     const stats = this.rtp?.stats?.() ?? {};
@@ -2548,17 +2549,28 @@ class SipCall {
   handleCallerTranscript(text) {
     const content = String(text || '').trim();
     if (!this.callerTurnAwaitingResponse) return false;
-    if (this.callerSpeechStartedDuringPlayback
-      && !this.callerBargeInConfirmed
-      && isLikelyPlaybackEcho(content, this.lastAssistantTranscript)) {
-      this.callerTurnAwaitingResponse = false;
-      clearTimeout(this.callerTurnResponseTimer);
-      this.callerTurnResponseTimer = null;
-      this.sidecar.logEvent('call_playback_echo_ignored', {
-        callId: this.id,
-        textLength: content.length,
-      });
-      return false;
+    if (this.callerSpeechStartedDuringPlayback && !this.callerBargeInConfirmed) {
+      if (!content) {
+        this.callerTurnAwaitingResponse = false;
+        clearTimeout(this.callerTurnResponseTimer);
+        this.callerTurnResponseTimer = null;
+        this.sidecar.logEvent('call_playback_noise_ignored', {
+          callId: this.id,
+          reason: 'empty_transcript',
+        });
+        return false;
+      }
+      if (isLikelyPlaybackEcho(content, this.lastAssistantTranscript)) {
+        this.callerTurnAwaitingResponse = false;
+        clearTimeout(this.callerTurnResponseTimer);
+        this.callerTurnResponseTimer = null;
+        this.sidecar.logEvent('call_playback_echo_ignored', {
+          callId: this.id,
+          textLength: content.length,
+        });
+        return false;
+      }
+      this.confirmCallerBargeIn({ transcriptConfirmed: true });
     }
     return this.requestCallerTurnResponse('transcription_completed');
   }
@@ -4966,6 +4978,9 @@ class SipSidecar {
       localIp: this.localIp,
       signalingPort: this.signalingPort,
     });
+    await this.unregisterExistingContacts().catch((err) => {
+      this.logEvent('register_cleanup_failed', { message: err.message });
+    });
     await this.register().catch((err) => {
       this.lastRegisterError = err.message;
       this.logEvent('register_failed', { message: err.message });
@@ -5076,7 +5091,7 @@ class SipSidecar {
       maxCallDurationSeconds: Math.max(60, asInt(this.pbx.maxCallDurationSeconds, 1800)),
       rtpInactivityTimeoutSeconds: Math.max(15, asInt(this.pbx.rtpInactivityTimeoutSeconds, 45)),
       audioStability: {
-        revision: 'rtp-stability-v3',
+        revision: 'rtp-stability-v4',
         outboundBuffer: 'chunk_queue',
         responseSerialization: true,
         turnResponseMode: 'manual_after_transcription',
@@ -5194,6 +5209,50 @@ class SipSidecar {
     this.markRegistered();
   }
 
+  async unregisterExistingContacts() {
+    this.refreshRuntimeConfig();
+    if (!this.password) throw new Error('PBX secret is missing');
+    const callId = `${randomHex(12)}@agenticmail-register-cleanup`;
+    const fromTag = randomHex(6);
+    const uri = `sip:${this.server}`;
+    const local = `${this.localIp}:${this.signalingPort}`;
+    const make = (cseq, auth = '') => {
+      const headers = [
+        ['Via', `SIP/2.0/UDP ${local};rport;branch=z9hG4bK${randomHex(8)}`],
+        ['Max-Forwards', '70'],
+        ['From', `<sip:${this.username}@${this.server}>;tag=${fromTag}`],
+        ['To', `<sip:${this.username}@${this.server}>`],
+        ['Call-ID', callId],
+        ['CSeq', `${cseq} REGISTER`],
+        ['Contact', '*'],
+        ['Expires', '0'],
+        ['User-Agent', 'AgenticMail-SIP-Sidecar'],
+      ];
+      if (auth) headers.push(['Authorization', auth]);
+      return buildSipMessage(`REGISTER ${uri} SIP/2.0`, headers);
+    };
+    const first = await this.sendTransaction(make(1), { address: this.server, port: this.port }, callId, 'REGISTER', 1);
+    const firstCode = statusCodeOf(first);
+    if (firstCode === 200) {
+      this.logEvent('register_cleanup_succeeded', { server: this.server, username: this.username });
+      return;
+    }
+    if (![401, 407].includes(firstCode)) throw new Error(`REGISTER cleanup failed: ${first.startLine}`);
+    const challengeHeader = header(first, 'www-authenticate') || header(first, 'proxy-authenticate');
+    const challenge = parseDigestChallenge(challengeHeader);
+    const auth = buildDigestAuth({
+      username: this.username,
+      password: this.password,
+      method: 'REGISTER',
+      uri,
+      challenge,
+    });
+    const second = await this.sendTransaction(make(2, auth), { address: this.server, port: this.port }, callId, 'REGISTER', 2);
+    const secondCode = statusCodeOf(second);
+    if (secondCode !== 200) throw new Error(`REGISTER cleanup failed: ${second.startLine}`);
+    this.logEvent('register_cleanup_succeeded', { server: this.server, username: this.username });
+  }
+
   markRegistered() {
     this.registered = true;
     this.lastRegister = nowIso();
@@ -5221,6 +5280,14 @@ class SipSidecar {
       return;
     }
     const method = methodOf(msg);
+    if (method) {
+      this.logEvent('sip_request_received', {
+        method,
+        remoteAddress: remote.address,
+        remotePort: remote.port,
+        callIdHash: sha256(header(msg, 'call-id')).slice(0, 16),
+      });
+    }
     if (method === 'INVITE') {
       await this.handleInvite(msg, remote);
       return;

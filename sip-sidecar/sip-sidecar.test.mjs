@@ -98,6 +98,36 @@ test('early customs intent detector routes first mentions without applying M1 br
   assert.equal(detectCustomsIntent('Отправьте, пожалуйста, отчет по электронной почте').matched, false);
 });
 
+test('SIP registration cleanup removes stale contacts before registering the live port', async () => {
+  const sent = [];
+  const logged = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  Object.assign(sidecar, {
+    server: '10.1.0.223',
+    port: 5060,
+    username: '199',
+    password: 'secret',
+    localIp: '10.0.200.101',
+    signalingPort: 5070,
+    refreshRuntimeConfig: () => {},
+    logEvent: (type, payload) => logged.push({ type, payload }),
+    sendTransaction: async (text) => {
+      sent.push(text);
+      return { startLine: 'SIP/2.0 200 OK', headers: new Map() };
+    },
+  });
+
+  await sidecar.unregisterExistingContacts();
+  await sidecar.register();
+
+  assert.match(sent[0], /\r\nContact: \*\r\n/u);
+  assert.match(sent[0], /\r\nExpires: 0\r\n/u);
+  assert.match(sent[1], /\r\nContact: <sip:199@10\.0\.200\.101:5070;transport=udp>\r\n/u);
+  assert.match(sent[1], /\r\nExpires: 60\r\n/u);
+  assert.equal(logged.some((event) => event.type === 'register_cleanup_succeeded'), true);
+  assert.equal(logged.some((event) => event.type === 'registered'), true);
+});
+
 test('deterministic customs router updates the live call instructions on the caller turn', () => {
   const instructionUpdates = [];
   const audit = [];
@@ -190,6 +220,34 @@ test('extracts only dialable caller identities from SIP URIs', () => {
   assert.equal(sipDialableUser('<sip:+12025550123@pbx.test>;tag=caller'), '+12025550123');
   assert.equal(sipDialableUser('sip:114@pbx.test'), '114');
   assert.equal(sipDialableUser('sip:not-a-number@pbx.test'), '');
+});
+
+test('logs every inbound SIP request method without raw headers', async () => {
+  const logged = [];
+  const sent = [];
+  const sidecar = Object.create(SipSidecar.prototype);
+  Object.assign(sidecar, {
+    logEvent: (type, payload) => logged.push({ type, payload }),
+    send: (text, remote) => sent.push({ text, remote }),
+  });
+  const message = buildSipMessage('OPTIONS sip:199@10.0.200.101 SIP/2.0', [
+    ['Via', 'SIP/2.0/UDP 10.1.0.223:5060;branch=z9hG4bK-options'],
+    ['From', '<sip:pbx@10.1.0.223>;tag=pbx'],
+    ['To', '<sip:199@10.0.200.101>'],
+    ['Call-ID', 'request-log-test'],
+    ['CSeq', '1 OPTIONS'],
+  ]);
+
+  await sidecar.handleSip(Buffer.from(message, 'utf8'), { address: '10.1.0.223', port: 5060 });
+
+  assert.equal(logged[0].type, 'sip_request_received');
+  assert.equal(logged[0].payload.method, 'OPTIONS');
+  assert.equal(logged[0].payload.remoteAddress, '10.1.0.223');
+  assert.equal(logged[0].payload.remotePort, 5060);
+  assert.match(logged[0].payload.callIdHash, /^[a-f0-9]{16}$/u);
+  assert.equal(JSON.stringify(logged[0]).includes('request-log-test'), false);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /^SIP\/2\.0 200 OK/u);
 });
 
 test('loads UTF-8 JSON configuration files with a BOM', (t) => {
@@ -405,6 +463,49 @@ test('short playback echo does not cancel or clear Elena audio', () => {
   assert.equal(actions.includes('cancel'), false);
   assert.equal(actions.includes('respond'), false);
   assert.equal(actions.includes('call_playback_echo_ignored'), true);
+});
+
+test('empty playback VAD turn does not cancel or answer over Elena audio', () => {
+  const actions = [];
+  const call = Object.create(SipCall.prototype);
+  Object.assign(call, {
+    id: 'sip-empty-playback-noise',
+    status: 'media_active',
+    managerTransfer: null,
+    postGreetingPromptTimer: null,
+    postGreetingPromptScheduled: false,
+    bargeInTimer: null,
+    callerTurnResponseTimer: null,
+    callerTurnAwaitingResponse: false,
+    currentOutputItem: {
+      itemId: 'assistant-item',
+      contentIndex: 0,
+      outboundStreamStart: 0,
+      generatedAudioBytes: 3_200,
+    },
+    lastAssistantTranscript: 'Расскажите пожалуйста с каким вопросом вы обращаетесь',
+    rtp: {
+      stats: () => ({ outboundQueuedBytes: 64_000, outboundBytes: 1_600 }),
+      clearOutboundAudio: () => actions.push('clear'),
+    },
+    openai: {
+      autoResponseEnabled: true,
+      stats: () => ({ activeResponse: true }),
+      cancelResponse: () => { actions.push('cancel'); return true; },
+      truncateAudio: () => actions.push('truncate'),
+      requestResponse: () => { actions.push('respond'); return true; },
+    },
+    sidecar: { logEvent: (type) => actions.push(type) },
+  });
+
+  call.beginCallerSpeech();
+  call.finishCallerSpeech();
+  call.handleCallerTranscript('');
+
+  assert.equal(actions.includes('clear'), false);
+  assert.equal(actions.includes('cancel'), false);
+  assert.equal(actions.includes('respond'), false);
+  assert.equal(actions.includes('call_playback_noise_ignored'), true);
 });
 
 test('sustained caller speech cancels playback once and creates one response after transcription', () => {
@@ -1727,14 +1828,14 @@ test('configured company context is required and included in direct SIP instruct
     personaGender: 'female',
   });
   assert.deepEqual(health.audioStability, {
-    revision: 'rtp-stability-v3',
+    revision: 'rtp-stability-v4',
     outboundBuffer: 'chunk_queue',
     responseSerialization: true,
     turnResponseMode: 'manual_after_transcription',
     serverAutoInterruption: false,
     vadThreshold: 0.68,
     vadSilenceMs: 600,
-    bargeInConfirmationMs: 280,
+    bargeInConfirmationMs: 1800,
     highFrequencyAudioAuditLogging: false,
     severePacerLateThresholdMs: 100,
   });

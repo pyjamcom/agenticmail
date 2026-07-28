@@ -18,6 +18,7 @@ $StartScript = Join-Path $RepoRoot "start-sip-sidecar.ps1"
 $StartLocalScript = Join-Path $RepoRoot "start-local.ps1"
 $StartExchangeScript = Join-Path $RepoRoot "start-exchange-ews-sidecar.ps1"
 $RuntimeDir = Join-Path $env:USERPROFILE ".agenticmail\sip-sidecar"
+$PbxConfigPath = Join-Path $env:AGENTICMAIL_DATA_DIR "pbx199.local.json"
 $WatchdogLog = Join-Path $RuntimeDir "watchdog.jsonl"
 $FullRestartRequest = Join-Path $RuntimeDir "full-system-restart.request"
 $Mutex = [Threading.Mutex]::new($false, "Local\AgenticMailSipSidecarWatchdog")
@@ -126,11 +127,59 @@ function Test-RecoveryAllowed {
   return $false
 }
 
+function Ensure-SipFirewallRules {
+  if (-not (Test-Path -LiteralPath $PbxConfigPath)) { return }
+  $config = Get-Content -LiteralPath $PbxConfigPath -Raw | ConvertFrom-Json
+  $server = [string]$config.server
+  $signalingPort = [int]$config.signalingPort
+  $rtpPortMin = [int]$config.rtpPortMin
+  $rtpPortMax = [int]$config.rtpPortMax
+  if ([string]::IsNullOrWhiteSpace($server) -or $signalingPort -le 0) { return }
+
+  $signalRule = "AgenticMail SIP signaling (inbound)"
+  $rtpRule = "AgenticMail SIP RTP media (inbound)"
+  $rtpRange = if ($rtpPortMin -gt 0 -and $rtpPortMax -ge $rtpPortMin) {
+    "$rtpPortMin-$rtpPortMax"
+  } else {
+    $null
+  }
+
+  & netsh advfirewall firewall set rule name="$signalRule" new dir=in action=allow protocol=UDP localport="$signalingPort" remoteip="$server" profile=domain enable=yes | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    & netsh advfirewall firewall add rule name="$signalRule" dir=in action=allow protocol=UDP localport="$signalingPort" remoteip="$server" profile=domain enable=yes | Out-Null
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to reconcile SIP signaling firewall rule"
+  }
+
+  if ($rtpRange) {
+    & netsh advfirewall firewall set rule name="$rtpRule" new dir=in action=allow protocol=UDP localport="$rtpRange" remoteip="$server" profile=domain enable=yes | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      & netsh advfirewall firewall add rule name="$rtpRule" dir=in action=allow protocol=UDP localport="$rtpRange" remoteip="$server" profile=domain enable=yes | Out-Null
+    }
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to reconcile SIP RTP firewall rule"
+    }
+  }
+
+  Write-WatchdogEvent "firewall_reconciled" @{
+    signalingPort = $signalingPort
+    rtpPortRange = if ($rtpRange) { $rtpRange } else { "" }
+    remoteIp = $server
+  }
+}
+
 try {
   $HasMutex = $Mutex.WaitOne(0)
   if (-not $HasMutex) {
     [pscustomobject]@{ status = "skipped"; reason = "watchdog_already_running" } | ConvertTo-Json
     exit 0
+  }
+
+  try {
+    Ensure-SipFirewallRules
+  } catch {
+    Write-WatchdogEvent "firewall_reconcile_failed" @{ errorType = $_.Exception.GetType().Name }
   }
 
   if (Test-Path -LiteralPath $FullRestartRequest) {
