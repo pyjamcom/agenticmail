@@ -399,7 +399,7 @@ test('post-greeting silence prompt is one-shot and cancelled by caller speech', 
     sidecar: {
       pbx: { postGreetingSilencePromptDelayMs: 2_000 },
       salesScenario: {
-        postGreetingSilencePrompt: 'Вы бы хотели переговорить с каким-то конкретным сотрудником, или я могу вам чем-то помочь?',
+        postGreetingSilencePrompt: 'Вы бы хотели переговорить с конкретным сотрудником? Вы знаете добавочный номер сотрудника или его имя?',
       },
       logEvent: (type) => events.push(type),
     },
@@ -415,6 +415,8 @@ test('post-greeting silence prompt is one-shot and cancelled by caller speech', 
   const prompt = call.sidecar.salesScenario.postGreetingSilencePrompt;
   assert.equal(call.sendPostGreetingPrompt(prompt), true);
   assert.match(prompts[0], /Вы бы хотели переговорить/u);
+  assert.match(prompts[0], /Вы знаете добавочный номер сотрудника или его имя/u);
+  assert.doesNotMatch(prompts[0], /таможенное оформление, логистика, легковые автомобили/u);
   assert.deepEqual(events, ['post_greeting_silence_prompt_started']);
 
   call.callerSpeechObserved = true;
@@ -1559,6 +1561,57 @@ test('explicitly named employee overrides round robin without guessing an ambigu
   assert.match(ambiguous.error, /not configured or allowlisted/u);
 });
 
+test('employee name aliases route callers through the internal extension table', async () => {
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.username = '199';
+  sidecar.managerRouteCursor = new Map();
+  sidecar.pbx = {
+    managerRoutes: {
+      customer_service: {
+        selection: 'round_robin',
+        destinations: [
+          { extension: '135', employee: 'Irina A.', aliases: ['Ирина', 'Ирина А'] },
+          { extension: '136', employee: 'Marina S.', aliases: ['Марина', 'Марина С'] },
+        ],
+      },
+      payment_agent: {
+        selection: 'primary',
+        destinations: [{ extension: '141', employee: 'Anton M.', aliases: ['Антон', 'Антон М'] }],
+      },
+      accounting: {
+        selection: 'round_robin',
+        destinations: [
+          { extension: '152', employee: 'Nastya', aliases: ['Настя', 'Анастасия'] },
+          { extension: '153', employee: 'Nastya Z.', aliases: ['Настя З', 'Анастасия З'] },
+        ],
+      },
+      logistics: {
+        selection: 'round_robin',
+        destinations: [
+          { extension: '171', employee: 'Viktoria E.', aliases: ['Виктория', 'Виктория Е'] },
+          { extension: '173', employee: 'Sergey O.', aliases: ['Сергей', 'Сергей О'] },
+        ],
+      },
+    },
+  };
+  sidecar.transferToDestination = async (_call, destination) => destination;
+
+  const cases = [
+    ['customer_service', 'Ирина', '135'],
+    ['customer_service', 'Марина С', '136'],
+    ['payment_agent', 'Антон', '141'],
+    ['accounting', 'Настя З', '153'],
+    ['logistics', 'Виктория', '171'],
+    ['logistics', 'Сергей О', '173'],
+  ];
+
+  for (const [route, employee, extension] of cases) {
+    const result = await sidecar.transferToManager({}, route, `Caller requested ${employee}`, employee);
+    assert.equal(result.extension, extension);
+    assert.equal(result.destinationType, 'named_employee');
+  }
+});
+
 test('legacy sales and operator route aliases resolve to customer service', async () => {
   const sidecar = Object.create(SipSidecar.prototype);
   sidecar.username = '199';
@@ -1708,7 +1761,9 @@ test('sales instructions expose only the active service playbook after routing',
   assert.match(routingPrompt, /# Routing/);
   assert.match(routingPrompt, /# Internal Department Routing Directory/u);
   assert.match(routingPrompt, /route customer_service/u);
-  assert.match(routingPrompt, /Irina A\. \(135\), Marina S\. \(136\)/u);
+  assert.match(routingPrompt, /Irina A\. \(135; варианты имени: Ирина/u);
+  assert.match(routingPrompt, /Marina S\. \(136; варианты имени: Марина/u);
+  assert.match(routingPrompt, /Хотите, рассчитаю вам стоимость растаможки автомобиля/u);
   assert.doesNotMatch(routingPrompt, /extension 135/u);
   assert.match(routingPrompt, /Я виртуальный голосовой помощник/u);
   assert.match(routingPrompt, /не обманывай и не уклоняйся/u);

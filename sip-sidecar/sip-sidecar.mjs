@@ -2420,7 +2420,7 @@ class SipCall {
   sendPostGreetingPrompt(prompt) {
     if (this.status === 'ended' || this.callerSpeechObserved || this.managerTransfer) return false;
     const sent = this.openai?.requestResponse?.(
-      `Say exactly this one sentence in Russian, without adding anything: "${prompt}"`,
+      `Say exactly this Russian text, without adding anything after it: "${prompt}"`,
     );
     if (sent) this.sidecar.logEvent('post_greeting_silence_prompt_started', { callId: this.id });
     return sent === true;
@@ -2433,7 +2433,7 @@ class SipCall {
       || this.callerSpeechObserved) return false;
     const prompt = String(
       this.sidecar.salesScenario.postGreetingSilencePrompt
-      || 'Вы бы хотели переговорить с каким-то конкретным сотрудником, или я могу вам чем-то помочь?',
+      || 'Вы бы хотели переговорить с конкретным сотрудником? Вы знаете добавочный номер сотрудника или его имя?',
     ).trim();
     if (!prompt) return false;
     this.postGreetingPromptScheduled = true;
@@ -4334,7 +4334,12 @@ class SipSidecar {
 
   managerRoutePrompt() {
     return Object.values(this.managerRouteDirectory()).map((route) => {
-      const employees = route.destinations.map((item) => `${item.employee} (${item.extension})`).join(', ');
+      const employees = route.destinations.map((item) => {
+        const aliases = item.aliases.length > 0
+          ? `; варианты имени: ${item.aliases.join(', ')}`
+          : '';
+        return `${item.employee} (${item.extension}${aliases})`;
+      }).join(', ');
       const topics = route.topics.length > 0 ? route.topics.join('; ') : route.label;
       return `- route ${route.route}: ${route.label}. Темы: ${topics}. Сотрудники: ${employees}.`;
     }).join('\n');
@@ -5115,6 +5120,7 @@ class SipSidecar {
           destinations: route.destinations.map((destination) => ({
             extension: destination.extension,
             employee: destination.employee,
+            aliases: destination.aliases,
           })),
         })),
         directExtension: {

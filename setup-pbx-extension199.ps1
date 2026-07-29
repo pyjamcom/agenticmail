@@ -96,8 +96,8 @@ $payload = [ordered]@{
         "первичное обращение, когда профиль не определён"
       )
       destinations = @(
-        [ordered]@{ extension = "135"; employee = "Irina A."; aliases = @("Ирина", "Ирина А", "Irina A") }
-        [ordered]@{ extension = "136"; employee = "Marina S."; aliases = @("Марина", "Марина С", "Marina S") }
+        [ordered]@{ extension = "135"; employee = "Irina A."; aliases = @("Ирина", "Ирина А", "Ирина A", "Irina", "Irina A") }
+        [ordered]@{ extension = "136"; employee = "Marina S."; aliases = @("Марина", "Марина С", "Марина S", "Marina", "Marina S") }
       )
     }
     payment_agent = [ordered]@{
@@ -110,7 +110,7 @@ $payload = [ordered]@{
         "услуги платёжного агента"
       )
       destinations = @(
-        [ordered]@{ extension = "141"; employee = "Anton M."; aliases = @("Антон", "Антон М", "Anton M") }
+        [ordered]@{ extension = "141"; employee = "Anton M."; aliases = @("Антон", "Антон М", "Антон M", "Anton", "Anton M") }
       )
     }
     customs_certification = [ordered]@{
@@ -124,14 +124,15 @@ $payload = [ordered]@{
         "таможенное оформление автомобилей"
         "оформление автомобилей на таможне"
         "все вопросы по автомобилям"
+        "легковые автомобили"
         "таможенное оформление автомобилей и мототехники"
         "консультации по таможенному оформлению"
         "сертификация продукции"
         "разрешительные документы"
       )
       destinations = @(
-        [ordered]@{ extension = "145"; employee = "Natal'ya E."; aliases = @("Наталья Е", "Natalya E", "Natal'ya E") }
-        [ordered]@{ extension = "147"; employee = "Natalia B."; aliases = @("Наталия Б", "Наталья Б", "Natalia B") }
+        [ordered]@{ extension = "145"; employee = "Natal'ya E."; aliases = @("Наталья Е", "Наталья Э", "Наталья E", "Natalya", "Natalya E", "Natal'ya", "Natal'ya E") }
+        [ordered]@{ extension = "147"; employee = "Natalia B."; aliases = @("Наталия Б", "Наталья Б", "Наталия B", "Наталья B", "Natalia", "Natalia B") }
       )
     }
     accounting = [ordered]@{
@@ -144,7 +145,7 @@ $payload = [ordered]@{
       )
       destinations = @(
         [ordered]@{ extension = "152"; employee = "Nastya"; aliases = @("Настя", "Анастасия", "Nastya") }
-        [ordered]@{ extension = "153"; employee = "Nastya Z."; aliases = @("Настя З", "Анастасия З", "Nastya Z") }
+        [ordered]@{ extension = "153"; employee = "Nastya Z."; aliases = @("Настя З", "Настя Z", "Анастасия З", "Анастасия Z", "Nastya Z") }
       )
     }
     logistics = [ordered]@{
@@ -157,8 +158,8 @@ $payload = [ordered]@{
         "перевозка грузов"
       )
       destinations = @(
-        [ordered]@{ extension = "171"; employee = "Viktoria E."; aliases = @("Виктория", "Виктория Е", "Viktoria E") }
-        [ordered]@{ extension = "173"; employee = "Sergey O."; aliases = @("Сергей", "Сергей О", "Sergey O") }
+        [ordered]@{ extension = "171"; employee = "Viktoria E."; aliases = @("Виктория", "Виктория Е", "Виктория E", "Viktoria", "Viktoria E") }
+        [ordered]@{ extension = "173"; employee = "Sergey O."; aliases = @("Сергей", "Сергей О", "Сергей O", "Sergey", "Sergey O") }
       )
     }
   }
