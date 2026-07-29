@@ -1708,7 +1708,7 @@ test('sales instructions expose only the active service playbook after routing',
   assert.match(routingPrompt, /# Routing/);
   assert.match(routingPrompt, /# Internal Department Routing Directory/u);
   assert.match(routingPrompt, /route customer_service/u);
-  assert.match(routingPrompt, /Irina A\., Marina S\./u);
+  assert.match(routingPrompt, /Irina A\. \(135\), Marina S\. \(136\)/u);
   assert.doesNotMatch(routingPrompt, /extension 135/u);
   assert.match(routingPrompt, /Я виртуальный голосовой помощник/u);
   assert.match(routingPrompt, /не обманывай и не уклоняйся/u);

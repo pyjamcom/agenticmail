@@ -4334,7 +4334,7 @@ class SipSidecar {
 
   managerRoutePrompt() {
     return Object.values(this.managerRouteDirectory()).map((route) => {
-      const employees = route.destinations.map((item) => item.employee).join(', ');
+      const employees = route.destinations.map((item) => `${item.employee} (${item.extension})`).join(', ');
       const topics = route.topics.length > 0 ? route.topics.join('; ') : route.label;
       return `- route ${route.route}: ${route.label}. Темы: ${topics}. Сотрудники: ${employees}.`;
     }).join('\n');
