@@ -55,6 +55,16 @@ function Restart-ManagedTask {
   } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
   }
+  if ($TaskName -eq "AgenticMail-SIP-Sidecar-Service") {
+    Get-NetUDPEndpoint -LocalPort 5060 -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty OwningProcess -Unique |
+      Where-Object { $_ -and $_ -ne $PID } |
+      ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+    Get-NetTCPConnection -LocalPort 3899,8111 -State Listen -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty OwningProcess -Unique |
+      Where-Object { $_ -and $_ -ne $PID } |
+      ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+  }
   Start-ScheduledTask -TaskName $TaskName
   return $true
 }
@@ -250,6 +260,29 @@ try {
     $tnvedHealth.status -eq "ok" -and
     $tnvedHealth.preflight.ok -eq $true -and
     (Test-SystemProcess $tnvedProcess)
+  if (-not $tnvedReady) {
+    Write-WatchdogEvent "tnved_transient_wait_started" @{
+      reason = if ($tnvedHealth) { "wrong_identity_or_blocked" } else { "health_unreachable" }
+    }
+    try {
+      $tnvedHealth = Wait-LocalHealth -Uri $TnvedHealthUri -WaitSeconds 30 -Ready {
+        param($value)
+        $value.status -eq "ok" -and $value.preflight.ok -eq $true
+      }
+      $tnvedProcess = Get-TnvedRuntimeProcess
+      $tnvedReady = $tnvedHealth -and
+        $tnvedHealth.status -eq "ok" -and
+        $tnvedHealth.preflight.ok -eq $true -and
+        (Test-SystemProcess $tnvedProcess)
+      if ($tnvedReady) {
+        Write-WatchdogEvent "tnved_transient_wait_succeeded" @{
+          kbVersion = [string]$tnvedHealth.preflight.kb_version
+        }
+      }
+    } catch {
+      $tnvedReady = $false
+    }
+  }
   if (-not $tnvedReady) {
     $liveSip = $null
     try { $liveSip = Get-LocalJson -Uri $HealthUri -TimeoutSeconds $TimeoutSeconds } catch {}

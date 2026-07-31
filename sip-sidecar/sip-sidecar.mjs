@@ -80,6 +80,7 @@ const CUSTOMS_VEHICLE_PATTERN = /(?:автомобил|автомашин|лег
 const CUSTOMS_CALCULATION_PATTERN = /(?:рассчита|посчита|сколько\s+(?:будет|стоит|плат)|стоимост|сумм\w*\s+платеж|подобра\w*\s+код|определи\w*\s+код|ставк\w*\s+(?:пошлин|ндс)|какие\s+платеж)/iu;
 const CUSTOMS_TRANSFER_PATTERN = /(?:соедин|перевед|переключ|позов|оператор|жив\w*\s+(?:человек|сотрудник)|сотрудник|менеджер|специалист|таможенн\w*\s+отдел)/iu;
 const CUSTOMS_OFFER_PATTERN = /(?:могу\s+(?:прямо\s+сейчас\s+)?(?:подобрать|рассчитать|посчитать)|давайте\s+(?:подберу|рассчитаю|посчитаю)|уточню\s+тип\s+транспорт)/iu;
+const OPERATOR_TRANSFER_PATTERN = /(?:^|[^\p{L}\p{N}])(?:оператор(?:ом|а|у|е|ы)?|диспетчер(?:ом|а|у|е|ы)?|жив(?:ой|ого|ому)\s+(?:сотрудник|человек)|менеджер(?:ом|а|у|е)?|operator|dispatcher)(?=$|[^\p{L}\p{N}])/iu;
 const TNVED_TRANSPORT_MASK = createHash('sha256')
   .update('TNVED UTF8 transport mask v1', 'utf8')
   .digest();
@@ -243,6 +244,15 @@ function detectCustomsIntent(text) {
     vehicleKind,
     recommendedFlow,
   };
+}
+
+function isOperatorTransferRequest(text) {
+  const normalized = String(text || '')
+    .toLocaleLowerCase('ru-RU')
+    .replaceAll('ё', 'е')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return OPERATOR_TRANSFER_PATTERN.test(normalized);
 }
 
 function allowedTnvedCodePrefixesForProduct(productName) {
@@ -2572,6 +2582,12 @@ class SipCall {
       }
       this.confirmCallerBargeIn({ transcriptConfirmed: true });
     }
+    if (this.sidecar.handleOperatorTransferRequest?.(this, content)) {
+      this.callerTurnAwaitingResponse = false;
+      clearTimeout(this.callerTurnResponseTimer);
+      this.callerTurnResponseTimer = null;
+      return true;
+    }
     return this.requestCallerTurnResponse('transcription_completed');
   }
 
@@ -2936,6 +2952,63 @@ class SipSidecar {
       type,
       ...payload,
     });
+  }
+
+  handleOperatorTransferRequest(call, text) {
+    if (!isOperatorTransferRequest(text)) return false;
+    if (!call || call.status === 'ended' || call.managerTransfer) return false;
+    this.logEvent('operator_transfer_intent_detected', {
+      callId: call.id,
+      route: 'customer_service',
+    });
+    call.recordSystemTranscript?.('Caller requested operator transfer; routing to customer service.', {
+      kind: 'internal_transfer',
+      route: 'customer_service',
+      destinationType: 'named_route',
+      source: 'deterministic_operator_transfer',
+    });
+    void this.transferToManager(
+      call,
+      'customer_service',
+      'Caller requested operator or dispatcher',
+    ).then(async (transfer) => {
+      if (!transfer?.ok) {
+        this.logEvent('operator_transfer_failed_before_dial', {
+          callId: call.id,
+          error: String(transfer?.error || 'unknown').slice(0, 200),
+        });
+        call.openai?.requestResponse?.(
+          'Скажите клиенту: «Сейчас перевод на оператора технически не получился. Пожалуйста, отправьте детали на sales собака nbr точка ru, и сотрудник свяжется с вами».',
+        );
+        return;
+      }
+      await this.missionClient?.updateIntake?.(call.missionId, {
+        nextAction: transfer.connected
+          ? { type: 'transfer', owner: transfer.owner, notes: 'Caller requested operator or dispatcher.' }
+          : {
+            type: 'callback_request',
+            owner: transfer.owner,
+            notes: 'Operator/customer service destination did not answer the assisted transfer.',
+          },
+        outcome: transfer.connected ? 'transferred' : 'needs_follow_up',
+      }, (err) => {
+        this.logEvent('operator_transfer_durability_failed', { callId: call.id, errorType: err?.name || 'Error' });
+      });
+      this.logEvent('operator_transfer_completed', {
+        callId: call.id,
+        route: transfer.route,
+        owner: transfer.owner,
+        employeeName: transfer.employeeName,
+        connected: transfer.connected === true,
+        status: transfer.status,
+      });
+      if (transfer.connected !== true && transfer.responseInstructions) {
+        call.openai?.requestResponse?.(transfer.responseInstructions);
+      }
+    }).catch((err) => {
+      this.logEvent('operator_transfer_failed', { callId: call.id, errorType: err?.name || 'Error' });
+    });
+    return true;
   }
 
   observeCustomsRouting(call, event) {
@@ -4983,9 +5056,14 @@ class SipSidecar {
       localIp: this.localIp,
       signalingPort: this.signalingPort,
     });
-    await this.unregisterExistingContacts().catch((err) => {
-      this.logEvent('register_cleanup_failed', { message: err.message });
-    });
+    this.refreshRuntimeConfig();
+    if (this.pbx.registerCleanupOnStart === true) {
+      await this.unregisterExistingContacts().catch((err) => {
+        this.logEvent('register_cleanup_failed', { message: err.message });
+      });
+    } else {
+      this.logEvent('register_cleanup_skipped', { reason: 'disabled_by_config' });
+    }
     await this.register().catch((err) => {
       this.lastRegisterError = err.message;
       this.logEvent('register_failed', { message: err.message });

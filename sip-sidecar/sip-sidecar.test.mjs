@@ -424,6 +424,40 @@ test('post-greeting silence prompt is one-shot and cancelled by caller speech', 
   assert.equal(prompts.length, 1);
 });
 
+test('operator transcript bypasses model response and starts customer service transfer', () => {
+  let routedText = '';
+  let modelResponseRequested = false;
+  const call = Object.create(SipCall.prototype);
+  Object.assign(call, {
+    id: 'sip-operator-transcript',
+    callerTurnAwaitingResponse: true,
+    callerSpeechStartedDuringPlayback: false,
+    callerTurnResponseTimer: setTimeout(() => {}, 1_000),
+    sidecar: {
+      handleOperatorTransferRequest: (_call, text) => {
+        routedText = text;
+        return true;
+      },
+      logEvent: () => {},
+    },
+    openai: {
+      requestResponse: () => {
+        modelResponseRequested = true;
+        return true;
+      },
+    },
+  });
+
+  assert.equal(
+    call.handleCallerTranscript('Пожалуйста, соедините с диспетчером, с оператором.'),
+    true,
+  );
+  assert.equal(routedText, 'Пожалуйста, соедините с диспетчером, с оператором.');
+  assert.equal(call.callerTurnAwaitingResponse, false);
+  assert.equal(call.callerTurnResponseTimer, null);
+  assert.equal(modelResponseRequested, false);
+});
+
 test('short playback echo does not cancel or clear Elena audio', () => {
   const actions = [];
   const call = Object.create(SipCall.prototype);
@@ -1489,6 +1523,60 @@ test('assisted manager transfer switches to the manager only after answer', asyn
   assert.equal(call.managerTransfer.extension, '135');
   assert.equal(updates[0].nextAction.type, 'transfer');
   assert.equal(updates[0].outcome, 'transferred');
+});
+
+test('operator transfer requests use customer service route', async () => {
+  const transfers = [];
+  const updates = [];
+  const events = [];
+  let completed;
+  const done = new Promise((resolve) => { completed = resolve; });
+  const sidecar = Object.create(SipSidecar.prototype);
+  sidecar.logEvent = (type, payload) => {
+    events.push({ type, payload });
+    if (type === 'operator_transfer_completed') completed();
+  };
+  sidecar.transferToManager = async (_call, route, reason) => {
+    transfers.push({ route, reason });
+    return {
+      ok: true,
+      connected: true,
+      route,
+      owner: 'customer_service',
+      employeeName: 'Irina A.',
+      status: 'connected',
+    };
+  };
+  sidecar.missionClient = {
+    updateIntake: async (_missionId, patch) => {
+      updates.push(patch);
+      return { success: true, complete: true, intake: { missingFields: [] } };
+    },
+  };
+  const systemTranscript = [];
+  const call = {
+    id: 'sip-operator-route',
+    missionId: 'mission-operator-route',
+    status: 'media_active',
+    managerTransfer: null,
+    recordSystemTranscript: (text, metadata) => systemTranscript.push({ text, metadata }),
+  };
+
+  assert.equal(
+    sidecar.handleOperatorTransferRequest(call, 'Пожалуйста, соедините с диспетчером, с оператором.'),
+    true,
+  );
+  await done;
+
+  assert.deepEqual(transfers, [{
+    route: 'customer_service',
+    reason: 'Caller requested operator or dispatcher',
+  }]);
+  assert.equal(updates[0].nextAction.type, 'transfer');
+  assert.equal(updates[0].nextAction.owner, 'customer_service');
+  assert.equal(updates[0].outcome, 'transferred');
+  assert.equal(systemTranscript[0].metadata.route, 'customer_service');
+  assert.equal(events.some((event) => event.type === 'operator_transfer_intent_detected'), true);
 });
 
 test('topic manager routes rotate between employees in the configured department', async () => {

@@ -21,6 +21,27 @@ New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 Set-Location -LiteralPath $RepoRoot
 $stdoutLog = Join-Path $LogDir "sip.service.stdout.log"
 $stderrLog = Join-Path $LogDir "sip.service.stderr.log"
+$PbxRuntimeConfig = Get-Content -LiteralPath $PbxConfig -Raw | ConvertFrom-Json
+$SignalingPort = [int]$PbxRuntimeConfig.signalingPort
+if ($SignalingPort -le 0) { $SignalingPort = 5060 }
+
+try {
+  $existingHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$($env:SIP_SIDECAR_HTTP_PORT)/health" -TimeoutSec 3 -ErrorAction Stop
+  if ([int]$existingHealth.activeCalls -gt 0) {
+    throw "Existing SIP sidecar has an active call; refusing to replace it."
+  }
+} catch {
+  if ($_.Exception.Message -like "*active call*") { throw }
+}
+
+Get-NetUDPEndpoint -LocalPort $SignalingPort -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  Where-Object { $_ -and $_ -ne $PID } |
+  ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+Get-NetTCPConnection -LocalPort $([int]$env:SIP_SIDECAR_HTTP_PORT),8111 -State Listen -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  Where-Object { $_ -and $_ -ne $PID } |
+  ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
 
 Get-CimInstance Win32_Process | Where-Object {
   $_.Name -like "python*.exe" -and
