@@ -20,6 +20,9 @@ $StartExchangeScript = Join-Path $RepoRoot "start-exchange-ews-sidecar.ps1"
 $RuntimeDir = Join-Path $env:USERPROFILE ".agenticmail\sip-sidecar"
 $PbxConfigPath = Join-Path $env:AGENTICMAIL_DATA_DIR "pbx199.local.json"
 $WatchdogLog = Join-Path $RuntimeDir "watchdog.jsonl"
+$AlertSpoolPath = Join-Path $RuntimeDir "service-alerts.pending.jsonl"
+$AlertStatePath = Join-Path $RuntimeDir "service-alerts.state.json"
+$ServiceAlertUri = $ExchangeHealthUri -replace "/health$", "/alerts/service-failure"
 $FullRestartRequest = Join-Path $RuntimeDir "full-system-restart.request"
 $Mutex = [Threading.Mutex]::new($false, "Local\AgenticMailSipSidecarWatchdog")
 $HasMutex = $false
@@ -39,6 +42,113 @@ function Write-WatchdogEvent {
   }
   $line = ($record | ConvertTo-Json -Compress -Depth 5) + [Environment]::NewLine
   [IO.File]::AppendAllText($WatchdogLog, $line, [Text.UTF8Encoding]::new($false))
+}
+
+function Read-ServiceAlertState {
+  if (-not (Test-Path -LiteralPath $AlertStatePath)) { return @{} }
+  try {
+    $raw = Get-Content -LiteralPath $AlertStatePath -Raw | ConvertFrom-Json
+    $state = @{}
+    foreach ($property in $raw.PSObject.Properties) {
+      $state[$property.Name] = [string]$property.Value
+    }
+    return $state
+  } catch {
+    return @{}
+  }
+}
+
+function Write-ServiceAlertState {
+  param([hashtable]$State)
+  New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
+  $State | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $AlertStatePath -Encoding UTF8
+}
+
+function Test-ServiceAlertCooldown {
+  param(
+    [string]$DedupeKey,
+    [int]$MinRepeatSeconds = 1800
+  )
+  if ([string]::IsNullOrWhiteSpace($DedupeKey)) { return $false }
+  $state = Read-ServiceAlertState
+  $lastText = ""
+  if ($state.ContainsKey($DedupeKey)) {
+    $lastText = [string]$state[$DedupeKey]
+  }
+  if ([string]::IsNullOrWhiteSpace($lastText)) { return $false }
+  try {
+    $last = [DateTime]::Parse($lastText).ToUniversalTime()
+    return ([DateTime]::UtcNow - $last).TotalSeconds -lt $MinRepeatSeconds
+  } catch {
+    return $false
+  }
+}
+
+function Set-ServiceAlertCooldown {
+  param([string]$DedupeKey)
+  if ([string]::IsNullOrWhiteSpace($DedupeKey)) { return }
+  $state = Read-ServiceAlertState
+  $state[$DedupeKey] = [DateTime]::UtcNow.ToString("o")
+  Write-ServiceAlertState $state
+}
+
+function Flush-ServiceFailureAlerts {
+  if (-not (Test-Path -LiteralPath $AlertSpoolPath)) { return }
+  $lines = @(Get-Content -LiteralPath $AlertSpoolPath -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+  if ($lines.Count -eq 0) { return }
+  $remaining = New-Object System.Collections.Generic.List[string]
+  foreach ($line in $lines) {
+    try {
+      $payload = $line | ConvertFrom-Json
+      $body = $payload | ConvertTo-Json -Depth 10 -Compress
+      $result = Invoke-RestMethod -Uri $ServiceAlertUri -Method Post -ContentType "application/json; charset=utf-8" -Body $body -TimeoutSec 8
+      if ($result.ok -ne $true) {
+        $remaining.Add($line)
+      }
+    } catch {
+      $remaining.Add($line)
+    }
+  }
+  $tempPath = "$AlertSpoolPath.tmp"
+  if ($remaining.Count -gt 0) {
+    Set-Content -LiteralPath $tempPath -Value $remaining -Encoding UTF8
+  } else {
+    Set-Content -LiteralPath $tempPath -Value "" -Encoding UTF8
+  }
+  Move-Item -LiteralPath $tempPath -Destination $AlertSpoolPath -Force
+}
+
+function Write-ServiceFailureAlert {
+  param(
+    [string]$Component,
+    [string]$EventType,
+    [string]$Severity = "critical",
+    [string]$Reason = "unknown",
+    [string]$Action = "",
+    [hashtable]$Details = @{}
+  )
+  $dedupeKey = "$Component`:$EventType`:$Reason"
+  if (Test-ServiceAlertCooldown -DedupeKey $dedupeKey) {
+    Flush-ServiceFailureAlerts
+    return
+  }
+  New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
+  $payload = [ordered]@{
+    id = [guid]::NewGuid().ToString("N")
+    at = [DateTime]::UtcNow.ToString("o")
+    host = $env:COMPUTERNAME
+    component = $Component
+    eventType = $EventType
+    severity = $Severity
+    reason = $Reason
+    action = $Action
+    details = $Details
+    dedupeKey = $dedupeKey
+  }
+  $line = ($payload | ConvertTo-Json -Compress -Depth 10) + [Environment]::NewLine
+  [IO.File]::AppendAllText($AlertSpoolPath, $line, [Text.UTF8Encoding]::new($false))
+  Set-ServiceAlertCooldown -DedupeKey $dedupeKey
+  Flush-ServiceFailureAlerts
 }
 
 function Restart-ManagedTask {
@@ -134,6 +244,7 @@ function Test-RecoveryAllowed {
     reason = $Reason
     activeCalls = $activeCalls
   }
+  Write-ServiceFailureAlert -Component "watchdog" -EventType "recovery_deferred_active_call" -Severity "warning" -Reason $Reason -Action "defer_recovery_until_call_finishes" -Details @{ activeCalls = $activeCalls }
   return $false
 }
 
@@ -188,8 +299,10 @@ try {
 
   try {
     Ensure-SipFirewallRules
+    Flush-ServiceFailureAlerts
   } catch {
     Write-WatchdogEvent "firewall_reconcile_failed" @{ errorType = $_.Exception.GetType().Name }
+    Write-ServiceFailureAlert -Component "windows-firewall" -EventType "firewall_reconcile_failed" -Reason $_.Exception.GetType().Name -Action "watchdog_will_continue_other_checks"
   }
 
   if (Test-Path -LiteralPath $FullRestartRequest) {
@@ -203,6 +316,7 @@ try {
 
     Remove-Item -LiteralPath $FullRestartRequest -Force
     Write-WatchdogEvent "full_system_restart_started" @{}
+    Write-ServiceFailureAlert -Component "agenticmail-stack" -EventType "full_system_restart_requested" -Severity "warning" -Reason "full_system_restart_request_marker" -Action "restart_all_agenticmail_services"
     foreach ($taskName in @(
       "AgenticMail-SIP-Sidecar-Service",
       "AgenticMail-Exchange-EWS-Service",
@@ -292,6 +406,7 @@ try {
       Write-WatchdogEvent "tnved_restart_started" @{
         reason = if ($tnvedHealth) { "wrong_identity_or_blocked" } else { "health_unreachable" }
       }
+      Write-ServiceFailureAlert -Component "tnved-api" -EventType "tnved_not_ready" -Reason $(if ($tnvedHealth) { "wrong_identity_or_blocked" } else { "health_unreachable" }) -Action "restart_sip_sidecar_and_tnved"
       $null = Restart-ManagedTask "AgenticMail-SIP-Sidecar-Service"
       $tnvedHealth = Wait-LocalHealth -Uri $TnvedHealthUri -WaitSeconds 60 -Ready {
         param($value)
@@ -327,6 +442,7 @@ try {
       exit 0
     }
     Write-WatchdogEvent "api_restart_started" @{ reason = "api_liveness_unreachable" }
+    Write-ServiceFailureAlert -Component "agenticmail-api" -EventType "api_liveness_unreachable" -Reason "health_live_check_failed" -Action "restart_agenticmail_api"
     if (-not (Restart-ManagedTask "AgenticMail-API-Service")) {
       $null = & $StartLocalScript
     }
@@ -356,6 +472,7 @@ try {
     Write-WatchdogEvent "stalwart_restart_started" @{
       reason = if ($apiHealth) { "stalwart_health_degraded" } else { "api_dependency_health_timeout" }
     }
+    Write-ServiceFailureAlert -Component "stalwart-mail" -EventType "stalwart_health_unavailable" -Reason $(if ($apiHealth) { "stalwart_health_degraded" } else { "api_dependency_health_timeout" }) -Action "restart_stalwart"
     if (-not (Restart-ManagedTask "AgenticMail-Stalwart-Service")) {
       $null = & $StartLocalScript
     }
@@ -381,6 +498,7 @@ try {
     Write-WatchdogEvent "exchange_restart_started" @{
       reason = if ($exchangeHealth) { "exchange_health_blocked" } else { "exchange_health_unreachable" }
     }
+    Write-ServiceFailureAlert -Component "exchange-ews-sidecar" -EventType "exchange_health_unavailable" -Reason $(if ($exchangeHealth) { "exchange_health_blocked" } else { "exchange_health_unreachable" }) -Action "restart_exchange_ews_sidecar"
     if (-not (Restart-ManagedTask "AgenticMail-Exchange-EWS-Service")) {
       $null = & $StartExchangeScript
     }
@@ -390,6 +508,7 @@ try {
     }
     $exchangeRestarted = $true
     Write-WatchdogEvent "exchange_restart_succeeded" @{}
+    Flush-ServiceFailureAlerts
   }
 
   $health = $null
@@ -435,6 +554,7 @@ try {
     exit 0
   }
   Write-WatchdogEvent "restart_started" @{ reason = $reason }
+  Write-ServiceFailureAlert -Component "sip-sidecar-199" -EventType "sip_health_unavailable" -Reason $reason -Action "restart_sip_sidecar"
 
   if (-not (Restart-ManagedTask "AgenticMail-SIP-Sidecar-Service")) {
     $null = & $StartScript
@@ -453,6 +573,7 @@ try {
   } | ConvertTo-Json
 } catch {
   Write-WatchdogEvent "restart_failed" @{ errorType = $_.Exception.GetType().Name }
+  Write-ServiceFailureAlert -Component "watchdog" -EventType "recovery_failed" -Reason $_.Exception.GetType().Name -Action "manual_attention_required"
   [pscustomobject]@{
     status = "failed"
     errorType = $_.Exception.GetType().Name

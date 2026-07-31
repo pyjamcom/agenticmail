@@ -29,7 +29,7 @@ def now_iso() -> str:
 
 def read_json(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return dict(fallback)
 
@@ -92,8 +92,13 @@ class ExchangeEwsSidecar:
     def __init__(self, config_path: Path) -> None:
         self.config_path = config_path
         self.config = read_json(config_path, {})
-        self.state_path = Path(self.config["statePath"])
-        self.audit_path = Path(self.config["auditPath"])
+        config_dir = config_path.parent
+        self.state_path = Path(
+            self.config.get("statePath") or config_dir / "exchange-sales" / "state.json"
+        )
+        self.audit_path = Path(
+            self.config.get("auditPath") or config_dir / "exchange-sales" / "events.jsonl"
+        )
         self.state = read_json(self.state_path, {"initialized": False, "seenIds": []})
         self.seen_ids = set(str(value) for value in self.state.get("seenIds", []))
         self.stop_event = threading.Event()
@@ -130,6 +135,14 @@ class ExchangeEwsSidecar:
                 "lastError": None,
                 "drawersWritten": int(self.state.get("callArchiveDrawersWritten", 0)),
             },
+            "serviceAlerts": {
+                "enabled": False,
+                "status": "disabled",
+                "recipient": None,
+                "lastSentAt": None,
+                "lastError": None,
+                "sentCount": int(self.state.get("serviceAlertsSent", 0)),
+            },
         }
         self.password = decrypt_dpapi_secret(Path(self.config["secretRef"]))
         self.agentic_config = read_json(Path(self.config["agenticmailConfigPath"]), {})
@@ -158,6 +171,30 @@ class ExchangeEwsSidecar:
                 "status": "starting",
                 "sender": self.transcript_email_sender,
                 "recipient": self.transcript_email_recipient,
+            })
+        service_alerts = self.config.get("serviceAlerts") or {}
+        self.service_alerts_enabled = service_alerts.get("enabled", self.transcript_email_enabled) is True
+        self.service_alert_recipient = str(
+            service_alerts.get("recipient") or self.transcript_email_recipient or ""
+        ).strip().lower()
+        self.service_alert_allowed_recipients = {
+            str(value).strip().lower()
+            for value in service_alerts.get("allowedRecipients") or self.transcript_email_allowed_recipients
+            if str(value).strip()
+        }
+        self.service_alert_min_repeat_seconds = max(
+            60,
+            int(service_alerts.get("minRepeatSeconds") or 1800),
+        )
+        if self.service_alerts_enabled:
+            if not self.service_alert_recipient:
+                raise RuntimeError("Service alert recipient is missing")
+            if self.service_alert_recipient not in self.service_alert_allowed_recipients:
+                raise RuntimeError("Service alert recipient is not allowlisted")
+            self.health["serviceAlerts"].update({
+                "enabled": True,
+                "status": "ok",
+                "recipient": self.service_alert_recipient,
             })
         palace_path = str(os.getenv("INCOMING_CALL_MEMPALACE_PATH") or "").strip()
         self.call_archiver = (
@@ -241,6 +278,8 @@ class ExchangeEwsSidecar:
                 "draftsCreated": self.health["draftsCreated"],
                 "transcriptEmailsSent": self.health["transcriptEmail"]["sentCount"],
                 "callArchiveDrawersWritten": self.health["callArchive"]["drawersWritten"],
+                "serviceAlertsSent": self.health["serviceAlerts"]["sentCount"],
+                "serviceAlertKeys": self.state.get("serviceAlertKeys", {}),
                 "updatedAt": now_iso(),
             }
             write_json(self.state_path, value)
@@ -349,6 +388,88 @@ class ExchangeEwsSidecar:
             missionHash=hashlib.sha256(mission_id.encode("utf-8")).hexdigest()[:16],
             exchangeRefHash=ref_hash,
             bodyLength=len(text_body),
+        )
+        self._save_state()
+        return ref_hash, True
+
+    def _alert_recently_sent(self, dedupe_key: str) -> bool:
+        if not dedupe_key:
+            return False
+        keys = self.state.setdefault("serviceAlertKeys", {})
+        last_text = str(keys.get(dedupe_key) or "")
+        if not last_text:
+            return False
+        try:
+            last_dt = datetime.fromisoformat(last_text)
+        except Exception:
+            return False
+        age = datetime.now(timezone.utc) - last_dt
+        return age.total_seconds() < self.service_alert_min_repeat_seconds
+
+    @staticmethod
+    def _compact_alert_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)[:4000]
+        return str(value).strip()[:4000]
+
+    def send_service_alert_email(self, payload: dict[str, Any]) -> tuple[str, bool]:
+        if not self.service_alerts_enabled:
+            raise RuntimeError("Service alert delivery is disabled")
+        component = str(payload.get("component") or "unknown_service").strip()[:120]
+        event_type = str(payload.get("eventType") or "service_failure").strip()[:120]
+        severity = str(payload.get("severity") or "critical").strip()[:40]
+        reason = str(payload.get("reason") or "unknown").strip()[:500]
+        action = str(payload.get("action") or "").strip()[:500]
+        host = str(payload.get("host") or os.environ.get("COMPUTERNAME") or "").strip()[:120]
+        occurred_at = str(payload.get("at") or now_iso()).strip()[:80]
+        details = self._compact_alert_value(payload.get("details"))
+        dedupe_key = str(payload.get("dedupeKey") or f"{component}:{event_type}:{reason}").strip()[:300]
+        ref_hash = hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
+        if self._alert_recently_sent(dedupe_key):
+            return ref_hash, False
+
+        from exchangelib import Mailbox, Message
+
+        subject_reason = reason if reason else event_type
+        subject = f"[AgenticMail 199] Сбой сервиса: {component} — {subject_reason}"[:255]
+        lines = [
+            "Обнаружена поломка сервиса голосового контура 199.",
+            "",
+            f"Сервис: {component}",
+            f"Событие: {event_type}",
+            f"Критичность: {severity}",
+            f"Причина: {reason}",
+            f"Время: {occurred_at}",
+        ]
+        if host:
+            lines.append(f"Хост: {host}")
+        if action:
+            lines.append(f"Действие восстановления: {action}")
+        if details:
+            lines.extend(["", "Детали:", details])
+        message = Message(
+            account=self.account,
+            subject=subject,
+            body="\n".join(lines),
+            to_recipients=[Mailbox(email_address=self.service_alert_recipient)],
+        )
+        message.send_and_save()
+        self.state.setdefault("serviceAlertKeys", {})[dedupe_key] = now_iso()
+        with self.lock:
+            alert_health = self.health["serviceAlerts"]
+            alert_health["sentCount"] += 1
+            alert_health["lastSentAt"] = now_iso()
+            alert_health["lastError"] = None
+            alert_health["status"] = "ok"
+        self.log(
+            "service_alert_email_sent",
+            component=component,
+            eventType=event_type,
+            severity=severity,
+            recipientHash=hashlib.sha256(self.service_alert_recipient.encode("utf-8")).hexdigest()[:16],
+            alertRefHash=ref_hash,
         )
         self._save_state()
         return ref_hash, True
@@ -573,17 +694,39 @@ class ExchangeEwsSidecar:
 
 def start_health_server(sidecar: ExchangeEwsSidecar) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def do_GET(self) -> None:  # noqa: N802
             if self.path != "/health":
                 self.send_response(404)
                 self.end_headers()
                 return
-            payload = json.dumps(sidecar.public_health(), ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._send_json(200, sidecar.public_health())
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path != "/alerts/service-failure":
+                self._send_json(404, {"ok": False, "error": "not_found"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                if length <= 0 or length > 64_000:
+                    raise ValueError("invalid request body size")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                ref_hash, sent = sidecar.send_service_alert_email(payload)
+                self._send_json(200, {"ok": True, "sent": sent, "alertRefHash": ref_hash})
+            except Exception as exc:
+                message = safe_error(exc)
+                with sidecar.lock:
+                    sidecar.health["serviceAlerts"]["status"] = "degraded"
+                    sidecar.health["serviceAlerts"]["lastError"] = message
+                sidecar.log("service_alert_email_failed", errorType=type(exc).__name__, message=message)
+                self._send_json(500, {"ok": False, "errorType": type(exc).__name__})
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return

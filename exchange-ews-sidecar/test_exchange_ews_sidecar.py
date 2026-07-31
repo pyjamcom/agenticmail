@@ -68,9 +68,14 @@ class ExchangeEwsSidecarTests(unittest.TestCase):
         self.sidecar.account = FakeAccount()
         self.sidecar.transcript_email_enabled = True
         self.sidecar.transcript_email_recipient = "pavel@nbr.ru"
+        self.sidecar.service_alerts_enabled = True
+        self.sidecar.service_alert_recipient = "pavel@nbr.ru"
+        self.sidecar.service_alert_min_repeat_seconds = 1800
+        self.sidecar.state = {"serviceAlertKeys": {}}
         self.sidecar.lock = threading.Lock()
         self.sidecar.health = {
             "transcriptEmail": {"sentCount": 0, "lastSentAt": None},
+            "serviceAlerts": {"sentCount": 0, "lastSentAt": None, "lastError": None, "status": "ok"},
         }
         self.sidecar.log = lambda *_args, **_kwargs: None
         self.sidecar._save_state = lambda: None
@@ -97,6 +102,33 @@ class ExchangeEwsSidecarTests(unittest.TestCase):
         self.assertEqual(sent.subject, payload["subject"])
         self.assertIsInstance(sent.body, FakeHTMLBody)
         self.assertEqual(sent.body, payload["htmlBody"])
+        self.assertEqual(sent.to_recipients[0].email_address, "pavel@nbr.ru")
+
+    def test_sends_service_alert_once_per_dedupe_key(self):
+        payload = {
+            "component": "sip-sidecar",
+            "eventType": "registration_missing",
+            "severity": "critical",
+            "reason": "registered=false",
+            "action": "restart_sip_sidecar",
+            "dedupeKey": "sip-sidecar:registration_missing",
+            "details": {"status": "blocked", "registered": False},
+        }
+        fake_module = types.SimpleNamespace(Mailbox=FakeMailbox, Message=FakeMessage)
+
+        with patch.dict(sys.modules, {"exchangelib": fake_module}):
+            first_ref, first_sent = self.sidecar.send_service_alert_email(payload)
+            second_ref, second_sent = self.sidecar.send_service_alert_email(payload)
+
+        self.assertTrue(first_sent)
+        self.assertFalse(second_sent)
+        self.assertEqual(first_ref, second_ref)
+        self.assertEqual(FakeMessage.send_count, 1)
+        self.assertEqual(self.sidecar.health["serviceAlerts"]["sentCount"], 1)
+        sent = self.sidecar.account.sent.items[0]
+        self.assertIn("Сбой сервиса", sent.subject)
+        self.assertIn("sip-sidecar", sent.body)
+        self.assertIn("registered=false", sent.body)
         self.assertEqual(sent.to_recipients[0].email_address, "pavel@nbr.ru")
 
 

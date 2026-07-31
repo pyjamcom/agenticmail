@@ -24,6 +24,26 @@ New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 Set-Location -LiteralPath $RepoRoot
 $stdoutLog = Join-Path $LogDir "exchange.service.stdout.log"
 $stderrLog = Join-Path $LogDir "exchange.service.stderr.log"
+
+$healthPort = 3901
+try {
+  $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+  if ($config.healthPort) { $healthPort = [int]$config.healthPort }
+} catch {
+  $healthPort = 3901
+}
+try {
+  $listeners = Get-NetTCPConnection -LocalPort $healthPort -State Listen -ErrorAction SilentlyContinue
+  foreach ($listener in $listeners) {
+    $owner = [int]$listener.OwningProcess
+    if ($owner -gt 0 -and $owner -ne $PID) {
+      Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+    }
+  }
+} catch {
+  # Starting the sidecar will fail clearly if the port is still occupied.
+}
+
 $arguments = @($ScriptPath, "--config", $ConfigPath)
 $process = Start-Process -FilePath $PythonExe -ArgumentList $arguments -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -WindowStyle Hidden -Wait -PassThru
 exit $process.ExitCode
